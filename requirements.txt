@@ -1,0 +1,21 @@
+# Stet v1.0 — Python dependencies
+# Install with: pip install -r requirements.txt
+
+# GUI framework (Qt 6)
+PyQt6>=6.11.0
+
+# Clipboard access
+pyperclip>=1.11.0
+
+# HTTP client (llama.cpp OpenAI-compatible API + streaming)
+requests>=2.34.2
+
+# Spell-checking (unknown-word detection for pre-filter)
+pyspellchecker>=0.9.0
+
+# ── Build / release only (uncomment when building) ──────────────────────────
+# pyinstaller>=6.0
+
+# ── Dev / tests only ────────────────────────────────────────────────────────
+# pytest>=7
+# pytest-qt>=4

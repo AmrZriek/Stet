@@ -1,0 +1,10 @@
+<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <!-- Dark Gray Background -->
+    <rect width="100" height="100" fill="#121315"/>
+    
+    <!-- Massive Caret (Amber/Gold) -->
+    <polygon points="50,17.5 15,62.5 30,62.5 50,36.5 70,62.5 85,62.5" fill="#d4a373"/>
+    
+    <!-- Terminal Underscore (Primary Text Off-White) -->
+    <rect x="20" y="72.5" width="60" height="10" fill="#ededee"/>
+</svg>
