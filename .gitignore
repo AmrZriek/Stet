@@ -1,0 +1,61 @@
+# Python
+venv/
+venv_old/
+.coverage
+__pycache__/
+.vscode/
+.ruff_cache/
+*.pyc
+*.log
+
+# App state
+app_debug.log
+server_log.txt
+config.json
+.claude/settings.local.json
+.qwen/
+
+# AI agent files (not for GitHub)
+CLAUDE.md
+context.md
+NEXT_BATCH_ROADMAP.md
+NEXT_BATCH.md
+AGENTS.md
+archive/
+.tmp/
+.opencode/
+.gemini/
+GEMINI.md
+# AGENT_CONTEXT.md is intentionally tracked — it is the shared AI context file
+
+# AI agent worktrees
+.claude/worktrees/
+
+# Model files — too large for git
+llama_cpp/
+llama-*/
+*.gguf
+*.onnx
+*.safetensors
+
+# Build artifacts
+build/
+dist/
+Stet_Release/
+.graphify/
+graphify-out/
+*.spec
+*.zip
+
+# Tests — centralized cache dir (pytest.ini sets cache_dir = .pytest_cache)
+.pytest_cache/
+tests/temp_e2e_launch/
+scripts/ci_checks/temp_e2e_launch/
+
+# AI agent files (local development workflows)
+.agents/
+
+# Documentation and markdown files (local-only)
+docs/
+*.md
+!README.md

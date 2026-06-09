@@ -1,0 +1,40 @@
+# Build artifacts
+build/
+dist/
+*.spec
+*.zip
+
+# Python
+venv/
+venv_old/
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.pytest_cache/
+
+# Logs
+*.log
+app_debug.log
+server_log.txt
+
+# Model files
+llama-*/
+*.gguf
+*.onnx
+*.safetensors
+
+# Graphify output
+graphify-out/
+
+# Agent internals (don't search these)
+.opencode/
+archive/
+.tmp/
+tests/temp_e2e_launch/
+
+# IDE / editor
+.vscode/
+
+# App state
+config.json
