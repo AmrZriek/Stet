@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -91,15 +91,36 @@ DEFAULT_CONFIG: dict = {
     "server_port": 8080,
     "context_size": 12800,
     "gpu_layers": 99,
-    "temperature": 0.1,
+    "threads": -1,
+    "batch_size": 1024,
+    "ubatch_size": 512,
+    "flash_attn": True,
+    "kv_cache_type_k": "q8_0",
+    "kv_cache_type_v": "q8_0",
+    "mtp_enabled": False,
+    "mtp_max_draft": 2,
+    "mtp_min_draft": 0,
+    "temperature": 0.0,
     "top_k": 40,
     "top_p": 0.95,
     "min_p": 0.05,
+    "seed": -1,
+    "typical_p": 1.0,
+    "tfs_z": 1.0,
+    "mirostat": 0,
+    "mirostat_tau": 5.0,
+    "mirostat_eta": 0.1,
     "repeat_penalty": 1.0,
     "frequency_penalty": 0.0,
     "presence_penalty": 0.0,
+    "rope_freq_base": 0.0,
+    "rope_freq_scale": 0.0,
+    "parallel": 4,
+    "threads_batch": -1,
     "keep_model_loaded": True,
     "idle_timeout_seconds": 300,
+    "patch_chunk_size": 40,
+    "cache_prompt": True,
     "recent_models": [],
     # Chat model
     "chat_model_path": "",
@@ -121,7 +142,76 @@ DEFAULT_CONFIG: dict = {
     #   "rewrite_polish" — rewrite for clarity, concision, and impact.
     "streaming_strength": "full_correction",
     # Custom templates: list of {"name": str, "prompt": str}
-    "custom_templates": [],
+    "custom_templates": [
+        {
+            "name": "Clean Up Dictation",
+            "prompt": (
+                "This text was dictated using speech-to-text and contains spoken "
+                "artifacts. Clean it up:\n"
+                "- Remove filler words (um, uh, ah, like, basically, you know, "
+                "I mean, so yeah, kind of, sort of, right, actually, literally, "
+                "honestly, essentially, anyway, well, OK so).\n"
+                "- Remove stuttered or repeated words and false starts.\n"
+                "- Fix run-on sentences — add proper punctuation and split where "
+                "natural pauses should be.\n"
+                "- Fix obvious STT misspellings and missing punctuation.\n"
+                "- Lightly adjust sentence structure ONLY when the original is "
+                "genuinely incoherent. Otherwise keep the author's phrasing.\n"
+                "- Preserve every meaningful idea. Do not summarize or omit.\n"
+                "- Do NOT rewrite from scratch — clean and refine only.\n"
+                "Output ONLY the cleaned text without preamble or explanation."
+            ),
+        },
+        {
+            "name": "Polish and Refine",
+            "prompt": (
+                "Refine this text so it reads as polished, natural prose:\n"
+                "- Fix all spelling, grammar, and punctuation errors.\n"
+                "- Smooth awkward phrasing and improve sentence flow.\n"
+                "- Tighten wordy constructions without losing meaning.\n"
+                "- Choose more precise words where the original is vague.\n"
+                "- Keep the author's voice and tone — do not make casual "
+                "text formal or vice versa.\n"
+                "- Do not add new ideas or remove existing content.\n"
+                "Output ONLY the refined text without preamble or explanation."
+            ),
+        },
+        {
+            "name": "Fix Grammar Only",
+            "prompt": (
+                "Fix ONLY spelling, punctuation, and grammar errors. Do not "
+                "change wording, tone, sentence structure, or meaning in any "
+                "way. If the text is already correct, return it unchanged. "
+                "Output ONLY the corrected text without preamble or explanation."
+            ),
+        },
+        {
+            "name": "Simplify",
+            "prompt": (
+                "Rewrite this text so it is easy to understand:\n"
+                "- Replace jargon and technical terms with plain language.\n"
+                "- Break long, complex sentences into shorter ones.\n"
+                "- Use active voice where possible.\n"
+                "- Remove unnecessary qualifiers and hedging.\n"
+                "- Preserve all key information and the author's intent.\n"
+                "Output ONLY the simplified text without preamble or explanation."
+            ),
+        },
+        {
+            "name": "Professional Tone",
+            "prompt": (
+                "Rewrite this text in a clear, professional tone suitable "
+                "for workplace communication:\n"
+                "- Use a neutral professional register — not stiff or overly "
+                "formal.\n"
+                "- Fix all spelling, grammar, and punctuation errors.\n"
+                "- Remove slang, filler, and overly casual language.\n"
+                "- Keep sentences direct and well-structured.\n"
+                "- Preserve the author's intent and all key information.\n"
+                "Output ONLY the rewritten text without preamble or explanation."
+            ),
+        },
+    ],
     # Chat interaction mode: "single" (each message replaces diff view) or "conversation" (persistent chat history)
     "chat_mode": "conversation",
     # Correction modes: configurable prompt + hallucination threshold per strength.
@@ -129,19 +219,19 @@ DEFAULT_CONFIG: dict = {
     "correction_modes": [
         {
             "name": "Spelling Only",
-            "prompt": "You are a precise, spelling-only text-correction engine. You receive one sentence (or short passage) between <<<START>>> and <<<END>>> markers.\n\n- Fix ONLY clear misspellings, typos, and accidental keyboard slips (e.g., \"libary\" -> \"library\").\n- Do NOT change capitalization, punctuation, grammar, word choice, or word ordering.\n- Repeated words and repeated sentences are user content; they must not be removed.",
+            "prompt": "Fix spelling mistakes. Change nothing else.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix only misspelled words: \"libary\" -> \"library\", \"teh\" -> \"the\".\n2. Copy punctuation, capitalization, grammar, word order, line breaks, and spacing exactly as given.\n3. If nothing is misspelled, copy the text exactly as given.\n4. Repeated words and repeated sentences stay exactly as given.\n5. Copy numbers, names, ALL-CAPS words, code, URLs, and symbols exactly as given. Never fix them.\n6. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>She borowed teh red kayak yesterday.<<<END>>>\nOutput: <<<START>>>She borrowed the red kayak yesterday.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>the quartz lamp works fine fine.<<<END>>>\nOutput: <<<START>>>the quartz lamp works fine fine.<<<END>>>",
             "hallucination_threshold": 0.4,
             "builtin": True,
         },
         {
             "name": "Full Correction",
-            "prompt": "You are a precise grammar and spelling correction engine. You receive one sentence (or short passage) between <<<START>>> and <<<END>>> markers.\n\n- Fix typos, spelling, grammar, punctuation, and capitalization.\n- Improve awkward grammar only when needed for natural, clear writing.\n- Preserve the author's wording, tone, and intent; do NOT rewrite for style or polish.\n- Repeated words and repeated sentences are user content; they must not be removed unless clearly accidental.\n- NEVER alter intentional styling: preserve ALL CAPS words, initialisms (NASA, USA), and Title Case exactly.",
+            "prompt": "Fix spelling, grammar, punctuation, and capitalization. Keep the author's words.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix typos, spelling, grammar, punctuation, and capitalization.\n2. Add missing terminal punctuation (periods or question marks) at the end of sentences that lack it.\n3. Keep the author's wording, tone, and meaning. Do not rewrite for style.\n4. If the text is already correct, copy it exactly as given.\n5. Keep line breaks and spacing exactly as given.\n6. Keep ALL-CAPS words, acronyms (NASA, USA), Title Case, repeated words, and repeated sentences exactly as given.\n7. Copy numbers, names, code, URLs, and symbols exactly as given. Never fix them.\n8. Add nothing else. Remove nothing. Reorder nothing beyond the minimum a fix requires.\n9. Fix ALL instances of a repeated error, not just the first one.\n10. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>him and me was late becuase the traffic.<<<END>>>\nOutput: <<<START>>>He and I were late because of the traffic.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>\nOutput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>",
             "hallucination_threshold": 1.0,
             "builtin": True,
         },
         {
             "name": "Rewrite & Polish",
-            "prompt": "You are an expert editor and text-correction engine. You receive one sentence (or short passage) between <<<START>>> and <<<END>>> markers.\n\n- Fix typos, spelling, grammar, punctuation, and capitalization.\n- Improve clarity, conciseness, flow, and overall impact without changing the author's voice.\n- Preserve the original tone, formality level, rhythm, and casual lingo; do not make casual text formal, and do not make professional text casual.\n- Keep contractions, slang, directness, humor, enthusiasm, and emphasis when they are part of the original voice.\n- Change word choice only when it makes the writing clearer or stronger while preserving the author's core intent, claims, and meaning.\n- Repeated words and repeated sentences are user content; they must not be removed unless clearly accidental.\n- NEVER add new facts, examples, explanations, greetings, sign-offs, or commentary.",
+            "prompt": "Edit the text so it reads clearly and smoothly. Keep the author's voice.\n\nOUTPUT: the edited text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix all spelling, grammar, punctuation, and capitalization.\n2. Improve clarity, flow, and word choice. Cut filler words (um, uh, like, basically, you know, I mean, so yeah, kind of, sort of).\n3. Keep the author's tone: casual stays casual, formal stays formal. Keep slang, contractions, humor, and emphasis.\n4. Keep every fact, claim, name, and number exactly as given. Invent nothing.\n5. Add no greetings, sign-offs, examples, or commentary.\n6. Keep line breaks and paragraph structure as given.\n7. Copy code, URLs, and symbols exactly as given.\n8. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>basically the velvet sofa thing is, it kinda just dont fit in the hallway at all tbh.<<<END>>>\nOutput: <<<START>>>tbh the velvet sofa just doesn't fit in the hallway.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>\nOutput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>",
             "hallucination_threshold": 1.0,
             "builtin": True,
         },
@@ -157,19 +247,71 @@ DEFAULT_CONFIG: dict = {
 
 DEFAULT_TEMPLATES: list[dict[str, str]] = [
     {
-        "name": "Email Polish",
-        "prompt": "Fix spelling and grammar. Ensure a professional, polite, and punchy tone suitable for business correspondence. Keep it concise. Do not add greetings, closings, or extra pleasantries. Output ONLY the corrected text without preamble or explanation.",
+        "name": "Clean Up Dictation",
+        "prompt": (
+            "This text was dictated using speech-to-text and contains spoken "
+            "artifacts. Clean it up:\n"
+            "- Remove filler words (um, uh, ah, like, basically, you know, "
+            "I mean, so yeah, kind of, sort of, right, actually, literally, "
+            "honestly, essentially, anyway, well, OK so).\n"
+            "- Remove stuttered or repeated words and false starts.\n"
+            "- Fix run-on sentences — add proper punctuation and split where "
+            "natural pauses should be.\n"
+            "- Fix obvious STT misspellings and missing punctuation.\n"
+            "- Lightly adjust sentence structure ONLY when the original is "
+            "genuinely incoherent. Otherwise keep the author's phrasing.\n"
+            "- Preserve every meaningful idea. Do not summarize or omit.\n"
+            "- Do NOT rewrite from scratch — clean and refine only.\n"
+            "Output ONLY the cleaned text without preamble or explanation."
+        ),
     },
     {
-        "name": "Executive Briefing",
-        "prompt": "Structure the text into a crisp, professional, and highly actionable executive briefing. Use concise bullet points where appropriate. Retain all key dates, values, and names. Output ONLY the final briefing without preamble or explanation.",
+        "name": "Polish and Refine",
+        "prompt": (
+            "Refine this text so it reads as polished, natural prose:\n"
+            "- Fix all spelling, grammar, and punctuation errors.\n"
+            "- Smooth awkward phrasing and improve sentence flow.\n"
+            "- Tighten wordy constructions without losing meaning.\n"
+            "- Choose more precise words where the original is vague.\n"
+            "- Keep the author's voice and tone — do not make casual "
+            "text formal or vice versa.\n"
+            "- Do not add new ideas or remove existing content.\n"
+            "Output ONLY the refined text without preamble or explanation."
+        ),
     },
     {
-        "name": "Fix Grammar",
-        "prompt": "Fix all spelling, punctuation, and grammar errors. Preserve the original phrasing, vocabulary, and meaning exactly. Do not rephrase or polish. Output ONLY the corrected text without preamble or explanation.",
+        "name": "Fix Grammar Only",
+        "prompt": (
+            "Fix ONLY spelling, punctuation, and grammar errors. Do not "
+            "change wording, tone, sentence structure, or meaning in any "
+            "way. If the text is already correct, return it unchanged. "
+            "Output ONLY the corrected text without preamble or explanation."
+        ),
     },
     {
-        "name": "Rewrite & Polish",
-        "prompt": "Rewrite the text to be clearer, smoother, and more impactful while preserving the author's original tone, formality level, and casual lingo. Do not make casual writing formal or professional writing casual. Improve flow, sentence structure, and word choice only where it strengthens the existing voice. Output ONLY the polished text without preamble or explanation.",
+        "name": "Simplify",
+        "prompt": (
+            "Rewrite this text so it is easy to understand:\n"
+            "- Replace jargon and technical terms with plain language.\n"
+            "- Break long, complex sentences into shorter ones.\n"
+            "- Use active voice where possible.\n"
+            "- Remove unnecessary qualifiers and hedging.\n"
+            "- Preserve all key information and the author's intent.\n"
+            "Output ONLY the simplified text without preamble or explanation."
+        ),
+    },
+    {
+        "name": "Professional Tone",
+        "prompt": (
+            "Rewrite this text in a clear, professional tone suitable "
+            "for workplace communication:\n"
+            "- Use a neutral professional register — not stiff or overly "
+            "formal.\n"
+            "- Fix all spelling, grammar, and punctuation errors.\n"
+            "- Remove slang, filler, and overly casual language.\n"
+            "- Keep sentences direct and well-structured.\n"
+            "- Preserve the author's intent and all key information.\n"
+            "Output ONLY the rewritten text without preamble or explanation."
+        ),
     },
 ]

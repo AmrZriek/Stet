@@ -16,7 +16,7 @@ Usage
 Requirements
 ------------
     pip install -r requirements.txt
-    pip install nuitka
+    pip install pyinstaller
     Windows: Visual Studio Build Tools (MSVC) — install with:
         winget install Microsoft.VisualStudio.2022.BuildTools
 """
@@ -59,9 +59,9 @@ PLATFORM = {
 }.get(sys.platform, sys.platform)
 
 MAIN_SCRIPT = ROOT / "stet" / "main.py"
-UPDATER_SCRIPT = ROOT / "update.py"
-INSTALLER_SCRIPT = ROOT / "windows_installer_payload.py"
-UNINSTALLER_SCRIPT = ROOT / "uninstall.py"
+UPDATER_SCRIPT = ROOT / "stet" / "update.py"
+INSTALLER_SCRIPT = ROOT / "stet" / "windows_installer_payload.py"
+UNINSTALLER_SCRIPT = ROOT / "stet" / "uninstall.py"
 ICON_ICO = ROOT / "logo.ico"
 ICON_PNG = ROOT / "logo.png"
 LICENSE_FILE = ROOT / "LICENSE"
@@ -207,80 +207,44 @@ def _sha256(filepath: Path) -> str:
     return h.hexdigest()
 
 
-# ── Nuitka commands ──────────────────────────────────────────────────────────
+# ── PyInstaller commands ─────────────────────────────────────────────────────────
 
-def _base_nuitka_cmd(
+def _base_pyinstaller_cmd(
     output_name: str,
     artifacts_dir: Path,
     *,
     version: str = "",
-    mode: str = "standalone",
-    pyqt6: bool = False,
+    mode: str = "onedir",
     console: str = "disable",
     product_name: str = "Stet",
     description: str = "Stet - AI Writing Assistant",
     extra_flags: list[str] | None = None,
 ) -> list:
-    """Build a Nuitka command with shared flags across all build targets.
-
-    Args:
-        output_name: Output executable name (e.g. "Stet", "StetUpdater").
-        artifacts_dir: Directory for Nuitka output.
-        version: Version string for Windows resource metadata.
-        mode: "standalone" or "onefile".
-        pyqt6: Enable PyQt6 plugin.
-        console: Console mode — "disable", "force", or "attach".
-        product_name: Windows product name metadata.
-        description: Windows file description metadata.
-        extra_flags: Additional Nuitka flags appended before the entry point.
-    """
     cmd = [
-        sys.executable, "-m", "nuitka",
-        f"--{mode}",
-        "--assume-yes-for-downloads",
-        "--python-flag=no_warnings",
-        "--noinclude-default-mode=error",
-        "--remove-output",
-        f"--output-dir={artifacts_dir}",
-        f"--output-filename={output_name}",
+        sys.executable, "-m", "PyInstaller",
+        "-y",
+        "--clean",
+        f"--workpath={artifacts_dir / 'build'}",
+        f"--distpath={artifacts_dir}",
+        f"--name={output_name}",
     ]
 
-    if pyqt6:
-        cmd.insert(3, "--enable-plugin=pyqt6")
+    if mode == "onefile":
+        cmd.append("--onefile")
+    else:
+        cmd.append("--onedir")
 
-    if PLATFORM == "Windows":
-        rv = _windows_resource_version(version or _get_version())
-        if _check_msvc_available():
-            cmd.append("--msvc=latest")
-        else:
-            if mode == "standalone":
-                print("[build] WARNING: MSVC not found — falling back to MinGW.")
-                print("[build]   MinGW executables are frequently flagged by Windows Defender.")
-                print("[build]   Install MSVC: winget install Microsoft.VisualStudio.2022.BuildTools")
-            cmd.append("--mingw64")
-        cmd.extend([
-            "--lto=yes",
-            f"--windows-console-mode={console}",
-        ])
-        
-        cmd.extend([
-            "--company-name=Stet",
-            f"--product-name={product_name}",
-            f"--file-version={rv}",
-            f"--product-version={rv}",
-            f"--file-description={description}",
-        ])
-            
-        if ICON_ICO.exists():
-            cmd.append(f"--windows-icon-from-ico={ICON_ICO}")
+    if console == "disable":
+        cmd.append("--noconsole")
+        if PLATFORM == "macOS":
+            cmd.append("--windowed")
+    else:
+        cmd.append("--console")
 
-    elif PLATFORM == "macOS" and mode == "standalone":
-        cmd.extend([
-            "--macos-create-app-bundle",
-            "--macos-app-name=Stet",
-        ])
-        if ICON_PNG.exists():
-            cmd.append(f"--macos-app-icon={ICON_PNG}")
+    if PLATFORM == "Windows" and ICON_ICO.exists():
+        cmd.append(f"--icon={ICON_ICO}")
+    elif PLATFORM == "macOS" and ICON_PNG.exists():
+        cmd.append(f"--icon={ICON_PNG}")
 
     if extra_flags:
         cmd.extend(extra_flags)
@@ -288,21 +252,24 @@ def _base_nuitka_cmd(
     return cmd
 
 
-def _nuitka_cmd(version: str, artifacts_dir: Path) -> list:
-    """Build the Nuitka command for the main Stet application."""
+def _pyinstaller_cmd(version: str, artifacts_dir: Path) -> list:
     extra = []
+    sep = os.pathsep
     for asset in ("logo.ico", "logo.png"):
         src = ROOT / asset
         if src.exists():
-            extra.append(f"--include-data-files={src}={asset}")
+            extra.append(f"--add-data={src}{sep}.")
 
-    cmd = _base_nuitka_cmd(
+    cmd = _base_pyinstaller_cmd(
         "Stet", artifacts_dir, version=version,
-        mode="standalone", pyqt6=True, console="disable",
+        mode="onedir", console="disable",
         product_name="Stet", description="Stet - AI Writing Assistant",
         extra_flags=[
-            "--include-package=stet",
-            "--include-package-data=stet",
+            f"--add-data={ROOT / 'stet'}{sep}stet",
+            "--hidden-import=PyQt6",
+            "--hidden-import=requests",
+            "--hidden-import=pyperclip",
+            "--hidden-import=spellchecker",
             *extra,
         ],
     )
@@ -310,9 +277,8 @@ def _nuitka_cmd(version: str, artifacts_dir: Path) -> list:
     return cmd
 
 
-def _updater_nuitka_cmd(version: str, artifacts_dir: Path) -> list:
-    """Build the Nuitka command for the StetUpdater helper (--onefile)."""
-    cmd = _base_nuitka_cmd(
+def _updater_pyinstaller_cmd(version: str, artifacts_dir: Path) -> list:
+    cmd = _base_pyinstaller_cmd(
         "StetUpdater", artifacts_dir, version=version,
         mode="onefile", console="force",
         product_name="Stet Updater", description="Stet auto-updater utility",
@@ -321,17 +287,17 @@ def _updater_nuitka_cmd(version: str, artifacts_dir: Path) -> list:
     return cmd
 
 
-def _installer_nuitka_cmd(version: str, artifacts_dir: Path, portable_zip: Path) -> list:
-    """Build the Nuitka command for the self-contained StetSetup installer (--onefile)."""
-    extra = [f"--include-data-files={portable_zip}=stet_portable.zip"]
+def _installer_pyinstaller_cmd(version: str, artifacts_dir: Path, portable_zip: Path) -> list:
+    sep = os.pathsep
+    extra = [f"--add-data={portable_zip}{sep}."]
     for asset in ("logo.ico", "logo.png"):
         src = ROOT / asset
         if src.exists():
-            extra.append(f"--include-data-files={src}={asset}")
+            extra.append(f"--add-data={src}{sep}.")
 
-    cmd = _base_nuitka_cmd(
+    cmd = _base_pyinstaller_cmd(
         "StetSetup", artifacts_dir, version=version,
-        mode="onefile", pyqt6=True, console="disable",
+        mode="onefile", console="disable",
         product_name="Stet Setup",
         description="Stet desktop writing assistant installer",
         extra_flags=extra,
@@ -340,9 +306,8 @@ def _installer_nuitka_cmd(version: str, artifacts_dir: Path, portable_zip: Path)
     return cmd
 
 
-def _uninstaller_nuitka_cmd(version: str, artifacts_dir: Path) -> list:
-    """Build the Nuitka command for StetUninstall.exe (--onefile, no PyQt6)."""
-    cmd = _base_nuitka_cmd(
+def _uninstaller_pyinstaller_cmd(version: str, artifacts_dir: Path) -> list:
+    cmd = _base_pyinstaller_cmd(
         "StetUninstall", artifacts_dir, version=version,
         mode="onefile", console="disable",
         product_name="Stet Uninstaller",
@@ -350,7 +315,6 @@ def _uninstaller_nuitka_cmd(version: str, artifacts_dir: Path) -> list:
     )
     cmd.append(str(UNINSTALLER_SCRIPT))
     return cmd
-
 
 # ── Release config & launchers ───────────────────────────────────────────────
 
@@ -653,28 +617,25 @@ class PlatformBuilder:
 
     def build_app(self):
         total = self._total_steps()
-        banner(f"Step 1 / {total} — Compile Stet (Nuitka → native binary)")
-        cmd = _nuitka_cmd(self.version, self.artifacts_dir)
+        banner(f"Step 1 / {total} — Compile Stet (PyInstaller → native binary)")
+        cmd = _pyinstaller_cmd(self.version, self.artifacts_dir)
         run(cmd)
 
-        # Nuitka standalone output is a .dist folder (or .app on macOS)
         if PLATFORM == "macOS":
-            # Nuitka creates Stet.app in the artifacts dir
             app_bundle = self.artifacts_dir / "Stet.app"
-            if not app_bundle.exists():
-                # Try the .dist fallback (older Nuitka versions)
-                dist_dir = self.artifacts_dir / (MAIN_SCRIPT.stem + ".dist")
+            if app_bundle.exists():
+                shutil.copytree(app_bundle, self.portable_dir / "Stet.app", dirs_exist_ok=True)
+            else:
+                dist_dir = self.artifacts_dir / "Stet"
                 if dist_dir.exists():
                     shutil.copytree(dist_dir, self.portable_dir, dirs_exist_ok=True)
                 else:
-                    print("ERROR: Nuitka output not found (expected Stet.app or main.dist).")
+                    print("ERROR: PyInstaller output not found.")
                     sys.exit(1)
-            else:
-                shutil.copytree(app_bundle, self.portable_dir / "Stet.app", dirs_exist_ok=True)
         else:
-            dist_dir = self.artifacts_dir / (MAIN_SCRIPT.stem + ".dist")
+            dist_dir = self.artifacts_dir / "Stet"
             if not dist_dir.exists():
-                print(f"ERROR: Nuitka output not found at {dist_dir}")
+                print(f"ERROR: PyInstaller output not found at {dist_dir}")
                 sys.exit(1)
             shutil.copytree(dist_dir, self.portable_dir, dirs_exist_ok=True)
 
@@ -685,7 +646,7 @@ class PlatformBuilder:
     def build_updater(self):
         total = self._total_steps()
         banner(f"Step 2 / {total} — Compile StetUpdater (onefile)")
-        cmd = _updater_nuitka_cmd(self.version, self.artifacts_dir)
+        cmd = _updater_pyinstaller_cmd(self.version, self.artifacts_dir)
         run(cmd)
         updater_name = "StetUpdater.exe" if PLATFORM == "Windows" else "StetUpdater"
         updater_exe = self.artifacts_dir / updater_name
@@ -705,7 +666,7 @@ class PlatformBuilder:
             return
         total = self._total_steps()
         banner(f"Step 2.5 / {total} — Compile StetUninstall (onefile)")
-        cmd = _uninstaller_nuitka_cmd(self.version, self.artifacts_dir)
+        cmd = _uninstaller_pyinstaller_cmd(self.version, self.artifacts_dir)
         run(cmd)
         exe_name = "StetUninstall.exe"
         exe_path = self.artifacts_dir / exe_name
@@ -827,7 +788,7 @@ class PlatformBuilder:
             print("  ERROR: stet_portable.zip not found — cannot build installer")
             return
 
-        cmd = _installer_nuitka_cmd(self.version, self.artifacts_dir, zip_path)
+        cmd = _installer_pyinstaller_cmd(self.version, self.artifacts_dir, zip_path)
         try:
             run(cmd)
         except subprocess.CalledProcessError as e:

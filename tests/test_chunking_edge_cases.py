@@ -73,11 +73,11 @@ def test_chunking_sentence_boundary_forces_split_over_budget():
 
 
 def test_chunking_forces_split_on_newlines():
-    """Paragraph breaks (double newlines) and single newlines force split even when max_words is large enough."""
+    """Only blank-line paragraph breaks (\n\n) force split; single newlines pack into the same chunk."""
     text = "Line 1.\n\nLine 2.\nLine 3."
     chunks = _chunk_text_by_sentences(text, 100)
-    # Double newline and single newline both split
-    assert chunks == [("Line 1.", "\n\n"), ("Line 2.", "\n"), ("Line 3.", "")]
+    # Blank-line break splits; single newline does not
+    assert chunks == [("Line 1.", "\n\n"), ("Line 2.\nLine 3.", "")]
 
 
 def test_chunking_carriage_returns():

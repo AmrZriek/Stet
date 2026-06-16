@@ -198,7 +198,9 @@ class TestStartupCommand:
 
         monkeypatch.setattr(sys, "frozen", False, raising=False)
         monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
-        main_py = tmp_path / "main.py"
+        stet_dir = tmp_path / "stet"
+        stet_dir.mkdir()
+        main_py = stet_dir / "main.py"
         main_py.write_text("pass")
         monkeypatch.setattr("stet.core.app.SCRIPT_DIR", tmp_path)
         result = _startup_command()
@@ -585,10 +587,10 @@ class TestStetAppRebuildRecentMenu:
     def test_rebuild_recent_menu(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
-        menu = MagicMock()
-        app._rebuild_recent_menu(menu)
-        menu.addSeparator.assert_called()
-        assert menu.addAction.call_count >= 2
+        app._llm_menu = MagicMock()
+        app._rebuild_llm_menu()
+        app._llm_menu.addSeparator.assert_called()
+        assert app._llm_menu.addAction.call_count >= 2
 
 
 class TestStetAppNotifications:
@@ -1283,10 +1285,28 @@ class TestStetAppCaptureSelection:
         monkeypatch.setattr("time.sleep", lambda t: None)
         
         res = app._capture_selection()
-        
+
         assert res == "new selection"
         mock_terminal_guard.assert_called_once()
         mock_send_chord.assert_called_once()
+
+    def test_capture_selection_polling_constants(self):
+        """Verify the polling tunables are set to the latency-reduced values.
+
+        Worst-case wait: 50 ms + 12 * 15 ms = 230 ms (was 680 ms).
+        """
+        from stet.core.app import StetApp
+
+        assert StetApp._CLIPBOARD_POLL_INTERVAL == 0.015
+        assert StetApp._CLIPBOARD_MAX_POLLS == 12
+        assert StetApp._CLIPBOARD_INITIAL_GRACE == 0.05
+
+        # Sanity-check the worst-case math
+        worst_case = (
+            StetApp._CLIPBOARD_INITIAL_GRACE
+            + StetApp._CLIPBOARD_MAX_POLLS * StetApp._CLIPBOARD_POLL_INTERVAL
+        )
+        assert worst_case <= 0.25  # well under the old 680 ms ceiling
 
 
 class TestStetAppTrayActivated:

@@ -184,14 +184,81 @@ class ParametersPage(QWidget):
     def _build_ui(self):
         form = make_scrollable_page("Model Parameters", self)
 
+        # Helper for a labeled grid cell
+        def _grid_cell(label: str, widget) -> QWidget:
+            cell = QWidget()
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(4)
+            lbl = QLabel(label)
+            lbl.setObjectName("fieldGroupLabel")
+            cell_lay.addWidget(lbl)
+            cell_lay.addWidget(widget)
+            return cell
+
+        # --- Architecture Section ---
+        arch_title = QLabel("Architecture")
+        arch_title.setObjectName("pageSubtitle")
+        form.addWidget(arch_title)
+
         self.dialog.ctx_spin = no_scroll(QSpinBox())
         self.dialog.ctx_spin.setRange(512, 131072)
         self.dialog.ctx_spin.setSingleStep(512)
         self.dialog.ctx_spin.setFixedWidth(100)
 
-        self.dialog.gpu_spin = no_scroll(QSpinBox())
-        self.dialog.gpu_spin.setRange(0, 999)
-        self.dialog.gpu_spin.setFixedWidth(100)
+        self.dialog.rope_base_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.rope_base_spin.setRange(0.0, 10000000.0)
+        self.dialog.rope_base_spin.setSingleStep(1000.0)
+        self.dialog.rope_base_spin.setDecimals(1)
+        self.dialog.rope_base_spin.setFixedWidth(100)
+        self.dialog.rope_base_spin.setSpecialValueText("Auto (0.0)")
+
+        self.dialog.rope_scale_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.rope_scale_spin.setRange(0.0, 1000.0)
+        self.dialog.rope_scale_spin.setSingleStep(0.1)
+        self.dialog.rope_scale_spin.setDecimals(2)
+        self.dialog.rope_scale_spin.setFixedWidth(100)
+        self.dialog.rope_scale_spin.setSpecialValueText("Auto (0.0)")
+
+        self.dialog.flash_attn_cb = QCheckBox("Flash Attention")
+        self.dialog.mtp_cb = QCheckBox("MTP Speculative Decoding")
+
+        self.dialog.mtp_max_spin = no_scroll(QSpinBox())
+        self.dialog.mtp_max_spin.setRange(1, 16)
+        self.dialog.mtp_max_spin.setFixedWidth(100)
+
+        self.dialog.mtp_min_spin = no_scroll(QSpinBox())
+        self.dialog.mtp_min_spin.setRange(0, 16)
+        self.dialog.mtp_min_spin.setFixedWidth(100)
+
+        self.dialog.mtp_max_cell = _grid_cell("MTP Max Draft", self.dialog.mtp_max_spin)
+        self.dialog.mtp_min_cell = _grid_cell("MTP Min Draft", self.dialog.mtp_min_spin)
+
+        arch_grid_w = QWidget()
+        arch_grid = QGridLayout(arch_grid_w)
+        arch_grid.setContentsMargins(0, 0, 0, 0)
+        arch_grid.setHorizontalSpacing(24)
+        arch_grid.setVerticalSpacing(12)
+
+        arch_grid.addWidget(_grid_cell("Context size", self.dialog.ctx_spin), 0, 0)
+        arch_grid.addWidget(_grid_cell("RoPE Base", self.dialog.rope_base_spin), 0, 1)
+        arch_grid.addWidget(_grid_cell("RoPE Scale", self.dialog.rope_scale_spin), 0, 2)
+        arch_grid.addWidget(self.dialog.flash_attn_cb, 1, 0)
+        arch_grid.addWidget(self.dialog.mtp_cb, 1, 1, 1, 2)
+        arch_grid.addWidget(self.dialog.mtp_max_cell, 2, 0)
+        arch_grid.addWidget(self.dialog.mtp_min_cell, 2, 1)
+
+        form.addWidget(arch_grid_w)
+        
+        sep_arch = QFrame()
+        sep_arch.setObjectName("sep")
+        sep_arch.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_arch)
+
+        # --- Sampling & Penalties Section ---
+        samp_title = QLabel("Sampling & Penalties")
+        samp_title.setObjectName("pageSubtitle")
+        form.addWidget(samp_title)
 
         self.dialog.temp_spin = no_scroll(QDoubleSpinBox())
         self.dialog.temp_spin.setRange(0.0, 2.0)
@@ -214,6 +281,117 @@ class ParametersPage(QWidget):
         self.dialog.minp_spin.setSingleStep(0.01)
         self.dialog.minp_spin.setDecimals(2)
         self.dialog.minp_spin.setFixedWidth(100)
+        
+        self.dialog.typical_p_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.typical_p_spin.setRange(0.0, 1.0)
+        self.dialog.typical_p_spin.setSingleStep(0.05)
+        self.dialog.typical_p_spin.setDecimals(2)
+        self.dialog.typical_p_spin.setFixedWidth(100)
+
+        self.dialog.tfs_z_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.tfs_z_spin.setRange(1.0, 10.0)
+        self.dialog.tfs_z_spin.setSingleStep(0.1)
+        self.dialog.tfs_z_spin.setDecimals(2)
+        self.dialog.tfs_z_spin.setFixedWidth(100)
+
+        self.dialog.seed_spin = no_scroll(QSpinBox())
+        self.dialog.seed_spin.setRange(-1, 2147483647)
+        self.dialog.seed_spin.setFixedWidth(100)
+        self.dialog.seed_spin.setSpecialValueText("Random (-1)")
+
+        self.dialog.mirostat_spin = no_scroll(QSpinBox())
+        self.dialog.mirostat_spin.setRange(0, 2)
+        self.dialog.mirostat_spin.setFixedWidth(100)
+
+        self.dialog.mirostat_tau_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.mirostat_tau_spin.setRange(0.0, 10.0)
+        self.dialog.mirostat_tau_spin.setSingleStep(0.1)
+        self.dialog.mirostat_tau_spin.setDecimals(2)
+        self.dialog.mirostat_tau_spin.setFixedWidth(100)
+
+        self.dialog.mirostat_eta_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.mirostat_eta_spin.setRange(0.0, 1.0)
+        self.dialog.mirostat_eta_spin.setSingleStep(0.05)
+        self.dialog.mirostat_eta_spin.setDecimals(2)
+        self.dialog.mirostat_eta_spin.setFixedWidth(100)
+
+        self.dialog.repeat_penalty_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.repeat_penalty_spin.setRange(1.0, 2.0)
+        self.dialog.repeat_penalty_spin.setSingleStep(0.05)
+        self.dialog.repeat_penalty_spin.setDecimals(2)
+        self.dialog.repeat_penalty_spin.setFixedWidth(100)
+
+        self.dialog.freq_penalty_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.freq_penalty_spin.setRange(0.0, 2.0)
+        self.dialog.freq_penalty_spin.setSingleStep(0.05)
+        self.dialog.freq_penalty_spin.setDecimals(2)
+        self.dialog.freq_penalty_spin.setFixedWidth(100)
+
+        self.dialog.pres_penalty_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.pres_penalty_spin.setRange(0.0, 2.0)
+        self.dialog.pres_penalty_spin.setSingleStep(0.05)
+        self.dialog.pres_penalty_spin.setDecimals(2)
+        self.dialog.pres_penalty_spin.setFixedWidth(100)
+
+        samp_grid_w = QWidget()
+        samp_grid = QGridLayout(samp_grid_w)
+        samp_grid.setContentsMargins(0, 0, 0, 0)
+        samp_grid.setHorizontalSpacing(24)
+        samp_grid.setVerticalSpacing(12)
+
+        samp_grid.addWidget(_grid_cell("Temperature", self.dialog.temp_spin), 0, 0)
+        samp_grid.addWidget(_grid_cell("Top-K", self.dialog.topk_spin), 0, 1)
+        samp_grid.addWidget(_grid_cell("Top-P", self.dialog.topp_spin), 0, 2)
+        samp_grid.addWidget(_grid_cell("Min-P", self.dialog.minp_spin), 1, 0)
+        samp_grid.addWidget(_grid_cell("Typical-P", self.dialog.typical_p_spin), 1, 1)
+        samp_grid.addWidget(_grid_cell("TFS-Z", self.dialog.tfs_z_spin), 1, 2)
+        samp_grid.addWidget(_grid_cell("Seed", self.dialog.seed_spin), 2, 0)
+        samp_grid.addWidget(_grid_cell("Mirostat", self.dialog.mirostat_spin), 2, 1)
+        samp_grid.addWidget(_grid_cell("Mirostat Tau", self.dialog.mirostat_tau_spin), 2, 2)
+        samp_grid.addWidget(_grid_cell("Mirostat Eta", self.dialog.mirostat_eta_spin), 3, 0)
+        samp_grid.addWidget(_grid_cell("Repeat Penalty", self.dialog.repeat_penalty_spin), 3, 1)
+        samp_grid.addWidget(_grid_cell("Freq Penalty", self.dialog.freq_penalty_spin), 3, 2)
+        samp_grid.addWidget(_grid_cell("Pres Penalty", self.dialog.pres_penalty_spin), 4, 0)
+
+        form.addWidget(samp_grid_w)
+        
+        sep_samp = QFrame()
+        sep_samp.setObjectName("sep")
+        sep_samp.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_samp)
+
+        # --- Hardware & Server Section ---
+        hw_title = QLabel("Hardware & Server")
+        hw_title.setObjectName("pageSubtitle")
+        form.addWidget(hw_title)
+
+        self.dialog.gpu_spin = no_scroll(QSpinBox())
+        self.dialog.gpu_spin.setRange(0, 999)
+        self.dialog.gpu_spin.setFixedWidth(100)
+
+        self.dialog.threads_spin = no_scroll(QSpinBox())
+        self.dialog.threads_spin.setRange(-1, 256)
+        self.dialog.threads_spin.setSpecialValueText("Auto (-1)")
+        self.dialog.threads_spin.setFixedWidth(100)
+
+        self.dialog.threads_batch_spin = no_scroll(QSpinBox())
+        self.dialog.threads_batch_spin.setRange(-1, 256)
+        self.dialog.threads_batch_spin.setSpecialValueText("Auto (-1)")
+        self.dialog.threads_batch_spin.setFixedWidth(100)
+        
+        self.dialog.parallel_spin = no_scroll(QSpinBox())
+        self.dialog.parallel_spin.setRange(1, 16)
+        self.dialog.parallel_spin.setFixedWidth(100)
+
+        self.dialog.batch_spin = no_scroll(QSpinBox())
+        self.dialog.batch_spin.setRange(1, 131072)
+        self.dialog.batch_spin.setSingleStep(512)
+        self.dialog.batch_spin.setFixedWidth(100)
+
+        self.dialog.ubatch_spin = no_scroll(QSpinBox())
+        self.dialog.ubatch_spin.setRange(1, 131072)
+        self.dialog.ubatch_spin.setSingleStep(128)
+        self.dialog.ubatch_spin.setFixedWidth(100)
 
         self.dialog.keep_cb = QCheckBox("Keep autocorrect model loaded in memory")
 
@@ -222,37 +400,26 @@ class ParametersPage(QWidget):
         self.dialog.idle_spin.setSingleStep(30)
         self.dialog.idle_spin.setFixedWidth(100)
 
-        def _grid_cell(label: str, widget) -> QWidget:
-            cell = QWidget()
-            cell_lay = QVBoxLayout(cell)
-            cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(4)
-            lbl = QLabel(label)
-            lbl.setObjectName("fieldGroupLabel")
-            cell_lay.addWidget(lbl)
-            cell_lay.addWidget(widget)
-            return cell
+        hw_grid_w = QWidget()
+        hw_grid = QGridLayout(hw_grid_w)
+        hw_grid.setContentsMargins(0, 0, 0, 0)
+        hw_grid.setHorizontalSpacing(24)
+        hw_grid.setVerticalSpacing(12)
 
-        grid_w = QWidget()
-        grid = QGridLayout(grid_w)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(24)
-        grid.setVerticalSpacing(12)
-
-        grid.addWidget(_grid_cell("Context size", self.dialog.ctx_spin), 0, 0)
-        grid.addWidget(_grid_cell("Temperature", self.dialog.temp_spin), 0, 1)
-        grid.addWidget(_grid_cell("Top-K", self.dialog.topk_spin), 0, 2)
-        grid.addWidget(_grid_cell("GPU layers", self.dialog.gpu_spin), 1, 0)
-        grid.addWidget(_grid_cell("Top-P", self.dialog.topp_spin), 1, 1)
-        grid.addWidget(_grid_cell("Min-P", self.dialog.minp_spin), 1, 2)
-
-        grid.addWidget(self.dialog.keep_cb, 2, 0, 1, 2)
+        hw_grid.addWidget(_grid_cell("GPU layers", self.dialog.gpu_spin), 0, 0)
+        hw_grid.addWidget(_grid_cell("Parallel slots", self.dialog.parallel_spin), 0, 1)
+        hw_grid.addWidget(_grid_cell("CPU Threads", self.dialog.threads_spin), 0, 2)
+        hw_grid.addWidget(_grid_cell("CPU Threads Batch", self.dialog.threads_batch_spin), 1, 0)
+        hw_grid.addWidget(_grid_cell("Eval Batch", self.dialog.batch_spin), 1, 1)
+        hw_grid.addWidget(_grid_cell("Phys Batch", self.dialog.ubatch_spin), 1, 2)
+        
+        hw_grid.addWidget(self.dialog.keep_cb, 2, 0, 1, 2)
         self.dialog.idle_timeout_cell = _grid_cell(
             "Idle timeout (s)", self.dialog.idle_spin
         )
-        grid.addWidget(self.dialog.idle_timeout_cell, 2, 2)
+        hw_grid.addWidget(self.dialog.idle_timeout_cell, 2, 2)
 
-        form.addWidget(grid_w)
+        form.addWidget(hw_grid_w)
         form.addStretch()
 
 
@@ -483,9 +650,7 @@ class CorrectionModesPage(QWidget):
             desc.setWordWrap(True)
             self._form.addWidget(desc)
 
-            instr_label = QLabel(
-                "Behavioral instruction (structural rules and examples are auto-added):"
-            )
+            instr_label = QLabel("Prompt sent to the LLM for this mode:")
             instr_label.setObjectName("settingsSublabel")
             instr_label.setWordWrap(True)
             self._form.addWidget(instr_label)
@@ -493,25 +658,8 @@ class CorrectionModesPage(QWidget):
             prompt_edit = QTextEdit()
             prompt_edit.setObjectName("settingsPrompt")
             prompt_edit.setFixedHeight(140)
-            prompt_edit.textChanged.connect(lambda idx=i: self._update_preview(idx))
             self._form.addWidget(prompt_edit)
             self.dialog._mode_prompt_edits.append(prompt_edit)
-
-            preview_toggle = QPushButton("Show full assembled prompt")
-            preview_toggle.setObjectName("previewToggle")
-            preview_toggle.setCheckable(True)
-            preview_toggle.toggled.connect(
-                lambda checked, idx=i: self._toggle_preview(idx, checked)
-            )
-            self._form.addWidget(preview_toggle)
-
-            preview_edit = QTextEdit()
-            preview_edit.setObjectName("settingsPromptPreview")
-            preview_edit.setReadOnly(True)
-            preview_edit.setFixedHeight(140)
-            preview_edit.hide()
-            self._form.addWidget(preview_edit)
-            self._mode_previews.append(preview_edit)
 
             reset_row = QHBoxLayout()
             reset_row.setContentsMargins(0, 0, 0, 0)
@@ -706,8 +854,10 @@ class CorrectionModesPage(QWidget):
             self.dialog._mode_prompt_edits.pop(global_idx)
         if global_idx < len(self.dialog._mode_reset_btns):
             self.dialog._mode_reset_btns.pop(global_idx)
-        if global_idx < len(self._mode_previews):
-            self._mode_previews.pop(global_idx)
+        # _mode_previews only holds custom mode previews (local index)
+        local_idx = global_idx - 3
+        if 0 <= local_idx < len(self._mode_previews):
+            self._mode_previews.pop(local_idx)
 
         # Remove widget from layout and destroy
         self._form.removeWidget(container)
@@ -715,25 +865,29 @@ class CorrectionModesPage(QWidget):
 
         self._sync_legacy_cb()
 
-    # ── Preview helpers ───────────────────────────────────────────────────
+    # ── Preview helpers (custom modes only) ────────────────────────────────
 
     def _update_preview(self, idx: int):
-        """Refresh the read-only preview when the user edits the instruction."""
-        if idx >= len(self._mode_previews):
+        """Refresh the read-only preview when the user edits the instruction.
+        Only custom modes (idx >= 3) have a preview; built-in modes show the
+        full prompt directly in the editor."""
+        local_idx = idx - 3
+        if local_idx < 0 or local_idx >= len(self._mode_previews):
             return
         user_text = self.dialog._mode_prompt_edits[idx].toPlainText()
         try:
             full = self._wrap_fn(user_text, idx)
-            self._mode_previews[idx].setPlainText(full)
+            self._mode_previews[local_idx].setPlainText(full)
         except Exception:
-            self._mode_previews[idx].setPlainText(
+            self._mode_previews[local_idx].setPlainText(
                 "(Preview unavailable — check your instruction syntax)"
             )
 
     def _toggle_preview(self, idx: int, checked: bool):
-        if idx >= len(self._mode_previews):
+        local_idx = idx - 3
+        if local_idx < 0 or local_idx >= len(self._mode_previews):
             return
-        self._mode_previews[idx].setVisible(checked)
+        self._mode_previews[local_idx].setVisible(checked)
         self._update_preview(idx)
 
     def _reset_mode(self, idx: int):

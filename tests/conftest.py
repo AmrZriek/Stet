@@ -18,8 +18,8 @@ if str(ROOT) not in sys.path:
 
 
 STRENGTH_KEYWORDS = {
-    "conservative": ["spelling-only", "only clear spelling mistakes"],
-    "aggressive": ["expert editor", "Improve clarity", "Fix all errors and improve"],
+    "conservative": ["spelling mistakes", "spelling-only", "Spelling Only"],
+    "aggressive": ["clearly and smoothly", "expert editor", "Improve clarity"],
 }
 
 MOCK_STRENGTH_RESPONSES = {
@@ -112,6 +112,17 @@ def suppress_first_run_and_update(monkeypatch):
 def isolate_debug_log(tmp_path, monkeypatch):
     """Redirect debug log to a temp file so tests never pollute app_debug.log."""
     monkeypatch.setattr("stet.core.utils.DEBUG_LOG", tmp_path / "test_debug.log")
+
+
+@pytest.fixture(autouse=True)
+def isolate_config(request, tmp_path, monkeypatch):
+    """Redirect config file to a temp file so tests never pollute config.json."""
+    if "test_frozen_compat" in request.module.__name__:
+        return
+    temp_config = tmp_path / "config.json"
+    monkeypatch.setattr("stet.constants.CONFIG_FILE", temp_config)
+    monkeypatch.setattr("stet.core.config.CONFIG_FILE", temp_config)
+
 
 
 @pytest.fixture(autouse=True)

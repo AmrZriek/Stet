@@ -1,10 +1,28 @@
 import sys
-
+import time
+import ctypes
 import pytest
 
 from stet.core.clipboard import _clipboard_read_text, _clipboard_write_text
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only path")
+def _is_clipboard_available():
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        for _ in range(5):
+            if user32.OpenClipboard(None):
+                user32.CloseClipboard()
+                return True
+            time.sleep(0.02)
+    except Exception:
+        pass
+    return False
+
+pytestmark = [
+    pytest.mark.skipif(sys.platform != "win32", reason="Windows-only path"),
+    pytest.mark.skipif(not _is_clipboard_available(), reason="System clipboard is locked/unavailable (Access Denied)")
+]
 
 
 def test_clipboard_roundtrip_basic_unicode():

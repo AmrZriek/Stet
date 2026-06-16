@@ -32,6 +32,36 @@ def _model_size_billions(model_path: str) -> float | None:
     return value if unit == "b" else value / 1000.0
 
 
+def _supports_mtp(model_path: str) -> bool:
+    """Check whether a GGUF model supports Multi-Token Prediction.
+
+    Detection strategy (in priority order):
+    1. GGUF metadata key ``{arch}.nextn_predict_layers`` — written by
+       llama.cpp's converter for models with MTP draft heads.
+    2. Tensor name containing ``nextn_proj`` — present in MTP weight
+       tensors even when the metadata key is stripped.
+    3. Filename heuristic — models shipped with ``-mtp`` or ``_mtp``
+       in the name (e.g. ``qwen3-4b-mtp-q4_k_m.gguf``).
+    """
+    if not model_path or not os.path.exists(model_path):
+        return False
+    try:
+        if os.path.getsize(model_path) < 1024:
+            return False
+        name_lower = os.path.basename(model_path).lower()
+        if "-mtp" in name_lower or "_mtp" in name_lower:
+            return True
+        with open(model_path, "rb") as f:
+            chunk = f.read(1024 * 1024 * 8)
+            chunk_lower = chunk.lower()
+            return (
+                b"nextn_predict_layers" in chunk_lower
+                or b"nextn_proj" in chunk_lower
+            )
+    except Exception:
+        return False
+
+
 _MIN_RELIABLE_MODEL_B = 1.0
 
 

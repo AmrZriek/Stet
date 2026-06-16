@@ -31,23 +31,14 @@ Write-Host "==> Running tests (Chunk 2)" -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "Tests failed in Chunk 2 (exit $LASTEXITCODE) - aborting release" }
 
 Write-Host "==> Staging files" -ForegroundColor Cyan
-git add stet/ windows_installer_payload.py update.py build.py requirements.txt .gitignore release.ps1
-if (Test-Path graphify-out\graph.json) {
-    git add -f graphify-out\graph.json graphify-out\graph.html graphify-out\GRAPH_REPORT.md
-    if (Test-Path graphify-out\.graphify_incremental.json) {
-        git add -f graphify-out\.graphify_incremental.json
-    }
-}
+git add stet/ build.py requirements.txt .gitignore release.ps1
+
 
 # Only commit if there are staged changes
 git diff --cached --quiet
 if ($LASTEXITCODE -ne 0) {
     Write-Host "==> Committing" -ForegroundColor Cyan
-    $body = @"
-$Message
-
-Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
-"@
+    $body = $Message
     git commit -m $body
     if ($LASTEXITCODE -ne 0) { throw "git commit failed (exit $LASTEXITCODE)" }
 } else {
@@ -59,7 +50,7 @@ git push origin main
 if ($LASTEXITCODE -ne 0) { throw "git push failed (exit $LASTEXITCODE)" }
 
 Write-Host "==> Building release v$Version" -ForegroundColor Cyan
-& .\venv\Scripts\python.exe build.py --version $Version
+& .\venv\Scripts\python.exe build.py --version $Version --keep-folder
 if ($LASTEXITCODE -ne 0) { throw "build.py failed (exit $LASTEXITCODE)" }
 
 Write-Host "==> Running post-build smoke test" -ForegroundColor Cyan

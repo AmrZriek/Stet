@@ -84,61 +84,44 @@ def test_find_cuda_dir(tmp_path):
             assert detected is not None
 
 
-def test_nuitka_cmd_construction():
-    """Verify generated Nuitka commands include metadata flags on Windows."""
+def test_pyinstaller_cmd_construction():
+    """Verify generated PyInstaller commands include metadata flags on Windows."""
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._nuitka_cmd("3.2.0", Path("artifacts"))
-        assert "--windows-console-mode=disable" in cmd
-        assert "--company-name=Stet" in cmd
-        assert "--product-name=Stet" in cmd
-        assert "--file-version=3.2.0.0" in cmd
+        cmd = build._pyinstaller_cmd("3.2.0", Path("artifacts"))
+        assert "--noconsole" in cmd
+        assert "--name=Stet" in cmd
+        assert str(build.MAIN_SCRIPT) in cmd
 
     with patch("build.PLATFORM", "macOS"):
-        cmd = build._nuitka_cmd("3.2.0", Path("artifacts"))
-        assert f"--macos-app-icon={build.ICON_PNG}" in cmd
+        cmd = build._pyinstaller_cmd("3.2.0", Path("artifacts"))
+        assert "--windowed" in cmd
 
 
-def test_updater_nuitka_cmd_construction():
+def test_updater_pyinstaller_cmd_construction():
     """Verify updater compilation commands are correct."""
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._updater_nuitka_cmd("3.2.0", Path("artifacts"))
-        assert "--windows-console-mode=force" in cmd
-        assert "--company-name=Stet" in cmd
-        assert "--product-name=Stet Updater" in cmd
-        assert "--file-version=3.2.0.0" in cmd
+        cmd = build._updater_pyinstaller_cmd("3.2.0", Path("artifacts"))
+        assert "--console" in cmd
+        assert "--name=StetUpdater" in cmd
+        assert str(build.UPDATER_SCRIPT) in cmd
 
 
-def test_uninstaller_nuitka_cmd_construction():
+def test_uninstaller_pyinstaller_cmd_construction():
     """Verify uninstaller compilation commands are correct."""
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._uninstaller_nuitka_cmd("1.0.0", Path("artifacts"))
-        assert "--onefile" in cmd
-        assert "--windows-console-mode=disable" in cmd
-        assert "--company-name=Stet" in cmd
-        assert "--product-name=Stet Uninstaller" in cmd
-        assert "--file-version=1.0.0.0" in cmd
+        cmd = build._uninstaller_pyinstaller_cmd("1.0.0", Path("artifacts"))
+        assert "--noconsole" in cmd
+        assert "--name=StetUninstall" in cmd
         assert str(build.UNINSTALLER_SCRIPT) in cmd
 
 
-def test_base_nuitka_cmd_shared_flags():
-    """_base_nuitka_cmd includes all shared Nuitka flags."""
+def test_base_pyinstaller_cmd_shared_flags():
+    """_base_pyinstaller_cmd includes all shared PyInstaller flags."""
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._base_nuitka_cmd("TestApp", Path("out"))
-        assert "--assume-yes-for-downloads" in cmd
-        assert "--python-flag=no_warnings" in cmd
-        assert "--noinclude-default-mode=error" in cmd
-        assert "--remove-output" in cmd
-        assert "--lto=yes" in cmd
+        cmd = build._base_pyinstaller_cmd("TestApp", Path("out"))
+        assert "-y" in cmd
+        assert "--clean" in cmd
 
-
-def test_base_nuitka_cmd_pyqt6_plugin():
-    """_base_nuitka_cmd inserts PyQt6 plugin when requested."""
-    with patch("build.PLATFORM", "Windows"):
-        cmd = build._base_nuitka_cmd("TestApp", Path("out"), pyqt6=True)
-        assert "--enable-plugin=pyqt6" in cmd
-
-        cmd_no_qt = build._base_nuitka_cmd("TestApp", Path("out"), pyqt6=False)
-        assert "--enable-plugin=pyqt6" not in cmd_no_qt
 
 
 def test_total_steps_includes_uninstaller():

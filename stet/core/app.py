@@ -11,7 +11,7 @@ import traceback
 from pathlib import Path
 
 from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -105,7 +105,7 @@ def _startup_command() -> str:
         return _quote_cmd(["wscript.exe", str(vbs)])
 
     # Fallback: direct pythonw.exe invocation
-    main_py = SCRIPT_DIR / "main.py"
+    main_py = SCRIPT_DIR / "stet" / "main.py"
     if main_py.exists():
         return _quote_cmd([_source_startup_python(), str(main_py)])
 
@@ -454,6 +454,14 @@ class StetApp(QObject):
         if not self.cfg.get("model_path", ""):
             QTimer.singleShot(800, self._show_first_run)
 
+    def __del__(self):
+        try:
+            qapp = QApplication.instance()
+            if qapp and hasattr(self, "_hotkey_filter"):
+                qapp.removeNativeEventFilter(self._hotkey_filter)
+        except Exception:
+            pass
+
     def _on_idle_timeout_check(self):
         if self._is_window_alive():
             log("[APP] CorrectionWindow is active — marking models as used")
@@ -564,21 +572,11 @@ class StetApp(QObject):
         menu.addAction(header_act)
         menu.addSeparator()
 
-        llm_menu = menu.addMenu("Model: Offline")
-        self._llm_menu_action = llm_menu.menuAction()
+        self._llm_menu = menu.addMenu("Model: Offline")
+        self._llm_menu_action = self._llm_menu.menuAction()
         self._llm_menu_action.setIcon(make_left_arrow_icon())
-        llm_menu.setStyleSheet(menu.styleSheet())
-        act_llm_load = QAction("Load model", self)
-        act_llm_unload = QAction("Unload model", self)
-        act_llm_browse = QAction("Browse GGUF…", self)
-        act_llm_load.triggered.connect(self._tray_load_model)
-        act_llm_unload.triggered.connect(self._tray_unload_model)
-        act_llm_browse.triggered.connect(self._browse_model)
-        llm_menu.addAction(act_llm_load)
-        llm_menu.addAction(act_llm_unload)
-        llm_menu.addSeparator()
-        llm_menu.addAction(act_llm_browse)
-        self._rebuild_recent_menu(llm_menu)
+        self._llm_menu.setStyleSheet(menu.styleSheet())
+        self._llm_menu.aboutToShow.connect(self._rebuild_llm_menu)
 
         act_settings = QAction("Settings...", self)
         act_settings.triggered.connect(self._open_settings)
@@ -599,7 +597,10 @@ class StetApp(QObject):
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_quit)
 
-        self.tray.setContextMenu(menu)
+        if WINDOWS:
+            self._tray_menu = menu
+        else:
+            self.tray.setContextMenu(menu)
         self._update_llm_menu_initial_text()
         self._show_tray_with_retry()
 
@@ -645,13 +646,35 @@ class StetApp(QObject):
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self._open_settings()
+        elif WINDOWS and reason in (
+            QSystemTrayIcon.ActivationReason.Trigger,
+            QSystemTrayIcon.ActivationReason.Context,
+        ):
+            self._tray_menu.exec(QCursor.pos())
 
-    def _rebuild_recent_menu(self, parent: QMenu):
-        parent.addSeparator()
-        for path in self.cfg.get("recent_models", [])[:8]:
+    def _rebuild_llm_menu(self):
+        self._llm_menu.clear()
+        act_llm_load = QAction("Load model", self)
+        act_llm_unload = QAction("Unload model", self)
+        act_llm_browse = QAction("Browse GGUF…", self)
+        act_llm_load.triggered.connect(self._tray_load_model)
+        act_llm_unload.triggered.connect(self._tray_unload_model)
+        act_llm_browse.triggered.connect(self._browse_model)
+        self._llm_menu.addAction(act_llm_load)
+        self._llm_menu.addAction(act_llm_unload)
+        self._llm_menu.addSeparator()
+        self._llm_menu.addAction(act_llm_browse)
+        self._llm_menu.addSeparator()
+        recent_list = []
+        for path in self.cfg.get("recent_models", []):
+            if path and Path(path).exists():
+                recent_list.append(path)
+                if len(recent_list) >= 8:
+                    break
+        for path in recent_list:
             act = QAction(friendly_name(path), self)
             act.triggered.connect(lambda checked, p=path: self._select_model(p))
-            parent.addAction(act)
+            self._llm_menu.addAction(act)
 
     def _tray_load_model(self):
         threading.Thread(target=self.ac_model.load_model, daemon=True).start()
@@ -853,6 +876,14 @@ class StetApp(QObject):
             self._pending_panel_custom_prompt = custom_prompt
             threading.Thread(target=self._hotkey_worker, daemon=True).start()
 
+    # Clipboard polling tunables. Modern Windows clipboard updates are fast,
+    # so we can poll aggressively without paying meaningful CPU cost.
+    # Worst-case wait: GRACE + MAX_POLLS * INTERVAL.
+    _CLIPBOARD_POLL_INTERVAL = 0.015   # 15 ms between polls
+    _CLIPBOARD_MAX_POLLS = 12          # 12 attempts
+    _CLIPBOARD_INITIAL_GRACE = 0.05    # 50 ms grace before first poll
+    # 50 ms + 12 * 15 ms = 230 ms worst case (was 680 ms; ~65% reduction)
+
     def _capture_selection(self) -> str:
         """Copy selected text from the active window via direct UIA or Ctrl+C.
 
@@ -902,10 +933,10 @@ class StetApp(QObject):
             # by checking whether the clipboard content *changed* from
             # what we saved in _old_clip.
             _send_ctrl_shift_chord(VK_C)
-            time.sleep(0.08)
+            time.sleep(self._CLIPBOARD_INITIAL_GRACE)
 
-            for attempt in range(20):
-                time.sleep(0.03)
+            for attempt in range(self._CLIPBOARD_MAX_POLLS):
+                time.sleep(self._CLIPBOARD_POLL_INTERVAL)
                 clip = self._safe_paste()
                 if clip and clip != self._old_clip:
                     log(
@@ -949,18 +980,18 @@ class StetApp(QObject):
 
         # Grace period: SendInput injects key events into the input queue, but
         # the target app's message loop needs time to dequeue WM_KEYDOWN,
-        # process the copy command, and write to the clipboard. 80 ms covers
-        # even heavier apps (browsers, IDEs).
-        time.sleep(0.08)
+        # process the copy command, and write to the clipboard. The grace
+        # constant covers even heavier apps (browsers, IDEs).
+        time.sleep(self._CLIPBOARD_INITIAL_GRACE)
 
-        for attempt in range(20):
-            time.sleep(0.03)
+        for attempt in range(self._CLIPBOARD_MAX_POLLS):
+            time.sleep(self._CLIPBOARD_POLL_INTERVAL)
             clip = self._safe_paste()
             if clip:
                 log(f"[Capture] got selection on poll {attempt + 1}: {clip[:80]!r}")
                 return clip
 
-        log("[Capture] no selection after 20 polls")
+        log(f"[Capture] no selection after {self._CLIPBOARD_MAX_POLLS} polls")
         if self._old_clip:
             self._safe_copy(self._old_clip)
         return ""
@@ -1530,7 +1561,7 @@ class StetApp(QObject):
 
         return [
             sys.executable,
-            str(SCRIPT_DIR / "update.py"),
+            str(SCRIPT_DIR / "stet" / "update.py"),
             "--app",
             "--install-dir",
             str(SCRIPT_DIR),
@@ -1574,11 +1605,16 @@ class StetApp(QObject):
             except Exception as e:
                 log(f"[Hotkey] Unregister failed on quit: {e}")
         self._hotkey_handles.clear()
+        qapp = QApplication.instance()
         if hasattr(self, "_hotkey_filter"):
             self._hotkey_filter.clear_callbacks()
+            if qapp:
+                try:
+                    qapp.removeNativeEventFilter(self._hotkey_filter)
+                except Exception:
+                    pass
         self.ac_model.unload_model()
         self.chat_model.unload_model()
-        qapp = QApplication.instance()
         if qapp:
             qapp.quit()
 
@@ -1634,8 +1670,8 @@ class AppUpdateChecker(QThread):
             remote_tuple = _parse_version(remote_ver)
             local_tuple = _parse_version(local_ver)
 
-            # Stet is locked to V1 (1.0.0); ignore newer remote versions
-            if False:  # remote_tuple > local_tuple:
+            # If the remote version is newer, alert the user
+            if remote_tuple > local_tuple:
                 self.update_available.emit(tag, asset_url, notes)
 
         except Exception as e:

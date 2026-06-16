@@ -2,6 +2,7 @@ import concurrent.futures
 import ctypes
 import ctypes.wintypes
 import os
+import re
 import subprocess
 import threading
 import time
@@ -26,6 +27,7 @@ from stet.core.text_utils import (
     _is_fewshot_echo,
     _loses_meaningful_repetition,
     _normalize_chunk_newlines,
+    _post_splice_sanity,
     _wrap_correction_prompt,
 )
 from stet.core.utils import friendly_name, log
@@ -39,8 +41,11 @@ from stet.llm.worker import StreamWorker
 
 _HALLUCINATION_THRESHOLDS_BY_STRENGTH = {
     "conservative": _HALLUCINATION_THRESHOLD_CONSERVATIVE,
+    "spelling_only": _HALLUCINATION_THRESHOLD_CONSERVATIVE,
     "smart_fix": _HALLUCINATION_THRESHOLD_SMARTFIX,
+    "full_correction": 0.6,
     "aggressive": _HALLUCINATION_THRESHOLD_AGGRESSIVE,
+    "rewrite_polish": 0.8,
 }
 
 _STRENGTH_TO_MODE_INDEX = {
@@ -185,6 +190,12 @@ class ModelManager(QObject):
         self.last_used = None
         self.loading = False
         self._lock = threading.Lock()
+        # Persistent HTTP session for LLM requests. Created lazily on first use
+        # (so unit tests that never trigger a correction never open a socket)
+        # and reused across all correction calls to keep TCP connections warm
+        # and let HTTPAdapter's connection pool amortize the handshake cost
+        # across the 4 parallel slots. Close via close_session() on shutdown.
+        self._session: requests.Session | None = None
         # Actual context size as reported by llama-server's /props endpoint
         # after load. This may differ from cfg["context_size"] when the model's
         # metadata caps n_ctx lower than the user-requested value (common with
@@ -200,6 +211,38 @@ class ModelManager(QObject):
     # ── internal helpers ──────────────────────────────────────────────────
     def mark_used(self):
         self.last_used = datetime.now()
+
+    def _get_session(self) -> requests.Session:
+        """Return a persistent requests.Session, creating it on first access.
+
+        The session is mounted with an HTTPAdapter sized for 4 parallel
+        server slots (pool_maxsize=8 leaves headroom). requests.Session is
+        thread-safe for sending concurrent requests, so this single session
+        can be shared by the ThreadPoolExecutor in correct_text_patch and by
+        any direct fallback callers without locking.
+        """
+        if self._session is None:
+            from requests.adapters import HTTPAdapter
+
+            session = requests.Session()
+            adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8)
+            # mount() is part of the real requests.Session API; some tests
+            # monkeypatch requests.Session with a stub that lacks it. In that
+            # case the session is still functional for post() — it just won't
+            # have the tuned pool, which is acceptable in test contexts.
+            if hasattr(session, "mount"):
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+            self._session = session
+        return self._session
+
+    def close_session(self) -> None:
+        """Close and discard the persistent session. Safe to call multiple times."""
+        if self._session is not None:
+            try:
+                self._session.close()
+            finally:
+                self._session = None
 
     @property
     def port_offset(self) -> int:
@@ -217,6 +260,28 @@ class ModelManager(QObject):
 
     def _chat_url(self) -> str:
         return self._base_url() + "/v1/chat/completions"
+
+    def _warmup_prompt_cache(self) -> None:
+        """Pre-fill llama-server's KV cache so the first real correction doesn't
+        pay full prompt-evaluation cost.
+
+        Sends a minimal /v1/chat/completions request with cache_prompt=True.
+        Best-effort: failures are logged but never raised, so a broken warmup
+        can't prevent model load from completing.
+        """
+        try:
+            log(f"[{self.label}] KV cache warmup — pre-filling prompt cache")
+            requests.post(
+                self._chat_url(),
+                json={
+                    "messages": [{"role": "system", "content": "warmup"}],
+                    "max_tokens": 1,
+                    "cache_prompt": True,
+                },
+                timeout=5,
+            )
+        except Exception as e:
+            log(f"[{self.label}] KV cache warmup failed (non-fatal): {e}")
 
     def is_loaded(self) -> bool:
         proc = self.server_process
@@ -335,9 +400,16 @@ class ModelManager(QObject):
                 f"[{self.label}] nvidia-smi not found but gpu_layers={gpu_layers} from config — attempting GPU (error recovery will retry CPU on failure)"
             )
         log(f"[{self.label}] Using gpu_layers={gpu_layers}")
-        ctx = self.cfg.get("context_size", 4096)
+        ctx = self.cfg.get("context_size", 12800)
         host = self.cfg.get("server_host", "127.0.0.1")
         port = self.cfg.get("server_port", 8080) + self.port_offset
+        threads = self.cfg.get("threads", -1)
+        batch_size = self.cfg.get("batch_size", 2048)
+        ubatch_size = self.cfg.get("ubatch_size", 512)
+        flash_attn = self.cfg.get("flash_attn", False)
+        mtp_enabled = self.cfg.get("mtp_enabled", False)
+        mtp_max_draft = self.cfg.get("mtp_max_draft", 2)
+        mtp_min_draft = self.cfg.get("mtp_min_draft", 0)
 
         # Pass all sampling defaults on the CLI too. llama-server uses these as
         # fallbacks when a request omits a given field, and some endpoints (e.g.
@@ -352,12 +424,22 @@ class ModelManager(QObject):
             str(ctx),
             "--n-gpu-layers",
             str(gpu_layers),
+            "--threads",
+            str(threads),
+            "--threads-batch",
+            str(self.cfg.get("threads_batch", -1)),
+            "--batch-size",
+            str(batch_size),
+            "--ubatch-size",
+            str(ubatch_size),
+            "--flash-attn",
+            "on" if flash_attn else "off",
             "--host",
             host,
             "--port",
             str(port),
             "--parallel",
-            "4",
+            str(self.cfg.get("parallel", 4)),
             "--reasoning",
             "off",
             "--no-warmup",
@@ -373,11 +455,38 @@ class ModelManager(QObject):
             str(self.cfg.get("min_p", 0.05)),
             "--repeat-penalty",
             str(self.cfg.get("repeat_penalty", 1.0)),
-            # NOTE: frequency-penalty and presence-penalty are omitted from CLI
-            # because not all llama-server builds support them. They are still
-            # sent in every API payload (see make_stream_worker) so user
-            # settings are honoured for all requests.
         ]
+
+        if self.cfg.get("seed", -1) != -1:
+            cmd.extend(["--seed", str(self.cfg.get("seed", -1))])
+        
+        rope_base = self.cfg.get("rope_freq_base", 0.0)
+        if rope_base > 0.0:
+            cmd.extend(["--rope-freq-base", str(rope_base)])
+            
+        rope_scale = self.cfg.get("rope_freq_scale", 0.0)
+        if rope_scale > 0.0:
+            cmd.extend(["--rope-freq-scale", str(rope_scale)])
+
+        cache_k = self.cfg.get("kv_cache_type_k", "")
+        if cache_k:
+            cmd.extend(["--cache-type-k", cache_k])
+            
+        cache_v = self.cfg.get("kv_cache_type_v", "")
+        if cache_v:
+            cmd.extend(["--cache-type-v", cache_v])
+        
+        if mtp_enabled:
+            cmd.extend([
+                "--spec-type", "draft-mtp",
+                "--spec-draft-n-max", str(mtp_max_draft),
+                "--spec-draft-n-min", str(mtp_min_draft),
+            ])
+
+        # NOTE: frequency-penalty and presence-penalty are omitted from CLI
+        # because not all llama-server builds support them. They are still
+        # sent in every API payload (see make_stream_worker) so user
+        # settings are honoured for all requests.
 
         log(f"[{self.label}] Server command: {' '.join(cmd)}")
 
@@ -476,6 +585,7 @@ class ModelManager(QObject):
                 self.loading = False
             name = friendly_name(model_path)
             self.status_changed.emit(f"Ready — {name}")
+            self._warmup_prompt_cache()
             self.model_loaded.emit()
             log(f"[{self.label}] Model ready: {name}")
 
@@ -689,6 +799,9 @@ class ModelManager(QObject):
                     pass
                 self.log_file = None
             self.last_used = None
+            # Drop any persistent HTTP session — server is gone, no point
+            # holding the connection pool open.
+            self.close_session()
         self.status_changed.emit("Model unloaded")
         self.model_unloaded.emit()
 
@@ -729,6 +842,11 @@ class ModelManager(QObject):
         text = _normalize_newlines(text, use_windows_newlines=False)
 
         # ── Phase 0: deterministic dict pre-pass (disabled) ────────────────
+        # Disabled: the LLM already corrects all typos in a single pass, making
+        # the ~4300-entry static typo dictionary redundant. The pre-pass also
+        # lacked a reliable [OK] confirmation mechanism, so it could never
+        # short-circuit the LLM call — every correction went to the model
+        # regardless. Keeping the code available but inactive for reference.
         # pre_corrected, dict_fixes = _dict_prepass(text)
         pre_corrected, dict_fixes = text, 0
         total_words = len(pre_corrected.split())
@@ -741,7 +859,26 @@ class ModelManager(QObject):
         # redundant system-prompt evaluations (each chunk re-sends the full
         # ~400-token prompt). Separator preserves inter-unit whitespace/newlines
         # so reassembly is lossless.
-        chunk_size = self.cfg.get("patch_chunk_size", 120)
+        
+        # Inline masking for URLs, emails, and file paths
+        inline_hazard_pattern = re.compile(
+            r'\b(?:https?://|www\.)\S+\b'  # URLs
+            r'|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'  # Emails
+            r'|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute backslash paths
+            r'|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute slash paths
+            r'|(?<=[\s"\'(])/[/\w.-]+/[/\w.-]+\b'  # Unix absolute paths
+            r'|(?<=[\s"\'(])\.\.?/[/\w.-]+/[/\w.-]+\b'  # Unix relative paths
+            r'|(?<=[\s"\'(])\.\.?\\[\\\w.-]+\\[\\\w.-]+\b'  # Windows relative backslash paths
+        )
+        masked_entities = []
+        def mask_repl(match):
+            idx = len(masked_entities) + 1
+            masked_entities.append(match.group(0))
+            return f"⟦U{idx}⟧"
+            
+        pre_corrected = inline_hazard_pattern.sub(mask_repl, pre_corrected)
+        
+        chunk_size = self.cfg.get("patch_chunk_size", 40)
         chunks = _chunk_text_by_sentences(pre_corrected, chunk_size)
         # if dict_fixes > 0:
         #     log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
@@ -754,16 +891,22 @@ class ModelManager(QObject):
         corrected_parts: list[tuple[str, str]] = [("", "")] * len(chunks)
         any_success = False
 
+        from stet.core.text_utils import looks_like_prose
+        
         modes = self.cfg.get("correction_modes", [])
         mode_index = _resolve_mode_index(strength, modes)
 
-        max_workers = min(len(chunks), 4) if chunks else 1
+        max_workers = min(len(chunks), self.cfg.get("parallel", 4)) if chunks else 1
 
-        shared_session = requests.Session()
-        try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
+        shared_session = self._get_session()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {}
+                for idx, (chunk_text, sep) in enumerate(chunks):
+                    if not chunk_text.strip() or not looks_like_prose(chunk_text):
+                        corrected_parts[idx] = (chunk_text, sep)
+                        continue
+                    
+                    futures[executor.submit(
                         self._rewrite_sentence_chunk,
                         chunk_text,
                         custom_sys,
@@ -773,9 +916,7 @@ class ModelManager(QObject):
                         cancel_event,
                         mode_prompt_override,
                         shared_session,
-                    ): (idx, chunk_text, sep)
-                    for idx, (chunk_text, sep) in enumerate(chunks)
-                }
+                    )] = (idx, chunk_text, sep)
 
                 remaining = list(futures.keys())
                 while remaining:
@@ -807,31 +948,44 @@ class ModelManager(QObject):
                             corrected, use_windows_newlines=False
                         )
 
-                        # Phase 2: hallucination guard — reject wildly divergent output.
-                        # Disabled (threshold >= 1.0) for smart_fix and aggressive;
-                        # active for conservative (threshold = 0.4) to prevent
-                        # the model from swapping out names/places/values.
-                        if mode_index < len(modes):
-                            threshold = modes[mode_index].get(
-                                "hallucination_threshold", 1.0
+                        # Sentinel survival: every ⟦Ui⟧ in the original chunk
+                        # must survive verbatim in the corrected output. If a
+                        # small model drops or mangles a sentinel the chunk is
+                        # unusable because hazard unmasking will fail.
+                        _chunk_sentinels = re.findall(r'⟦U\d+⟧', chunk_text)
+                        if _chunk_sentinels and not all(
+                            s in corrected for s in _chunk_sentinels
+                        ):
+                            log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost in correction")
+                            corrected_parts[idx] = (chunk_text, sep)
+                            continue
+
+                        # Reject if raw output exceeds the hallucination threshold
+                        threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(strength, 1.0)
+                        if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
+                            log(f"[{self.label}] Patch unit {idx + 1} rejected: raw hallucination ratio exceeds threshold")
+                            corrected = None
+                            corrected_parts[idx] = (chunk_text, sep)
+                            continue
+
+                        # Phase 2: hunk-level hallucination guard
+                        from stet.core.text_utils import apply_hunk_guard
+                        
+                        guarded_corrected = apply_hunk_guard(chunk_text, corrected, mode_index)
+                        if guarded_corrected != corrected:
+                            log(
+                                f"[{self.label}] Patch unit {idx + 1}: hunk-level "
+                                "hallucination guard reverted parts of the correction"
                             )
-                        else:
-                            threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(
-                                strength,
-                                _HALLUCINATION_THRESHOLD_SMARTFIX,
+                        corrected = guarded_corrected
+
+                        if not _post_splice_sanity(chunk_text, corrected):
+                            log(
+                                f"[{self.label}] Patch unit {idx + 1} rejected: "
+                                "post-splice sanity check failed"
                             )
-                        if threshold < 1.0:
-                            ratio = _hallucination_ratio(chunk_text, corrected, strength)
-                            word_count = len(chunk_text.split())
-                            if word_count <= 3:
-                                threshold = max(threshold, 0.7)
-                            if ratio > threshold:
-                                log(
-                                    f"[{self.label}] Patch unit {idx + 1}: hallucination "
-                                    f"rejected (drift={ratio:.2f} > {threshold})"
-                                )
-                                corrected_parts[idx] = (chunk_text, sep)
-                                continue
+                            corrected_parts[idx] = (chunk_text, sep)
+                            continue
 
                         if strength in {
                             "rewrite_polish",
@@ -848,10 +1002,13 @@ class ModelManager(QObject):
                         corrected_parts[idx] = (corrected, sep)
                         any_success = True
 
-        finally:
-            shared_session.close()
+        # NOTE: shared_session is the persistent session — intentionally not
+        # closed here. close_session() handles lifecycle on shutdown.
 
         reassembled = "".join(part + sep for part, sep in corrected_parts)
+        
+        for i, entity in enumerate(masked_entities):
+            reassembled = reassembled.replace(f"⟦U{i+1}⟧", entity)
 
         # If dict pre-pass changed nothing AND no unit ever succeeded, report
         # total failure so the caller falls back to streaming. Otherwise we
@@ -910,10 +1067,18 @@ class ModelManager(QObject):
             system += f"\n\nAdditional instructions:\n{custom_sys}"
 
         wrapped = f"<<<START>>>\n{chunk_text}\n<<<END>>>"
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": wrapped},
-        ]
+        model_name = Path(self.cfg.get(self.model_path_key, "")).name.lower()
+        if "gemma" in model_name:
+            messages = [
+                {"role": "user", "content": f"{system}\n\n{wrapped}"},
+                {"role": "assistant", "content": "<<<START>>>\n"},
+            ]
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": wrapped},
+                {"role": "assistant", "content": "<<<START>>>\n"},
+            ]
 
         # Output budget: input tokens + 96 headroom. Per-slot ctx is
         # ~3200 tokens (ctx_size / parallel); paragraph units are ~200 words
@@ -921,8 +1086,8 @@ class ModelManager(QObject):
         word_count = len(chunk_text.split())
         est_input_tokens = _estimate_tokens(chunk_text)
         ctx = self.cfg.get("context_size", 12800)
-        slot_limit = (self.actual_ctx_size or ctx) // 4
-        max_tokens = min(max(est_input_tokens + 96, 192), 2048)
+        slot_limit = (self.actual_ctx_size or ctx) // self.cfg.get("parallel", 4)
+        max_tokens = min(int(est_input_tokens * 1.4) + 16, 2048)
         # Prevent slot overflow by capping max_tokens to the remaining slot budget
         if est_input_tokens + max_tokens > slot_limit:
             max_tokens = max(128, slot_limit - est_input_tokens - 64)
@@ -934,18 +1099,29 @@ class ModelManager(QObject):
             "top_k": 1,
             "top_p": 0.95,
             "min_p": 0.05,
+            "seed": self.cfg.get("seed", -1),
+            "typical_p": self.cfg.get("typical_p", 1.0),
+            "tfs_z": self.cfg.get("tfs_z", 1.0),
+            "mirostat": self.cfg.get("mirostat", 0),
+            "mirostat_tau": self.cfg.get("mirostat_tau", 5.0),
+            "mirostat_eta": self.cfg.get("mirostat_eta", 0.1),
             "repeat_penalty": 1.0,
             "frequency_penalty": 0.0,
             "presence_penalty": 0.0,
             "stream": False,
             "think": False,
+            "cache_prompt": self.cfg.get("cache_prompt", True),
+            "stop": ["<<<END>>>"],
         }
 
         if session is None:
-            session = requests.Session()
-            _owns_session = True
-        else:
-            _owns_session = False
+            # Fallback caller didn't pass a session — use the persistent one
+            # so the per-chunk path also benefits from connection reuse.
+            session = self._get_session()
+
+        _RETRYABLE_STATUSES = {429, 502, 503, 504}
+        _MAX_RETRIES = 2
+        _BACKOFF_BASE = 1.0
 
         try:
             if cancel_event is not None and cancel_event.is_set():
@@ -954,7 +1130,15 @@ class ModelManager(QObject):
                 f"[{self.label}] REWRITE unit {unit_idx}/{total} strength={strength} "
                 f"words={word_count} max_tokens={max_tokens}"
             )
-            r = session.post(self._chat_url(), json=payload, timeout=60)
+            for _attempt in range(_MAX_RETRIES + 1):
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                r = session.post(self._chat_url(), json=payload, timeout=60)
+                if r.status_code in _RETRYABLE_STATUSES and _attempt < _MAX_RETRIES:
+                    log(f"[{self.label}] HTTP {r.status_code} unit {unit_idx} — retrying in {_BACKOFF_BASE * (2 ** _attempt):.1f}s")
+                    time.sleep(_BACKOFF_BASE * (2 ** _attempt))
+                    continue
+                break
             if not r.ok:
                 log(f"[{self.label}] HTTP {r.status_code}: {r.text[:200]}")
             r.raise_for_status()
@@ -969,13 +1153,31 @@ class ModelManager(QObject):
         except Exception as e:
             log(f"[{self.label}] rewrite request failed unit {unit_idx}: {e}")
             return None
-        finally:
-            if _owns_session:
-                session.close()
+        # session is always caller-owned (persistent) — never closed here.
+        # Lifecycle is managed by close_session() at shutdown.
 
         if finish_reason == "length" and "<<<END>>>" not in raw:
-            log(f"[{self.label}] rewrite unit {unit_idx} truncated due to token limit")
-            return None
+            retry_tokens = min(int(max_tokens * 1.5), slot_limit - est_input_tokens - 64)
+            if retry_tokens > max_tokens:
+                log(f"[{self.label}] rewrite unit {unit_idx} truncated — retrying with max_tokens={retry_tokens}")
+                payload["max_tokens"] = retry_tokens
+                if cancel_event is not None and cancel_event.is_set():
+                    return None
+                try:
+                    r = session.post(self._chat_url(), json=payload, timeout=60)
+                    if not r.ok:
+                        log(f"[{self.label}] HTTP {r.status_code} (retry): {r.text[:200]}")
+                    r.raise_for_status()
+                    raw, finish_reason = _extract_content_from_response(r.json())
+                    log(f"[{self.label}] rewrite unit {unit_idx} retry (finish={finish_reason}): {raw[:200]!r}")
+                except requests.exceptions.ConnectionError:
+                    return None
+                except Exception as e:
+                    log(f"[{self.label}] retry failed unit {unit_idx}: {e}")
+                    return None
+            if finish_reason == "length" and "<<<END>>>" not in raw:
+                log(f"[{self.label}] rewrite unit {unit_idx} still truncated after retry")
+                return None
 
         if _is_corrupt_output(raw):
             log(f"[{self.label}] corrupt rewrite output unit {unit_idx}: {raw[:80]!r}")
@@ -999,11 +1201,9 @@ class ModelManager(QObject):
 
     # ── streaming chat ─────────────────────────────────────────────────────
     def make_stream_worker(
-        self, messages: list, max_tokens: int = 1024
+        self, messages: list, max_tokens: int = 1024, grammar: str | None = None, json_schema: dict | None = None,
+        **overrides,
     ) -> StreamWorker:
-        # Include all sampling params the user configured. Previously min_p,
-        # repeat_penalty, frequency_penalty, and presence_penalty were missing,
-        # so changing them in settings had no effect on streaming chat output.
         payload = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -1011,11 +1211,23 @@ class ModelManager(QObject):
             "top_k": self.cfg.get("top_k", 40),
             "top_p": self.cfg.get("top_p", 0.95),
             "min_p": self.cfg.get("min_p", 0.05),
+            "seed": self.cfg.get("seed", -1),
+            "typical_p": self.cfg.get("typical_p", 1.0),
+            "tfs_z": self.cfg.get("tfs_z", 1.0),
+            "mirostat": self.cfg.get("mirostat", 0),
+            "mirostat_tau": self.cfg.get("mirostat_tau", 5.0),
+            "mirostat_eta": self.cfg.get("mirostat_eta", 0.1),
             "repeat_penalty": self.cfg.get("repeat_penalty", 1.0),
             "frequency_penalty": self.cfg.get("frequency_penalty", 0.0),
             "presence_penalty": self.cfg.get("presence_penalty", 0.0),
             "think": False,
+            "cache_prompt": self.cfg.get("cache_prompt", True),
         }
+        payload.update(overrides)
+        if grammar:
+            payload["grammar"] = grammar
+        if json_schema:
+            payload["json_schema"] = json_schema
         return StreamWorker(self._chat_url(), payload)
 
     # ── idle check ─────────────────────────────────────────────────────────

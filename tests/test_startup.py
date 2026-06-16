@@ -8,7 +8,9 @@ def test_startup_command_uses_pythonw_and_main_py_for_source(tmp_path, monkeypat
     pythonw_exe = python_dir / "pythonw.exe"
     python_exe.write_text("", encoding="utf-8")
     pythonw_exe.write_text("", encoding="utf-8")
-    main_py = tmp_path / "main.py"
+    stet_dir = tmp_path / "stet"
+    stet_dir.mkdir()
+    main_py = stet_dir / "main.py"
     main_py.write_text("from stet.main import main\n", encoding="utf-8")
 
     monkeypatch.setattr(app, "SCRIPT_DIR", tmp_path)

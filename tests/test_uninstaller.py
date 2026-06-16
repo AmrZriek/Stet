@@ -9,6 +9,10 @@ Tests cover:
 
 from __future__ import annotations
 
+import sys
+import stet.uninstall
+sys.modules["uninstall"] = stet.uninstall
+
 from unittest.mock import MagicMock, patch
 
 import pytest

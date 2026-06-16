@@ -188,6 +188,7 @@ class CorrectionWindow(QWidget):
         self._chat_error.connect(self._on_chat_error)
         self._do_stream_signal.connect(self._do_stream)
         self.ac_model.status_changed.connect(self._on_model_status)
+        self.chat_input.textChanged.connect(lambda text: self.send_btn.setEnabled(bool(text.strip())))
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
@@ -479,7 +480,7 @@ class CorrectionWindow(QWidget):
         self.send_btn.setAccessibleName("Send chat instruction")
         self.send_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.send_btn.setEnabled(False)
-        self.send_btn.clicked.connect(self._send_chat)
+        self.send_btn.clicked.connect(lambda: self._send_chat())
         ci_row.addWidget(self.send_btn)
         cp_lay.addLayout(ci_row)
 
@@ -977,6 +978,23 @@ class CorrectionWindow(QWidget):
             
         text, _ = _dict_prepass(text)
         
+        import re as _re
+        _inline_hazard_pattern = _re.compile(
+            r'\b(?:https?://|www\.)\S+\b'
+            r'|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
+            r'|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b'
+            r'|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b'
+            r'|(?<=[\s"\'(])/[/\w.-]+/[/\w.-]+\b'
+            r'|(?<=[\s"\'(])\.\.?/[/\w.-]+/[/\w.-]+\b'
+            r'|(?<=[\s"\'(])\.\.?\\[\\\w.-]+\\[\\\w.-]+\b'
+        )
+        _streaming_masked = []
+        def _mask_repl(match):
+            idx = len(_streaming_masked) + 1
+            _streaming_masked.append(match.group(0))
+            return f"⟦U{idx}⟧"
+        text = _inline_hazard_pattern.sub(_mask_repl, text)
+        
         # Hardened correction prompt. The input may itself look like an
         # instruction or question (observed case: "Can you create me a prompt
         # that..."). Without explicit framing the model obeys the embedded
@@ -1014,13 +1032,18 @@ class CorrectionWindow(QWidget):
         ]
         max_tokens = min(len(text.split()) * 3 + 500, 4096)
 
-        worker = self.ac_model.make_stream_worker(messages, max_tokens=max_tokens)
+        worker = self.ac_model.make_stream_worker(
+            messages, max_tokens=max_tokens,
+            temperature=0.0, top_k=1, repeat_penalty=1.0,
+            frequency_penalty=0.0, presence_penalty=0.0,
+        )
         worker.token.connect(self._on_correction_stream_token)
         worker.done.connect(self._on_correction_stream_done)
         worker.error.connect(self._on_correction_stream_error)
         # Retain a reference so the QThread isn't garbage-collected mid-stream.
         self._correction_stream_worker = worker
         self.ac_model.mark_used()
+        self._streaming_masked = _streaming_masked
         self._correction_stream_buf = ""
         self._correction_stream_strength = strength
         self._update_status("⏳  Streaming…", "streaming")
@@ -1046,6 +1069,20 @@ class CorrectionWindow(QWidget):
         cleaned = re.sub(r"\s*<<<\s*END\s*>>>\s*$", "", cleaned).strip()
         cleaned = _apply_post_fixes(cleaned, original=self.original, strength=self._correction_stream_strength)
         cleaned = self._match_original_newlines(cleaned)
+        if hasattr(self, '_streaming_masked') and self._streaming_masked:
+            _surviving = all(
+                f"⟦U{i+1}⟧" in cleaned
+                for i in range(len(self._streaming_masked))
+            )
+            if not _surviving:
+                log("[CW] streaming output lost sentinel(s)")
+                self._on_correction_ready(
+                    self.original, "Sentinel lost — try a larger model"
+                )
+                return
+            for i, entity in enumerate(self._streaming_masked):
+                cleaned = cleaned.replace(f"⟦U{i+1}⟧", entity)
+            self._streaming_masked = []
         if not cleaned.strip():
             log("[CW] stream produced empty output")
             self._on_correction_failed()
@@ -1060,6 +1097,19 @@ class CorrectionWindow(QWidget):
             log(f"[CW] few-shot echo in stream output: {cleaned[:100]!r}")
             self._on_correction_ready(
                 self.original, "Model echoed example — try a larger model"
+            )
+            return
+        from stet.core.text_utils import _hallucination_ratio, _post_splice_sanity
+        if _hallucination_ratio(self.original, cleaned) > 0.6:
+            log("[CW] streaming output diverged too far from input (ratio > 0.6)")
+            self._on_correction_ready(
+                self.original, "Output diverged too much — try a larger model"
+            )
+            return
+        if not _post_splice_sanity(self.original, cleaned):
+            log("[CW] streaming output failed post-splice sanity check")
+            self._on_correction_ready(
+                self.original, "Output failed sanity check — try a larger model"
             )
             return
         custom_sys = self.cfg.get("system_prompt", "").strip()
@@ -1237,9 +1287,10 @@ class CorrectionWindow(QWidget):
 
     # ── chat ──────────────────────────────────────────────────────────────
     def _send_chat(self, msg: str = None, is_template: bool = False):
-        if msg is None:
+        if msg is None or isinstance(msg, bool):
             msg = self.chat_input.text().strip()
         if not msg:
+            self._update_status("⚠  Please enter an instruction", "error")
             return
         self.chat_input.clear()
         self.send_btn.setEnabled(False)

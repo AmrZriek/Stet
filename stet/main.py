@@ -109,6 +109,7 @@ def main():
         from PyQt6.QtWidgets import QApplication
 
         qapp = QApplication(sys.argv)
+        qapp.setStyle("Fusion")
         _boot_log("[BOOT] QApplication created OK")
 
         _boot_log("[BOOT] Creating StetApp...")

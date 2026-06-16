@@ -82,9 +82,12 @@ class SettingsDialog(QDialog):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            child = self.childAt(e.pos())
-            if child is None or isinstance(child, QLabel):
-                self._drag_pos = e.globalPosition().toPoint() - self.pos()
+            ch = self.childAt(e.pos())
+            while ch is not None:
+                if ch.objectName() == "settingsHeader":
+                    self._drag_pos = e.globalPosition().toPoint() - self.pos()
+                    return
+                ch = ch.parentWidget()
 
     def mouseMoveEvent(self, e):
         if self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
@@ -225,6 +228,7 @@ class SettingsDialog(QDialog):
         self.chat_use_separate_cb.toggled.connect(self._update_chat_model_controls_state)
         self.chat_keep_cb.toggled.connect(self._update_chat_model_controls_state)
         self.keep_cb.toggled.connect(self._update_idle_timeout_state)
+        self.model_edit.textChanged.connect(self._on_model_changed)
 
     def set_update_action_text(self, text: str):
         self._app_update_label = text
@@ -250,6 +254,17 @@ class SettingsDialog(QDialog):
         
         keep_loaded = self.chat_keep_cb.isChecked()
         self.chat_idle_timeout_cell.setEnabled(separate and not keep_loaded)
+
+    def _on_model_changed(self, model_path: str):
+        from stet.llm.utils import _supports_mtp
+        supports_mtp = _supports_mtp(model_path)
+        
+        self.mtp_cb.setVisible(supports_mtp)
+        self.mtp_max_cell.setVisible(supports_mtp)
+        self.mtp_min_cell.setVisible(supports_mtp)
+        
+        if not supports_mtp:
+            self.mtp_cb.setChecked(False)
 
     def _on_nav_item_changed(self, row):
         for i in range(self.nav_list.count()):
@@ -414,6 +429,10 @@ class SettingsDialog(QDialog):
         lay.addWidget(prompt_preview)
         lay.addLayout(prompt_row)
 
+        gen_ctrl_btn = QPushButton("Generation Control (JSON/Grammar)")
+        gen_ctrl_btn.clicked.connect(lambda: self._open_generation_control(hk))
+        lay.addWidget(gen_ctrl_btn)
+
         # Load existing custom prompt if present
         existing_custom_prompt = hk.get("custom_prompt", "")
         if existing_custom_prompt:
@@ -469,6 +488,83 @@ class SettingsDialog(QDialog):
         elif res == 2 and not is_new:
             self._temp_hotkeys.pop(idx)
             self._refresh_hotkeys()
+
+    def _open_generation_control(self, target_dict):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Generation Control")
+        dlg.resize(500, 400)
+        dlg.setStyleSheet(self.styleSheet())
+        
+        lay = QVBoxLayout(dlg)
+        lay.addWidget(QLabel("Grammar or JSON Schema:"))
+        text_edit = QTextEdit()
+        
+        existing_val = target_dict.get("grammar")
+        if not existing_val:
+            existing_json = target_dict.get("json_schema")
+            if existing_json:
+                import json
+                existing_val = json.dumps(existing_json, indent=2)
+        text_edit.setPlainText(existing_val or "")
+        lay.addWidget(text_edit)
+        
+        def _pull():
+            import requests
+            port = self.cfg.get("server_port", 8080)
+            try:
+                r = requests.get(f"http://127.0.0.1:{port}/props", timeout=2)
+                r.raise_for_status()
+                data = r.json()
+                settings = data.get("default_generation_settings", {})
+                val = settings.get("grammar") or settings.get("json_schema") or ""
+                if val:
+                    import json
+                    if isinstance(val, dict):
+                        text_edit.setPlainText(json.dumps(val, indent=2))
+                    else:
+                        text_edit.setPlainText(str(val))
+                else:
+                    QMessageBox.information(dlg, "Not Found", "No default grammar/schema found on server.")
+            except Exception as e:
+                QMessageBox.warning(dlg, "Error", f"Failed to pull props: {e}")
+                
+        pull_btn = QPushButton("Pull Model Default")
+        pull_btn.clicked.connect(_pull)
+        lay.addWidget(pull_btn)
+        
+        btn_lay = QHBoxLayout()
+        btn_lay.addStretch()
+        
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(dlg.reject)
+        save_btn = QPushButton("Save")
+        save_btn.clicked.connect(dlg.accept)
+        
+        btn_lay.addWidget(cancel_btn)
+        btn_lay.addWidget(save_btn)
+        lay.addLayout(btn_lay)
+        
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            val = text_edit.toPlainText().strip()
+            if val:
+                import json
+                if val.startswith("{"):
+                    try:
+                        parsed = json.loads(val)
+                        target_dict["json_schema"] = parsed
+                        target_dict.pop("grammar", None)
+                    except Exception as e:
+                        QMessageBox.warning(self, "JSON Error", f"Invalid JSON Schema: {e}")
+                        # Not rejecting the outer dialog, just won't save this change if it errors out here
+                        # Actually wait, let's just abort saving inside this control if JSON is invalid.
+                        # It's okay, we showed a warning.
+                        pass
+                else:
+                    target_dict["grammar"] = val
+                    target_dict.pop("json_schema", None)
+            else:
+                target_dict.pop("grammar", None)
+                target_dict.pop("json_schema", None)
 
     def _refresh_settings_templates(self):
         self.templates_list_w.clear()
@@ -526,6 +622,10 @@ class SettingsDialog(QDialog):
         prompt_edit.setMinimumHeight(140)
         prompt_edit.setPlainText(tmpl.get("prompt", ""))
         lay.addWidget(prompt_edit)
+
+        gen_ctrl_btn = QPushButton("Generation Control (JSON/Grammar)")
+        gen_ctrl_btn.clicked.connect(lambda: self._open_generation_control(tmpl))
+        lay.addWidget(gen_ctrl_btn)
 
         btn_lay = QHBoxLayout()
 
@@ -591,7 +691,7 @@ class SettingsDialog(QDialog):
         self._refresh_hotkeys()
         self.server_edit.setText(self.cfg.get("llama_server_path", ""))
         self.model_edit.setText(self.cfg.get("model_path", ""))
-        recents = self.cfg.get("recent_models", [])
+        recents = [p for p in self.cfg.get("recent_models", []) if p and Path(p).exists()]
         self.recent_combo.addItems(recents)
         self.chat_use_separate_cb.setChecked(self.cfg.get("chat_use_separate_model", False))
         self.chat_model_edit.setText(self.cfg.get("chat_model_path", ""))
@@ -600,10 +700,30 @@ class SettingsDialog(QDialog):
         self.port_spin.setValue(self.cfg.get("server_port", 8080))
         self.ctx_spin.setValue(self.cfg.get("context_size", 12800))
         self.gpu_spin.setValue(self.cfg.get("gpu_layers", 99))
+        self.threads_spin.setValue(self.cfg.get("threads", -1))
+        self.threads_batch_spin.setValue(self.cfg.get("threads_batch", -1))
+        self.parallel_spin.setValue(self.cfg.get("parallel", 4))
+        self.batch_spin.setValue(self.cfg.get("batch_size", 2048))
+        self.ubatch_spin.setValue(self.cfg.get("ubatch_size", 512))
+        self.flash_attn_cb.setChecked(self.cfg.get("flash_attn", False))
+        self.mtp_cb.setChecked(self.cfg.get("mtp_enabled", False))
+        self.mtp_max_spin.setValue(self.cfg.get("mtp_max_draft", 2))
+        self.mtp_min_spin.setValue(self.cfg.get("mtp_min_draft", 0))
+        self.rope_base_spin.setValue(self.cfg.get("rope_freq_base", 0.0))
+        self.rope_scale_spin.setValue(self.cfg.get("rope_freq_scale", 0.0))
         self.temp_spin.setValue(self.cfg.get("temperature", 0.1))
         self.topk_spin.setValue(self.cfg.get("top_k", 40))
         self.topp_spin.setValue(self.cfg.get("top_p", 0.95))
         self.minp_spin.setValue(self.cfg.get("min_p", 0.05))
+        self.seed_spin.setValue(self.cfg.get("seed", -1))
+        self.typical_p_spin.setValue(self.cfg.get("typical_p", 1.0))
+        self.tfs_z_spin.setValue(self.cfg.get("tfs_z", 1.0))
+        self.mirostat_spin.setValue(self.cfg.get("mirostat", 0))
+        self.mirostat_tau_spin.setValue(self.cfg.get("mirostat_tau", 5.0))
+        self.mirostat_eta_spin.setValue(self.cfg.get("mirostat_eta", 0.1))
+        self.repeat_penalty_spin.setValue(self.cfg.get("repeat_penalty", 1.0))
+        self.freq_penalty_spin.setValue(self.cfg.get("frequency_penalty", 0.0))
+        self.pres_penalty_spin.setValue(self.cfg.get("presence_penalty", 0.0))
         self.keep_cb.setChecked(self.cfg.get("keep_model_loaded", True))
         self.idle_spin.setValue(self.cfg.get("idle_timeout_seconds", 300))
         self._update_idle_timeout_state()
@@ -611,6 +731,7 @@ class SettingsDialog(QDialog):
         _chat_mode = self.cfg.get("chat_mode", "conversation")
         self.chat_mode_combo.setCurrentIndex(0 if _chat_mode == "conversation" else 1)
         self._update_chat_model_controls_state()
+        self._on_model_changed(self.model_edit.text())
 
         # Load correction modes prompts (built-ins 0-2 only).
         # Custom modes (3+) are populated directly from cfg in CorrectionModesPage._build_ui.
@@ -633,10 +754,30 @@ class SettingsDialog(QDialog):
         self.cfg.set("server_port", self.port_spin.value())
         self.cfg.set("context_size", self.ctx_spin.value())
         self.cfg.set("gpu_layers", self.gpu_spin.value())
+        self.cfg.set("threads", self.threads_spin.value())
+        self.cfg.set("threads_batch", self.threads_batch_spin.value())
+        self.cfg.set("parallel", self.parallel_spin.value())
+        self.cfg.set("batch_size", self.batch_spin.value())
+        self.cfg.set("ubatch_size", self.ubatch_spin.value())
+        self.cfg.set("flash_attn", self.flash_attn_cb.isChecked())
+        self.cfg.set("mtp_enabled", self.mtp_cb.isChecked())
+        self.cfg.set("mtp_max_draft", self.mtp_max_spin.value())
+        self.cfg.set("mtp_min_draft", self.mtp_min_spin.value())
+        self.cfg.set("rope_freq_base", self.rope_base_spin.value())
+        self.cfg.set("rope_freq_scale", self.rope_scale_spin.value())
         self.cfg.set("temperature", self.temp_spin.value())
         self.cfg.set("top_k", self.topk_spin.value())
         self.cfg.set("top_p", self.topp_spin.value())
         self.cfg.set("min_p", self.minp_spin.value())
+        self.cfg.set("seed", self.seed_spin.value())
+        self.cfg.set("typical_p", self.typical_p_spin.value())
+        self.cfg.set("tfs_z", self.tfs_z_spin.value())
+        self.cfg.set("mirostat", self.mirostat_spin.value())
+        self.cfg.set("mirostat_tau", self.mirostat_tau_spin.value())
+        self.cfg.set("mirostat_eta", self.mirostat_eta_spin.value())
+        self.cfg.set("repeat_penalty", self.repeat_penalty_spin.value())
+        self.cfg.set("frequency_penalty", self.freq_penalty_spin.value())
+        self.cfg.set("presence_penalty", self.pres_penalty_spin.value())
         self.cfg.set("keep_model_loaded", self.keep_cb.isChecked())
         self.cfg.set("idle_timeout_seconds", self.idle_spin.value())
         self.cfg.set("system_prompt", self.sysprompt_edit.toPlainText().strip())

@@ -195,16 +195,12 @@ def update_app(root: Path = ROOT, wait_pid: int | None = None, restart: bool = F
     tag = data.get("tag_name", "unknown")
     assets = data.get("assets", [])
 
-    remote_ver = tag.lstrip("vV")
-    local_ver = get_local_version(root)
+    remote_tuple = _parse_version(remote_ver)
+    local_tuple = _parse_version(local_ver)
 
-    print(f"  Latest release : {tag}")
-    print(f"  Local version  : {local_ver}")
-
-    # Stet is locked to V1 (1.0.0); ignore newer remote versions
-    print("  Note: Stet is locked to V1 (1.0.0). Ignoring remote updates.")
-    print("  You already have the latest version.")
-    return
+    if remote_tuple <= local_tuple:
+        print("  You already have the latest version.")
+        return
 
     # Find the main binary asset for the current OS
     os_kw = (

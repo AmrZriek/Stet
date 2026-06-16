@@ -1102,6 +1102,7 @@ def main() -> None:
     log(f"Found application archive: {zip_path}")
 
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     app.setApplicationName("Stet Setup")
     app.setOrganizationName("Stet")
 

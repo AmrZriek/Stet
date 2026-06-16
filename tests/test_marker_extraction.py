@@ -12,9 +12,9 @@ def test_extract_no_markers():
 
 
 def test_extract_only_start_marker():
-    # Without END, regex fails, and fallback rejects it because it contains raw markers
+    # Without END, regex succeeds by tolerating missing END (as a stop sequence)
     res = _extract_rewritten_sentence("<<<START>>> text")
-    assert res is None
+    assert res == "text"
 
 
 def test_extract_extra_whitespace_in_markers():

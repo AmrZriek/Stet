@@ -108,6 +108,10 @@ class ConfigManager:
             "Product Update",
             "Decision Memo",
             "Social Post",
+            "Email Polish",
+            "Executive Briefing",
+            "Fix Grammar",
+            "Rewrite & Polish",
         }
         templates = cfg.get("custom_templates", [])
         template_names = {t.get("name", "") for t in templates if isinstance(t, dict)}
@@ -141,8 +145,12 @@ class ConfigManager:
                     if cleaned != t["name"]:
                         t["name"] = cleaned
                         self._needs_save = True
+                    if t["name"] == "Polish & Refine":
+                        t["name"] = "Polish and Refine"
+                        self._needs_save = True
                 if t.get("prompt") == _OLD_REWRITE_POLISH_TEMPLATE_PROMPT:
-                    t["prompt"] = DEFAULT_TEMPLATES[3]["prompt"]
+                    t["prompt"] = DEFAULT_TEMPLATES[1]["prompt"]
+                    t["name"] = "Polish and Refine"
                     self._needs_save = True
 
         # Migrate correction_modes: add 4th "Custom Patch" mode if missing.

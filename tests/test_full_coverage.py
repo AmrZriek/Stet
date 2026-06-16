@@ -312,14 +312,15 @@ class TestModelManagerCoverage:
     @patch("requests.get")
     def test_load_model_warning_tiny_model(self, mock_get, mock_popen, mock_size, cfg):
         manager = ModelManager(cfg)
+        manager.cfg.set("gpu_layers", 0)
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_get.return_value = mock_resp
-
+    
         # Capture signals
         warning_message = []
         manager.model_warning.connect(warning_message.append)
-
+    
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc

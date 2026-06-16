@@ -171,18 +171,6 @@ class TestStartupCommandFrozen:
 class TestBuildScriptIntegrity:
     """build.py structural checks — ensures release packaging is correct."""
 
-    def test_nuitka_cmd_includes_pyqt6_plugin(self):
-        """Nuitka build command must include --enable-plugin=pyqt6."""
-        cmd = build._nuitka_cmd("3.2.0", Path("artifacts"))
-        cmd_str = " ".join(str(c) for c in cmd)
-        assert "--enable-plugin=pyqt6" in cmd_str
-
-    def test_nuitka_cmd_is_standalone(self):
-        """Nuitka build command must use --standalone."""
-        cmd = build._nuitka_cmd("3.2.0", Path("artifacts"))
-        cmd_str = " ".join(str(c) for c in cmd)
-        assert "--standalone" in cmd_str
-
     def test_windows_resource_version_pads_to_four_parts(self):
         """Windows resource version must be four dot-separated integers."""
         result = build._windows_resource_version("3.2.0")

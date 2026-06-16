@@ -10,8 +10,11 @@ Tests cover:
 
 from __future__ import annotations
 
-import os
 import sys
+import stet.windows_installer_payload
+sys.modules["windows_installer_payload"] = stet.windows_installer_payload
+
+import os
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch

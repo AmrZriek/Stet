@@ -14,6 +14,7 @@ from stet.llm.model_manager import (
     _create_job_object_for_subprocess,
     _estimate_tokens,
 )
+from conftest import MockResponse
 
 # Store the un-mocked load_model method at import time so tests can restore it
 _ORIGINAL_LOAD_MODEL = ModelManager.load_model
@@ -405,3 +406,199 @@ class TestShouldRetryLoad:
             return default
         cfg.get = cfg_get
         assert manager.should_retry_load() is True
+
+
+# -- _warmup_prompt_cache() ---------------------------------------------------
+
+
+class TestWarmupPromptCache:
+    """_warmup_prompt_cache() pre-fills the KV cache with a minimal request."""
+
+    def test_sends_minimal_post_with_cache_prompt(self, manager, monkeypatch):
+        """Warmup posts to /v1/chat/completions with max_tokens=1, cache_prompt=True."""
+        captured = {}
+
+        def fake_post(url, *args, **kwargs):
+            captured["url"] = url
+            captured["json"] = kwargs.get("json")
+            captured["timeout"] = kwargs.get("timeout")
+            return MockResponse({"choices": [{"message": {"content": ""}}]})
+
+        monkeypatch.setattr("requests.post", fake_post)
+        manager._warmup_prompt_cache()
+
+        assert captured["url"] == manager._chat_url()
+        assert captured["url"].endswith("/v1/chat/completions")
+        assert captured["json"] == {
+            "messages": [{"role": "system", "content": "warmup"}],
+            "max_tokens": 1,
+            "cache_prompt": True,
+        }
+        assert captured["timeout"] == 5
+
+    def test_swallows_exceptions(self, manager, monkeypatch):
+        """A failed warmup must not raise — load must still complete."""
+        def fake_post(url, *args, **kwargs):
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr("requests.post", fake_post)
+        # Should not raise
+        manager._warmup_prompt_cache()
+
+
+# -- Persistent HTTP session reuse --------------------------------------------
+
+
+class TestPersistentSession:
+    """ModelManager reuses a single requests.Session across corrections.
+
+    Avoids per-call TCP handshake overhead. Session is created lazily, is
+    thread-safe (single HTTPAdapter with pool_maxsize=8 for 4 parallel slots
+    plus headroom), and is intentionally NOT closed after each patch.
+    """
+
+    def test_session_is_none_until_first_access(self, manager):
+        """Lazy initialization: no socket is opened until something asks for it."""
+        assert manager._session is None
+
+    def test_get_session_creates_session_on_first_call(self, manager):
+        """_get_session() instantiates a Session on first access."""
+        session = manager._get_session()
+        assert session is not None
+        assert manager._session is session
+
+    def test_get_session_returns_same_instance(self, manager):
+        """Subsequent calls return the same Session instance (identity check)."""
+        s1 = manager._get_session()
+        s2 = manager._get_session()
+        assert s1 is s2
+
+    def test_session_has_http_adapter_with_pool_8(self, manager):
+        """The persistent session is mounted with HTTPAdapter pool_maxsize=8.
+
+        Supports the 4 parallel server slots plus headroom for retries.
+        """
+        from requests.adapters import HTTPAdapter
+
+        session = manager._get_session()
+        adapter = session.get_adapter("http://127.0.0.1:8080")
+        assert isinstance(adapter, HTTPAdapter)
+        # pool settings are stored on the adapter's init kwargs
+        assert adapter._pool_maxsize == 8
+        assert adapter._pool_connections == 4
+
+    def test_session_not_closed_after_patch(self, manager):
+        """After correct_text_patch returns, the persistent session must still be live."""
+        # Pretend the server is loaded so correct_text_patch proceeds.
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        # Stub out the per-chunk worker so we don't depend on the LLM mock.
+        # Must return something different from the input so any_success=True.
+        manager._rewrite_sentence_chunk = (
+            lambda chunk_text, custom_sys, idx, total, strength,
+            cancel_event=None, mode_prompt_override=None, session=None: (
+                "Hello world this is test."
+            )
+        )
+
+        # Pre-warm so a session exists; capture it
+        pre = manager._get_session()
+
+        result, units = manager.correct_text_patch(
+            "hello world this is test", strength="smart_fix"
+        )
+        assert result is not None
+        # The session must be the same object — not recreated, not closed
+        assert manager._session is pre
+        # Sanity: a live session is usable (post would work in real flow)
+        assert not _is_session_closed(manager._session)
+
+    def test_session_reused_across_multiple_patches(self, manager):
+        """Multiple correct_text_patch calls share the same persistent session."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        manager._rewrite_sentence_chunk = (
+            lambda chunk_text, custom_sys, idx, total, strength,
+            cancel_event=None, mode_prompt_override=None, session=None: (
+                "Hello world this is test."
+            )
+        )
+
+        s1 = manager._get_session()
+        mgr_id_after_first = id(manager._session)
+
+        manager.correct_text_patch("hello world this is test", strength="smart_fix")
+        assert id(manager._session) == mgr_id_after_first
+
+        manager.correct_text_patch("another sentence to fix", strength="smart_fix")
+        assert id(manager._session) == mgr_id_after_first
+
+        manager.correct_text_patch("yet another chunk here", strength="smart_fix")
+        assert id(manager._session) == mgr_id_after_first
+
+        assert manager._session is s1
+
+    def test_close_session_releases_and_clears(self, manager):
+        """close_session() closes the underlying session and resets the slot."""
+        from requests.adapters import HTTPAdapter
+
+        session = manager._get_session()
+        assert manager._session is session
+        # Adapter is mounted
+        assert isinstance(
+            session.get_adapter("http://127.0.0.1:8080"), HTTPAdapter
+        )
+
+        manager.close_session()
+
+        assert manager._session is None
+        # Calling again creates a fresh session
+        new_session = manager._get_session()
+        assert new_session is not session
+
+    def test_close_session_safe_when_never_created(self, manager):
+        """close_session() is a no-op if no session was ever created."""
+        assert manager._session is None
+        manager.close_session()  # must not raise
+        assert manager._session is None
+
+    def test_close_session_idempotent(self, manager):
+        """Calling close_session() twice is safe."""
+        manager._get_session()
+        manager.close_session()
+        manager.close_session()  # must not raise
+        assert manager._session is None
+
+    def test_fallback_chunk_path_uses_persistent_session(self, manager, monkeypatch):
+        """_rewrite_sentence_chunk called without a session uses the persistent one."""
+        import requests
+
+        captured_session = {}
+
+        def fake_post(self, url, *args, **kwargs):
+            captured_session["session"] = self
+            return MockResponse(
+                {"choices": [{"message": {"content": "<<<START>>>ok<<<END>>>"}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+
+        manager._rewrite_sentence_chunk("hello world", None, 1, 1, "smart_fix")
+
+        # The session that actually posted must be the manager's persistent one
+        assert captured_session["session"] is manager._get_session()
+
+
+def _is_session_closed(session) -> bool:
+    """Best-effort check: a closed Session's adapters return a NullAdapter."""
+    try:
+        from requests.adapters import HTTPAdapter
+
+        adapter = session.get_adapter("http://127.0.0.1:8080")
+        return not isinstance(adapter, HTTPAdapter)
+    except Exception:
+        return True

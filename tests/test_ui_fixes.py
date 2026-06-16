@@ -117,7 +117,7 @@ def test_settings_dialog_shows_migrated_default_templates(qapp, monkeypatch, tmp
     dlg = SettingsDialog(cfg)
 
     assert dlg.templates_list_w.count() == len(DEFAULT_TEMPLATES)
-    assert dlg.templates_list_w.item(0).text() == "Email Polish"
+    assert dlg.templates_list_w.item(0).text() == "Clean Up Dictation"
     dlg.close()
 
 def test_template_actions_disable_without_selection(qapp):
@@ -670,7 +670,8 @@ def test_model_submenu_left_arrow(qapp):
         assert app._llm_menu_action is not None
         assert not app._llm_menu_action.icon().isNull()
 
-        ss = app.tray.contextMenu().styleSheet()
+        menu = app._tray_menu if hasattr(app, "_tray_menu") else app.tray.contextMenu()
+        ss = menu.styleSheet()
         assert "QMenu::right-arrow{image:none;width:0px;height:0px;}" in ss
         assert "QMenu::icon{left:10px;width:12px;height:12px;}" in ss
         app._quit()

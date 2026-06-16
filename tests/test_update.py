@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 SRC = "\n".join(f.read_text(encoding="utf-8") for f in (ROOT / "stet").rglob("*.py"))
-UPDATE_SRC = (ROOT / "update.py").read_text(encoding="utf-8")
+UPDATE_SRC = (ROOT / "stet" / "update.py").read_text(encoding="utf-8")
 
 
 # ── Helpers extracted from source (duplicated here to test them in isolation) ──

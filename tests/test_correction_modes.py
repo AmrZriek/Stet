@@ -120,9 +120,7 @@ def test_rewrite_chunk_uses_config_mode_prompt(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
     assert (
-        "spelling-only" in captured_sys.lower()
-        or "spelling only" in captured_sys.lower()
-        or "Fix ONLY clear misspellings" in captured_sys
+        "spelling mistakes. change nothing else" in captured_sys.lower()
     )
 
 
@@ -148,7 +146,7 @@ def test_rewrite_chunk_conservative_maps_to_mode_0(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "conservative")
     # Mode 0 prompt should be the spelling-only one
-    assert "Fix ONLY clear misspellings" in captured_sys
+    assert "Fix spelling mistakes" in captured_sys
 
 
 def test_rewrite_chunk_smartfix_maps_to_mode_1(monkeypatch):
@@ -173,7 +171,7 @@ def test_rewrite_chunk_smartfix_maps_to_mode_1(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "smart_fix")
     assert (
-        "Fix typos, spelling, grammar, punctuation, and capitalization" in captured_sys
+        "Fix spelling, grammar, punctuation, and capitalization" in captured_sys
     )
 
 
@@ -198,7 +196,7 @@ def test_rewrite_chunk_aggressive_maps_to_mode_2(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "aggressive")
-    assert "expert editor" in captured_sys
+    assert "Edit the text so it reads clearly and smoothly" in captured_sys
 
 
 def test_rewrite_chunk_falls_back_to_hardcoded_when_no_modes(monkeypatch):
@@ -231,7 +229,8 @@ def test_rewrite_chunk_falls_back_to_hardcoded_when_no_modes(monkeypatch):
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "conservative")
     # Should still work via hardcoded fallback
     assert (
-        "spelling-only" in captured_sys.lower()
+        "Fix spelling mistakes" in captured_sys
+        or "spelling-only" in captured_sys.lower()
         or "Fix ONLY clear misspellings" in captured_sys
     )
 

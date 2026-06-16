@@ -14,7 +14,7 @@ requests>=2.34.2
 pyspellchecker>=0.9.0
 
 # ── Build / release only (uncomment when building) ──────────────────────────
-# pyinstaller>=6.0
+pyinstaller>=6.0
 
 # ── Dev / tests only ────────────────────────────────────────────────────────
 # pytest>=7

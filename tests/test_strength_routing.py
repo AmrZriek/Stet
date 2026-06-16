@@ -45,7 +45,7 @@ def test_rewrite_chunk_selects_conservative_prompt(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "conservative")
-    assert "spelling-only" in captured_sys
+    assert "Fix spelling mistakes" in captured_sys
 
 
 def test_rewrite_chunk_selects_smartfix_prompt(monkeypatch):
@@ -64,9 +64,9 @@ def test_rewrite_chunk_selects_smartfix_prompt(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "smart_fix")
-    assert "spelling-only" not in captured_sys
+    assert "Fix spelling mistakes" not in captured_sys
     assert (
-        "Fix typos, spelling, grammar, punctuation, and capitalization" in captured_sys
+        "Fix spelling, grammar, punctuation, and capitalization" in captured_sys
     )
 
 
@@ -90,7 +90,7 @@ def test_rewrite_chunk_selects_aggressive_prompt(monkeypatch):
 
     assert result == "Improved test"
     system_prompt = captured_payload["messages"][0]["content"]
-    assert "expert editor" in system_prompt
+    assert "clearly and smoothly" in system_prompt
     assert "Improve clarity" in system_prompt
     assert captured_payload["think"] is False
 
@@ -126,7 +126,7 @@ def test_correct_text_patch_smartfix_accepts_rewrite_with_guard_disabled(monkeyp
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
         lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
-            "hello different phrase was today"
+            "hello different this is test"
         )
     )
 
@@ -137,7 +137,7 @@ def test_correct_text_patch_smartfix_accepts_rewrite_with_guard_disabled(monkeyp
 
     # Hallucination guard is disabled for smart_fix (threshold = 1.0).
     # The rewrite should be accepted.
-    assert result == "Hello different phrase was today"
+    assert result == "Hello different this is test"
     assert units == 1
 
 
@@ -146,7 +146,7 @@ def test_correct_text_patch_aggressive_accepts_rewrite_with_guard_disabled(monke
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
         lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
-            "hello different phrase was today"
+            "hello new world this is test"
         )
     )
 
@@ -157,7 +157,7 @@ def test_correct_text_patch_aggressive_accepts_rewrite_with_guard_disabled(monke
 
     # Both hallucination guard and repetition-loss guard are disabled
     # for aggressive mode. The rewrite should be accepted.
-    assert result == "Hello different phrase was today"
+    assert result == "Hello new world this is test"
     assert units == 1
 
 

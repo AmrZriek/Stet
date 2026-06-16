@@ -803,6 +803,33 @@ QCheckBox:disabled {
     color: #4b5563;
 }
 
+/* ── Context Menus (QMenu) ─────────────────────────────────────────── */
+QMenu {
+    background-color: #121315;
+    border: 1px solid #28292c;
+    border-radius: 0px;
+    padding: 4px 0;
+    color: #ededee;
+}
+QMenu::item {
+    padding: 6px 24px;
+    background-color: transparent;
+    color: #ededee;
+}
+QMenu::item:selected {
+    background-color: #d4a373;
+    color: #121212;
+}
+QMenu::item:disabled {
+    color: #4b5563;
+}
+QMenu::separator {
+    height: 1px;
+    background: #28292c;
+    margin: 4px 0;
+}
+
+
 
 
 

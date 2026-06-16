@@ -80,3 +80,28 @@ def test_config_manager_preserves_custom_template_names(monkeypatch, tmp_path):
         "My Workflow",
         "Email",
     ]
+
+
+def test_config_manager_migrates_ampersand_template(monkeypatch, tmp_path):
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        """
+{
+  "custom_templates": [
+    {"name": "Polish & Refine", "prompt": "Some prompt."},
+    {"name": "Simplify", "prompt": "Some simplify prompt."}
+  ]
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("stet.core.config.CONFIG_FILE", config_file)
+
+    mgr = ConfigManager()
+
+    assert mgr.config["custom_templates"][0]["name"] == "Polish and Refine"
+    assert mgr.config["custom_templates"][1]["name"] == "Simplify"
+
+    persisted = json.loads(config_file.read_text(encoding="utf-8"))
+    assert persisted["custom_templates"][0]["name"] == "Polish and Refine"
+
