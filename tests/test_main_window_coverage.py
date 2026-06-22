@@ -426,6 +426,33 @@ class TestOnModelStatus:
             cw._on_model_status("Model ready")
             mock_update.assert_not_called()
 
+    def test_ready_restarts_pending_correction_after_external_load(
+        self, qtbot, cfg, monkeypatch
+    ):
+        monkeypatch.setattr(CorrectionWindow, "_do_correction", lambda self: None)
+        cw = _make_cw(cfg, qtbot)
+        cw.method_badge.setText("STREAM CORRECT")
+        cw._correction_thread_token = None
+        started_threads = []
+
+        class CapturingThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+                self.daemon = daemon
+                started_threads.append(self)
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr("stet.ui.main_window.threading.Thread", CapturingThread)
+
+        cw._on_model_status("Loading model")
+        cw._on_model_status("Ready — fake-model")
+
+        assert len(started_threads) == 1
+        assert started_threads[0].daemon is True
+        assert cw._retry_correction_when_model_ready is False
+
     def test_correcting(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw._on_model_status("correcting text")
@@ -789,6 +816,23 @@ class TestStrengthNormalization:
 
 
 class TestDoCorrection:
+    def test_restarted_thread_reports_model_load_failure(
+        self, qtbot, cfg, monkeypatch
+    ):
+        original_do_correction = CorrectionWindow._do_correction
+        monkeypatch.setattr(CorrectionWindow, "_do_correction", lambda self: None)
+        cw = _make_cw(cfg, qtbot)
+        cw._correction_cancelled = True
+        cw.ac_model.is_loaded.return_value = False
+        cw.ac_model.load_model.return_value = None
+        cw.ac_model.should_retry_load.return_value = False
+
+        original_do_correction(cw)
+
+        assert cw._correction_cancelled is False
+        assert "Model error" in cw.status_lbl.text()
+        assert cw._retry_correction_when_model_ready is True
+
     def test_model_not_loaded_shows_original(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw.ac_model.is_loaded.return_value = False

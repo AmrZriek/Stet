@@ -4,7 +4,6 @@ import subprocess
 import os
 import sys
 import psutil
-from pathlib import Path
 
 # Need to find the server path
 from stet.constants import LLAMA_CPP_DIR, SERVER_EXE

@@ -89,13 +89,17 @@ def strip_meta_commentary(text: str, original: str = "") -> str:
 def looks_like_prose(text: str) -> bool:
     lines = text.splitlines() or [text]
     sym = sum(text.count(c) for c in '{}[]();=<>\\|#$@`~') / max(len(text), 1)
-    indented = sum(1 for l in lines if l[:1] in (' ', '\t') and l.strip())
+    indented = sum(1 for line in lines if line[:1] in (' ', '\t') and line.strip())
     words = re.findall(r"[A-Za-z']+", text)
-    if not words: return False
+    if not words:
+        return False
     avg_caps_mid = sum(1 for w in words if re.search(r'[a-z][A-Z]', w)) / len(words)
-    if sym > 0.04 or indented >= 2 or avg_caps_mid > 0.05: return False
-    if re.search(r'^\s*(def |class |import |function |const |let |var |\$ |> )', text, re.M): return False
-    if re.search(r'\d{2}:\d{2}:\d{2}|0x[0-9a-fA-F]+|^\s*\[(DEBUG|INFO|WARN|ERROR)', text, re.M): return False
+    if sym > 0.04 or indented >= 2 or avg_caps_mid > 0.05:
+        return False
+    if re.search(r'^\s*(def |class |import |function |const |let |var |\$ |> )', text, re.M):
+        return False
+    if re.search(r'\d{2}:\d{2}:\d{2}|0x[0-9a-fA-F]+|^\s*\[(DEBUG|INFO|WARN|ERROR)', text, re.M):
+        return False
     return True
 
 
@@ -333,7 +337,6 @@ def _spell_autocorrect(text: str) -> tuple[str, int]:
     """
     sp = _get_spell()
     wf = sp.word_frequency
-    total = wf._total_words or 1
     n_fixes = 0
 
     def _sub(match: re.Match) -> str:
@@ -407,7 +410,10 @@ def apply_hunk_guard(orig: str, corr: str, mode_index: int) -> str:
 
     # Tokenize into words, spaces, and punctuation
     import re
-    tokenize = lambda t: re.findall(r"\w+|\s+|[^\w\s]", t)
+
+    def tokenize(t):
+        return re.findall(r"\w+|\s+|[^\w\s]", t)
+
     orig_tokens = tokenize(orig)
     corr_tokens = tokenize(corr)
     
@@ -723,15 +729,46 @@ def _chunk_text_by_sentences(text: str, max_words: int) -> list[tuple[str, str]]
     # Normalize carriage returns to standard newlines to avoid splitting on \r
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
+    # ── List-marker pattern ──────────────────────────────────────────
+    # Matches a fragment that is ONLY a list marker: a single letter,
+    # digit, or short roman numeral followed by a period.  When the
+    # simple sentence-boundary regex splits on "a. ", the marker letter
+    # ends up as a standalone fragment — we re-merge it with the next
+    # fragment so list items stay intact.
+    _LIST_MARKER_RE = re.compile(
+        r"^(?:[a-zA-Z]|[0-9]{1,3}|[ivxlcdmIVXLCDM]{1,4})\.$"
+    )
+
     parts = re.split(r"((?<=[.!?])\s+|\n+)", text)
 
     # re.split with a capturing group alternates: [text, sep, text, sep, ..., text]
     # Pair them up into (sentence_text, separator_after) tuples
-    sentences: list[tuple[str, str]] = []
+    raw_sentences: list[tuple[str, str]] = []
     for i in range(0, len(parts), 2):
         sent = parts[i]
         sep = parts[i + 1] if i + 1 < len(parts) else ""
-        sentences.append((sent, sep))
+        raw_sentences.append((sent, sep))
+
+    # ── Re-merge orphaned list markers ─────────────────────────────
+    # If a fragment is just a bare list marker (e.g. "a", "1", "ii")
+    # that got split away from its content by the period-space rule,
+    # glue it back to the next fragment.
+    sentences: list[tuple[str, str]] = []
+    i = 0
+    while i < len(raw_sentences):
+        sent, sep = raw_sentences[i]
+        if (
+            _LIST_MARKER_RE.match(sent.strip())
+            and i + 1 < len(raw_sentences)
+        ):
+            # Re-attach: marker + separator + next sentence
+            next_sent, next_sep = raw_sentences[i + 1]
+            merged = sent + sep + next_sent
+            sentences.append((merged, next_sep))
+            i += 2
+        else:
+            sentences.append((sent, sep))
+            i += 1
 
     # Greedily pack sentences into chunks without exceeding max_words.
     # cur_sep tracks the separator between the last sentence in the current chunk

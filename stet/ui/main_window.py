@@ -87,6 +87,8 @@ class CorrectionWindow(QWidget):
         self._correction_stream_worker: StreamWorker | None = None
         self._correction_cancelled: bool = False
         self._cancel_event = threading.Event()
+        self._correction_thread_token: object | None = None
+        self._retry_correction_when_model_ready: bool = False
         self._stream_buf = ""
         self._active_ai_bubble: QLabel | None = None
         self._drag_pos = None
@@ -789,11 +791,16 @@ class CorrectionWindow(QWidget):
             if self.status_lbl.text().startswith("⏳  Loading model"):
                 if getattr(self, "_correction_cancelled", False) or self.method_badge.text() == "STREAM CORRECT":
                     self._update_status(self.method_badge.text(), "ready")
+            if getattr(self, "_retry_correction_when_model_ready", False):
+                self._retry_correction_when_model_ready = False
+                t = threading.Thread(target=self._do_correction, daemon=True)
+                t.start()
             return
         elif "correcting" in ml:
             self._update_status("⏳  Processing…", "processing")
         elif "loading" in ml or "starting" in ml:
             self._update_status("⏳  Loading model…", "loading")
+            self._retry_correction_when_model_ready = True
         elif "error" in ml or "failed" in ml or "not found" in ml:
             self._update_status(self.status_lbl.text(), "error")
 
@@ -808,7 +815,21 @@ class CorrectionWindow(QWidget):
             "smart_fix" (grammar/capitalization/punctuation).
         """
         log("[CW] _do_correction started")
+        # Use a unique object token to identify this specific correction run.
+        # This prevents stale correction threads or callbacks from updating UI
+        # state or clearing the token if a new correction task has started.
+        thread_token = object()
+        self._correction_thread_token = thread_token
+        my_cancel = self._cancel_event
+        self._correction_cancelled = False
         try:
+            def is_stale() -> bool:
+                return (
+                    my_cancel.is_set()
+                    or my_cancel is not self._cancel_event
+                    or self._correction_cancelled
+                )
+
             text = self.original
 
             if not self.ac_model.is_loaded():
@@ -829,19 +850,13 @@ class CorrectionWindow(QWidget):
                     msg = f"Model error: File not found at {os.path.basename(path)}"
                 else:
                     msg = "Model error: Failed to load AC model"
+                self._retry_correction_when_model_ready = True
                 self._correction_failed_with_msg.emit(msg)
                 return
 
-            # ── Re-acquire the cancel latch ─────────────────────────────────
-            # _on_strength_changed (and _apply_template) set
-            # _correction_cancelled = True and replace the cancel event
-            # before launching this thread.  Now that we are inside the
-            # freshly-launched thread we clear the latch so our own results
-            # can pass the gate.  We also snapshot the cancel event — if it
-            # has been replaced by another strength-change before our HTTP
-            # call finishes we know we are stale and must drop our result.
-            my_cancel = self._cancel_event
-            self._correction_cancelled = False
+            # The thread claimed my_cancel at entry. If another strength change,
+            # reset, or close replaces it before the HTTP work finishes, this
+            # thread is stale and must not emit UI results.
 
             # Wait for /health to be 200 (model fully loaded and ready)
             import requests
@@ -849,7 +864,7 @@ class CorrectionWindow(QWidget):
             health_ready = not hasattr(self.ac_model, "_health_url")
             if not health_ready:
                 for i in range(180):
-                    if my_cancel.is_set() or my_cancel is not self._cancel_event or self._correction_cancelled:
+                    if is_stale():
                         log("[CW] correction cancelled while waiting for model ready")
                         return
                     if not self.ac_model.is_loaded():
@@ -868,6 +883,9 @@ class CorrectionWindow(QWidget):
                     time.sleep(1)
 
             if not health_ready:
+                if is_stale():
+                    return
+                self._retry_correction_when_model_ready = True
                 log("[CW] AC model health check timeout — emitting failure with message")
                 self._correction_failed_with_msg.emit("Model error: Server health check timeout")
                 return
@@ -901,8 +919,8 @@ class CorrectionWindow(QWidget):
             # the edge case where the old event was set AND replaced: the
             # result is None but _correction_cancelled was already cleared
             # by the next thread, so the latch alone wouldn't catch us.
-            if my_cancel is not self._cancel_event:
-                log("[CW] stale thread — cancel event replaced, dropping result")
+            if is_stale():
+                log("[CW] stale thread — dropping result")
                 return
             if result is None:
                 log("[CW] patch fallback -> streaming")
@@ -924,6 +942,9 @@ class CorrectionWindow(QWidget):
         except Exception as e:
             log(f"[CW] _do_correction CRASHED: {e}\n{traceback.format_exc()}")
             self._correction_failed.emit()
+        finally:
+            if self._correction_thread_token is thread_token:
+                self._correction_thread_token = None
 
     def _on_correction_ready(self, corrected: str, method: str):
         if self._correction_cancelled:
@@ -1233,6 +1254,74 @@ class CorrectionWindow(QWidget):
                                 )
         return "".join(parts).replace(" <br>", "<br>").replace("<br> ", "<br>")
 
+    def _split_opcodes_by_nl(self, orig_words: list[str], corr_words: list[str], opcodes: list[tuple[str, int, int, int, int]], nl_token: str) -> list[tuple[str, int, int, int, int]]:
+        # precondition: This helper assumes spatial alignment between orig_words and corr_words
+        # across newline boundaries. It splits opcodes on newlines to prevent layout scramble.
+        new_opcodes = []
+        for tag, i1, i2, j1, j2 in opcodes:
+            has_nl_orig = any(w == nl_token for w in orig_words[i1:i2])
+            has_nl_corr = any(w == nl_token for w in corr_words[j1:j2])
+            if not has_nl_orig and not has_nl_corr:
+                new_opcodes.append((tag, i1, i2, j1, j2))
+                continue
+
+            orig_lines = []
+            curr_start = i1
+            for idx in range(i1, i2):
+                if orig_words[idx] == nl_token:
+                    orig_lines.append((curr_start, idx))
+                    curr_start = idx + 1
+            orig_lines.append((curr_start, i2))
+
+            corr_lines = []
+            curr_start = j1
+            for idx in range(j1, j2):
+                if corr_words[idx] == nl_token:
+                    corr_lines.append((curr_start, idx))
+                    curr_start = idx + 1
+            corr_lines.append((curr_start, j2))
+
+            M = len(orig_lines)
+            N = len(corr_lines)
+            max_len = max(M, N)
+
+            for idx in range(max_len):
+                o_start, o_end = (orig_lines[idx] if idx < M else (i2, i2))
+                c_start, c_end = (corr_lines[idx] if idx < N else (j2, j2))
+
+                if idx < M and idx < N:
+                    if o_start == o_end and c_start == c_end:
+                        pass
+                    elif o_start == o_end:
+                        new_opcodes.append(("insert", o_start, o_end, c_start, c_end))
+                    elif c_start == c_end:
+                        new_opcodes.append(("delete", o_start, o_end, c_start, c_end))
+                    else:
+                        if orig_words[o_start:o_end] == corr_words[c_start:c_end]:
+                            new_opcodes.append(("equal", o_start, o_end, c_start, c_end))
+                        else:
+                            new_opcodes.append(("replace", o_start, o_end, c_start, c_end))
+                elif idx < M:
+                    if o_start != o_end:
+                        new_opcodes.append(("delete", o_start, o_end, j2, j2))
+                else:
+                    if c_start != c_end:
+                        new_opcodes.append(("insert", i2, i2, c_start, c_end))
+
+                if idx < max_len - 1:
+                    has_nl_o = idx < M - 1
+                    has_nl_c = idx < N - 1
+                    if has_nl_o and has_nl_c:
+                        nl_o = orig_lines[idx][1]
+                        nl_c = corr_lines[idx][1]
+                        new_opcodes.append(("equal", nl_o, nl_o + 1, nl_c, nl_c + 1))
+                    elif has_nl_o:
+                        nl_o = orig_lines[idx][1]
+                        new_opcodes.append(("delete", nl_o, nl_o + 1, j2, j2))
+                    elif has_nl_c:
+                        nl_c = corr_lines[idx][1]
+                        new_opcodes.append(("insert", i2, i2, nl_c, nl_c + 1))
+        return new_opcodes
 
     def _word_diff(self, corrected: str) -> tuple[str, list[str], list[str], list[tuple[str, int, int, int, int]]]:
         # Use a placeholder so newlines survive the word-split/rejoin pipeline.
@@ -1246,7 +1335,8 @@ class CorrectionWindow(QWidget):
         orig_words = prep(self.original)
         corr_words = prep(corrected)
         opcodes = difflib.SequenceMatcher(None, orig_words, corr_words).get_opcodes()
-        return nl_token, orig_words, corr_words, opcodes
+        split_opcodes = self._split_opcodes_by_nl(orig_words, corr_words, opcodes, nl_token)
+        return nl_token, orig_words, corr_words, split_opcodes
 
     def _final_result_html(self, corrected: str) -> str:
         if self._final_result_diff_is_readable(corrected):
@@ -1454,6 +1544,7 @@ class CorrectionWindow(QWidget):
         # Mark cancel BEFORE any UI mutation so late callbacks can short-circuit.
         self._correction_cancelled = True
         self._cancel_event.set()
+        self._retry_correction_when_model_ready = False
 
         # Stop the streaming correction worker if one is running.
         if self._correction_stream_worker is not None:
@@ -1515,6 +1606,7 @@ class CorrectionWindow(QWidget):
         # Cancel any in-flight correction first.
         self._correction_cancelled = True
         self._cancel_event.set()
+        self._retry_correction_when_model_ready = False
         if self._stream_worker and self._stream_worker.isRunning():
             self._stream_worker.blockSignals(True)
             self._stream_worker.stop()

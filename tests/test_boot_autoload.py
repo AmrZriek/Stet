@@ -54,7 +54,7 @@ class TestBootAutoLoad:
 
         monkeypatch.setattr("stet.llm.model_manager.ModelManager.load_model", track_load)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
 
         # Give the daemon thread a moment to start
         time.sleep(0.1)
@@ -77,7 +77,7 @@ class TestBootAutoLoad:
             return True
         monkeypatch.setattr("stet.llm.model_manager.ModelManager.load_model", track_load)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
 
         time.sleep(0.1)
         assert len(load_calls) == 0, f"Expected NO load at boot with empty path, got {len(load_calls)} calls"
@@ -142,7 +142,7 @@ class TestDeferredRetry:
 
         monkeypatch.setattr(QTimer, "singleShot", mock_single_shot)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
 
         # Emit the specific 'Model file not found' status to trigger the slot
         app.ac_model.status_changed.emit("Model file not found — will retry")
@@ -151,7 +151,7 @@ class TestDeferredRetry:
         deferred_calls = [(m, s) for m, s in timer_calls if s == app._deferred_model_retry]
         assert len(deferred_calls) == 1
         msecs, slot = deferred_calls[0]
-        assert msecs == 45_000
+        assert msecs == 15_000
 
 
     def test_deferred_retry_executes_load_model_thread(self, tmp_path, monkeypatch, qtbot):
@@ -172,7 +172,7 @@ class TestDeferredRetry:
 
         monkeypatch.setattr("stet.llm.model_manager.ModelManager.load_model", track_load)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
 
         assert app.ac_model.is_loaded() is False
 
@@ -203,7 +203,7 @@ class TestDeferredRetry:
             timer_calls.append((msecs, slot))
         monkeypatch.setattr(QTimer, "singleShot", mock_single_shot)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
 
         # "Load error" status — server crash or timeout
         app.ac_model.status_changed.emit("Load error: Server did not start within 180 s")
@@ -231,7 +231,7 @@ class TestDeferredRetry:
             timer_calls.append((msecs, slot))
         monkeypatch.setattr(QTimer, "singleShot", mock_single_shot)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
         app.ac_model.status_changed.emit("Server exited immediately — see server_log.txt")
         deferred = [(m, s) for m, s in timer_calls if s == app._deferred_model_retry]
         assert len(deferred) == 1, "Expected retry on 'Server exited' status"
@@ -256,14 +256,14 @@ class TestDeferredRetry:
             timer_calls.append((msecs, slot))
         monkeypatch.setattr(QTimer, "singleShot", mock_single_shot)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
 
         # First failure → delay should be 45_000 ms
         app.ac_model.status_changed.emit("Load error: Server did not start")
         deferred1 = [(m, s) for m, s in timer_calls if s == app._deferred_model_retry]
         assert len(deferred1) == 1
         msecs1 = deferred1[0][0]
-        assert msecs1 == 45_000, f"First retry should be 45s, got {msecs1 // 1000}s"
+        assert msecs1 == 15_000, f"First retry should be 15s, got {msecs1 // 1000}s"
 
         # Simulate retry executing (reset _retry_scheduled) then second failure
         app._retry_scheduled = False
@@ -271,7 +271,7 @@ class TestDeferredRetry:
         deferred2 = [(m, s) for m, s in timer_calls if s == app._deferred_model_retry]
         assert len(deferred2) == 2
         msecs2 = deferred2[1][0]
-        assert msecs2 == 90_000, f"Second retry should be 90s (exponential), got {msecs2 // 1000}s"
+        assert msecs2 == 30_000, f"Second retry should be 30s (exponential), got {msecs2 // 1000}s"
 
     def test_retry_stops_after_max_retries(self, tmp_path, monkeypatch, qtbot):
         """After _max_retries failures, no more retries are scheduled."""
@@ -293,7 +293,7 @@ class TestDeferredRetry:
             timer_calls.append((msecs, slot))
         monkeypatch.setattr(QTimer, "singleShot", mock_single_shot)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
         app._max_retries = 3
 
         # Fire _max_retries failures
@@ -322,7 +322,7 @@ class TestDeferredRetry:
         }))
         monkeypatch.setattr(config_mod, "CONFIG_FILE", config_file)
 
-        app = StetApp()
+        app = StetApp()  # noqa: F841
         app._retry_count = 2
 
         # Simulate model_loaded signal making is_loaded return True

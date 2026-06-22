@@ -25,6 +25,7 @@ archive/
 .tmp/
 .opencode/
 .gemini/
+.codex/
 GEMINI.md
 # AGENT_CONTEXT.md is intentionally tracked — it is the shared AI context file
 
@@ -48,6 +49,7 @@ graphify-out/
 *.zip
 
 # Tests — centralized cache dir (pytest.ini sets cache_dir = .pytest_cache)
+.pytest
 .pytest_cache/
 tests/temp_e2e_launch/
 scripts/ci_checks/temp_e2e_launch/

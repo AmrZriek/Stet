@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -119,7 +119,7 @@ DEFAULT_CONFIG: dict = {
     "threads_batch": -1,
     "keep_model_loaded": True,
     "idle_timeout_seconds": 300,
-    "patch_chunk_size": 40,
+    "patch_chunk_size": 60,
     "cache_prompt": True,
     "recent_models": [],
     # Chat model

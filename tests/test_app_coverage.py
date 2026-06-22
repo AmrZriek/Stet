@@ -1290,6 +1290,50 @@ class TestStetAppCaptureSelection:
         mock_terminal_guard.assert_called_once()
         mock_send_chord.assert_called_once()
 
+    @patch("stet.core.app.QSystemTrayIcon")
+    @patch("stet.core.app._send_ctrl_chord")
+    def test_capture_selection_uia_timeout_uses_daemon_fallback(
+        self, mock_send_chord, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        created_threads = []
+
+        class HangingThread:
+            def __init__(self, *args, target=None, name=None, daemon=False, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+                self.join_timeouts = []
+                created_threads.append(self)
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                self.join_timeouts.append(timeout)
+
+            def is_alive(self):
+                return True
+
+        monkeypatch.setattr("stet.core.app.threading.Thread", HangingThread)
+        monkeypatch.setattr("stet.core.clipboard._read_selection_uia", lambda: None)
+        monkeypatch.setattr("stet.core.app._is_terminal_or_ide", MagicMock(return_value=False))
+        monkeypatch.setattr("time.sleep", lambda t: None)
+        app._safe_paste = MagicMock(side_effect=["old clip", "", "fallback selection"])
+        app._safe_copy = MagicMock()
+
+        res = app._capture_selection()
+
+        assert res == "fallback selection"
+        assert len(created_threads) == 1
+        assert created_threads[0].name == "StetUIACapture"
+        assert created_threads[0].daemon is True
+        assert created_threads[0].join_timeouts == [1.5]
+        mock_send_chord.assert_called_once()
+
     def test_capture_selection_polling_constants(self):
         """Verify the polling tunables are set to the latency-reduced values.
 
@@ -1325,10 +1369,12 @@ class TestStetAppTrayActivated:
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._open_settings = MagicMock()
+        app._tray_menu.exec = MagicMock()
         import stet.core.app
 
         app._tray_activated(stet.core.app.QSystemTrayIcon.ActivationReason.Trigger)
         app._open_settings.assert_not_called()
+        app._tray_menu.exec.assert_called_once()
 
 
 class TestAppUpdateChecker:

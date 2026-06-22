@@ -1,5 +1,6 @@
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -500,7 +501,7 @@ class StetApp(QObject):
                 )
                 return
             self._retry_scheduled = True
-            delay_ms = min(45_000 * (2 ** self._retry_count), 180_000)
+            delay_ms = min(15_000 * (2 ** self._retry_count), 60_000)
             self._retry_count += 1
             log(
                 f"[APP] Model load failed (attempt {self._retry_count}/"
@@ -894,7 +895,37 @@ class StetApp(QObject):
         # Try UIA direct text capture first (bypassing the clipboard)
         from stet.core.clipboard import _read_selection_uia
 
-        uia_text = _read_selection_uia()
+        # UIA calls are COM-based and can deadlock if the target app's UI
+        # thread is frozen. Use a daemon worker and a bounded join; executor
+        # shutdown waits for workers and would nullify the timeout.
+        uia_result: queue.Queue[str] = queue.Queue(maxsize=1)
+
+        def _capture_uia_worker() -> None:
+            try:
+                uia_result.put_nowait(_read_selection_uia() or "")
+            except Exception as e:
+                log(f"[Capture] UIA capture failed: {e}")
+                try:
+                    uia_result.put_nowait("")
+                except queue.Full:
+                    pass
+
+        uia_thread = threading.Thread(
+            target=_capture_uia_worker,
+            name="StetUIACapture",
+            daemon=True,
+        )
+        uia_thread.start()
+        uia_thread.join(timeout=1.5)
+        if uia_thread.is_alive():
+            log("[Capture] UIA capture timed out — falling back to clipboard")
+            uia_text = ""
+        else:
+            try:
+                uia_text = uia_result.get_nowait()
+            except queue.Empty:
+                uia_text = ""
+
         if uia_text:
             log(f"[Capture] Direct UIA capture succeeded: {uia_text[:80]!r}")
             self._old_clip = self._safe_paste()
@@ -1545,8 +1576,11 @@ class StetApp(QObject):
 
             # The updater is one-file/self-contained. Running a temp copy means
             # the installed updater EXE is not locked while files are replaced.
-            temp_dir = Path(tempfile.gettempdir()) / "StetUpdate"
-            temp_dir.mkdir(parents=True, exist_ok=True)
+            # Note: tempfile.mkdtemp creates a unique dir per call. Prior fixed-name
+            # directories or older StetUpdate_ directories could become orphaned
+            # debris in the temp folder if they are not cleaned up.
+            # TODO: Consider doing a startup sweep to clean up old StetUpdate_* directories.
+            temp_dir = Path(tempfile.mkdtemp(prefix="StetUpdate_"))
             temp_updater = temp_dir / updater.name
             shutil.copy2(updater, temp_updater)
             return [

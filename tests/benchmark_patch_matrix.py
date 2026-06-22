@@ -314,7 +314,6 @@ _INVERSE_TYPOS = {
     "paragraph": "paragrph",
     "parallel": "paralel",
     "particular": "particuler",
-    "particular": "particlar",
     "passenger": "passanger",
     "patience": "pataince",
     "permanent": "permanant",
@@ -561,7 +560,6 @@ def generate_text(target_words: int, error_density: float, rng: random.Random) -
     words = words[:target_words]
 
     if error_density > 0 and _INVERSE_TYPOS:
-        typo_targets = list(_INVERSE_TYPOS.keys())
         num_errors = int(len(words) * error_density)
         indices = rng.sample(range(len(words)), min(num_errors, len(words)))
         for idx in indices:

@@ -1,4 +1,3 @@
-import pytest
 from stet.llm.model_manager import ModelManager
 
 class MockConfig:
@@ -109,6 +108,25 @@ def test_url_masking_bare_https(monkeypatch):
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
     assert result == original
 
+def test_url_only_text_is_preserved_without_rewrite(monkeypatch):
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    rewrite_calls = 0
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal rewrite_calls
+        rewrite_calls += 1
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "https://a.example/path?q=1 https://b.example/watch?v=2"
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert result == original
+    assert rewrite_calls == 0
+
 def test_url_masking_missing_sentinel(monkeypatch):
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
@@ -121,13 +139,8 @@ def test_url_masking_missing_sentinel(monkeypatch):
 
     original = "visit https://example.com today"
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
-    
-    # When sentinel is lost, it falls back to streaming, which returns None in unit test without mock,
-    # or chunk rejection means it retains original.
-    # The actual implementation of correct_text_patch says:
-    # "If dict pre-pass changed nothing AND no unit ever succeeded, report total failure so the caller falls back to streaming. "
-    # So it returns None, len(chunks).
-    assert result is None or result == original
+
+    assert result == original
 
 def test_url_masking_mangled_sentinel(monkeypatch):
     mgr = ModelManager(MockConfig())
@@ -141,5 +154,5 @@ def test_url_masking_mangled_sentinel(monkeypatch):
 
     original = "visit https://example.com today"
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
-    
-    assert result is None or result == original
+
+    assert result == original

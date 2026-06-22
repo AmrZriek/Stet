@@ -14,7 +14,7 @@ from stet.llm.model_manager import (
     _create_job_object_for_subprocess,
     _estimate_tokens,
 )
-from conftest import MockResponse
+from tests.conftest import MockResponse
 
 # Store the un-mocked load_model method at import time so tests can restore it
 _ORIGINAL_LOAD_MODEL = ModelManager.load_model
@@ -415,26 +415,75 @@ class TestWarmupPromptCache:
     """_warmup_prompt_cache() pre-fills the KV cache with a minimal request."""
 
     def test_sends_minimal_post_with_cache_prompt(self, manager, monkeypatch):
-        """Warmup posts to /v1/chat/completions with max_tokens=1, cache_prompt=True."""
-        captured = {}
+        """Warmup posts to /v1/chat/completions with max_tokens=1, cache_prompt=True, once per parallel slot."""
+        captured_calls = []
 
         def fake_post(url, *args, **kwargs):
-            captured["url"] = url
-            captured["json"] = kwargs.get("json")
-            captured["timeout"] = kwargs.get("timeout")
+            captured_calls.append({
+                "url": url,
+                "json": kwargs.get("json"),
+                "timeout": kwargs.get("timeout"),
+            })
             return MockResponse({"choices": [{"message": {"content": ""}}]})
 
         monkeypatch.setattr("requests.post", fake_post)
         manager._warmup_prompt_cache()
 
-        assert captured["url"] == manager._chat_url()
-        assert captured["url"].endswith("/v1/chat/completions")
-        assert captured["json"] == {
-            "messages": [{"role": "system", "content": "warmup"}],
-            "max_tokens": 1,
-            "cache_prompt": True,
+        parallel = manager.cfg.get("parallel", 4)
+        assert len(captured_calls) == parallel, (
+            f"Expected {parallel} warmup requests (one per slot), got {len(captured_calls)}"
+        )
+        for call in captured_calls:
+            assert call["url"] == manager._chat_url()
+            payload = call["json"]
+            assert payload["max_tokens"] == 1
+            assert payload["cache_prompt"] is True
+            assert call["timeout"] == 10
+            # System message should contain the real correction prompt, not a
+            # throwaway "warmup" prompt.
+            sys_msg = payload["messages"][0]
+            assert sys_msg["role"] == "system"
+            assert len(sys_msg["content"]) > 50, "System prompt should be the real correction prompt"
+            # User message should contain the START/END markers
+            user_msg = payload["messages"][1]
+            assert user_msg["role"] == "user"
+            assert "<<<START>>>" in user_msg["content"]
+            assert payload["messages"][2]["role"] == "assistant"
+            assert payload["messages"][2]["content"] == "<<<START>>>\n"
+
+    def test_gemma_warmup_uses_real_correction_message_shape(self, monkeypatch):
+        """Gemma warmup must match real correction prompts for cache hits."""
+        cfg_data = {
+            "model_path": "gemma-4-E2B-it.gguf",
+            "server_host": "127.0.0.1",
+            "server_port": 8080,
+            "parallel": 1,
+            "streaming_strength": "full_correction",
+            "correction_modes": [],
         }
-        assert captured["timeout"] == 5
+
+        class GemmaCfg:
+            def get(self, key, default=None):
+                return cfg_data.get(key, default)
+
+        manager = ModelManager(GemmaCfg())
+        captured_calls = []
+
+        def fake_post(url, *args, **kwargs):
+            captured_calls.append(kwargs.get("json"))
+            return MockResponse({"choices": [{"message": {"content": ""}}]})
+
+        monkeypatch.setattr("requests.post", fake_post)
+        manager._warmup_prompt_cache()
+
+        assert len(captured_calls) == 1
+        messages = captured_calls[0]["messages"]
+        assert len(messages) == 2
+        assert messages[0]["role"] == "user"
+        assert "Fix spelling, grammar, punctuation, and capitalization" in messages[0]["content"]
+        assert "<<<START>>>\nwarmup\n<<<END>>>" in messages[0]["content"]
+        assert messages[1]["role"] == "assistant"
+        assert messages[1]["content"] == "<<<START>>>\n"
 
     def test_swallows_exceptions(self, manager, monkeypatch):
         """A failed warmup must not raise — load must still complete."""
@@ -602,3 +651,67 @@ def _is_session_closed(session) -> bool:
         return not isinstance(adapter, HTTPAdapter)
     except Exception:
         return True
+
+
+class TestTerminalPunctuationGuard:
+    """Tests for the per-chunk terminal-punctuation guard in ModelManager._rewrite_sentence_chunk."""
+
+    def test_terminal_punctuation_restored(self, manager, monkeypatch):
+        """If the LLM drops trailing punctuation from a chunk, it is restored."""
+        import requests
+
+        mock_content = "<<<START>>>Hello world<<<END>>>"
+
+        def fake_post(self, url, *args, **kwargs):
+            return MockResponse(
+                {"choices": [{"message": {"content": mock_content}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+
+        # Period dropped -> restored
+        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "smart_fix")
+        assert res == "Hello world."
+
+        # Exclamation dropped -> restored
+        res = manager._rewrite_sentence_chunk("Hello world!", None, 1, 1, "smart_fix")
+        assert res == "Hello world!"
+
+        # Question mark dropped -> restored
+        res = manager._rewrite_sentence_chunk("Hello world?", None, 1, 1, "smart_fix")
+        assert res == "Hello world?"
+
+    def test_terminal_punctuation_preserved_with_whitespace(self, manager, monkeypatch):
+        """Preserves trailing whitespace when restoring punctuation."""
+        import requests
+        import stet.llm.model_manager as mm
+
+        mock_content = "<<<START>>>Hello world <<<END>>>"
+
+        def fake_post(self, url, *args, **kwargs):
+            return MockResponse(
+                {"choices": [{"message": {"content": mock_content}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        # Force the extracted sentence to have trailing whitespace to test preservation
+        monkeypatch.setattr(mm, "_extract_rewritten_sentence", lambda raw: "Hello world ")
+
+        res = manager._rewrite_sentence_chunk("Hello world. ", None, 1, 1, "smart_fix")
+        assert res == "Hello world. "
+
+    def test_terminal_punctuation_not_duplicated(self, manager, monkeypatch):
+        """Does not duplicate punctuation if the LLM correctly preserves it."""
+        import requests
+
+        mock_content = "<<<START>>>Hello world.<<<END>>>"
+
+        def fake_post(self, url, *args, **kwargs):
+            return MockResponse(
+                {"choices": [{"message": {"content": mock_content}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+
+        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "smart_fix")
+        assert res == "Hello world."

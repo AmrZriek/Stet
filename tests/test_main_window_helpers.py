@@ -110,18 +110,109 @@ def test_send_button_enabled_state(qtbot, monkeypatch):
     )
     qtbot.addWidget(win)
     
-    assert win.send_btn.isEnabled() == False
+    assert not win.send_btn.isEnabled()
     
     win.chat_input.setText("hello")
-    assert win.send_btn.isEnabled() == True
+    assert win.send_btn.isEnabled()
     
     win.chat_input.setText("   ")
-    assert win.send_btn.isEnabled() == False
+    assert not win.send_btn.isEnabled()
     
     win._send_chat(msg="fix this")
-    assert win.send_btn.isEnabled() == False
+    assert not win.send_btn.isEnabled()
     
     win._stream_buf = "mock output"
     win._on_chat_done("mock output")
     
-    assert win.send_btn.isEnabled() == True
+    assert win.send_btn.isEnabled()
+
+
+class TestOpcodesSplitting:
+    """CorrectionWindow._split_opcodes_by_nl splits opcodes on newlines to prevent layout scramble."""
+
+    def test_split_opcodes_by_nl(self):
+        nl = "\x00NL\x00"
+        orig_words = ['too', nl, 'so', 'yes']
+        corr_words = ['too.', nl, 'So', 'yes,']
+        opcodes = [('replace', 0, 4, 0, 4)]
+
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('replace', 0, 1, 0, 1),
+            ('equal', 1, 2, 1, 2),
+            ('replace', 2, 4, 2, 4)
+        ]
+
+    def test_split_opcodes_empty_line_both_sides(self):
+        nl = "\x00NL\x00"
+        orig_words = [nl, 'hello']
+        corr_words = [nl, 'hello']
+        opcodes = [('replace', 0, 2, 0, 2)]
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('equal', 0, 1, 0, 1),
+            ('equal', 1, 2, 1, 2)
+        ]
+
+    def test_split_opcodes_pure_delete(self):
+        nl = "\x00NL\x00"
+        orig_words = ['one', 'two', nl]
+        corr_words = [nl]
+        opcodes = [('replace', 0, 3, 0, 1)]
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('delete', 0, 2, 0, 0),
+            ('equal', 2, 3, 0, 1)
+        ]
+
+    def test_split_opcodes_pure_insert(self):
+        nl = "\x00NL\x00"
+        orig_words = [nl]
+        corr_words = ['one', 'two', nl]
+        opcodes = [('replace', 0, 1, 0, 3)]
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('insert', 0, 0, 0, 2),
+            ('equal', 0, 1, 2, 3)
+        ]
+
+    def test_split_opcodes_mismatched_line_counts_delete(self):
+        nl = "\x00NL\x00"
+        orig_words = ['one', nl, 'two', nl, 'three']
+        corr_words = ['one', 'two', 'three']
+        opcodes = [('replace', 0, 5, 0, 3)]
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('replace', 0, 1, 0, 3),
+            ('delete', 1, 2, 3, 3),
+            ('delete', 2, 3, 3, 3),
+            ('delete', 3, 4, 3, 3),
+            ('delete', 4, 5, 3, 3)
+        ]
+
+    def test_split_opcodes_mismatched_line_counts_insert(self):
+        nl = "\x00NL\x00"
+        orig_words = ['one', 'two', 'three']
+        corr_words = ['one', nl, 'two', nl, 'three']
+        opcodes = [('replace', 0, 3, 0, 5)]
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('replace', 0, 3, 0, 1),
+            ('insert', 3, 3, 1, 2),
+            ('insert', 3, 3, 2, 3),
+            ('insert', 3, 3, 3, 4),
+            ('insert', 3, 3, 4, 5)
+        ]
+
+    def test_split_opcodes_consecutive_replace(self):
+        nl = "\x00NL\x00"
+        orig_words = ['a', nl, 'b', nl]
+        corr_words = ['x', nl, 'y', nl]
+        opcodes = [('replace', 0, 2, 0, 2), ('replace', 2, 4, 2, 4)]
+        result = CorrectionWindow._split_opcodes_by_nl(None, orig_words, corr_words, opcodes, nl)
+        assert result == [
+            ('replace', 0, 1, 0, 1),
+            ('equal', 1, 2, 1, 2),
+            ('replace', 2, 3, 2, 3),
+            ('equal', 3, 4, 3, 4)
+        ]

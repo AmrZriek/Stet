@@ -1,0 +1,7 @@
+target-version = "py312"
+line-length = 100
+
+[lint]
+# E402 is intentional: Qt HiDPI env vars must be set BEFORE PyQt6 import,
+# and test files manipulate sys.path before importing. Both are documented patterns.
+ignore = ["E402"]

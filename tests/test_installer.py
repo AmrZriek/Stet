@@ -27,7 +27,7 @@ import pytest
 # ---------------------------------------------------------------------------
 try:
     from PyQt6.QtWidgets import QApplication
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import Qt  # noqa: F401
     _QT_AVAILABLE = True
 except ImportError:
     _QT_AVAILABLE = False

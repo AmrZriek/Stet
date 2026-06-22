@@ -107,9 +107,6 @@ def run_benchmark():
     print(f"{'Mode':<15} | {'Length':<10} | {'Type':<15} | {'Chunk':<5} | {'Workers':<7} | {'Time (s)':<8} | {'Calls':<5} | {'Waste':<6} | {'Quality':<7} | {'Rejected'}")
     print("-" * 105)
     
-    import stet.llm.model_manager as mm
-    original_log = mm.log
-    
     for mode, length_name, text_type, chunk_size, workers in itertools.product(MODES, LENGTHS.keys(), TEXT_TYPES, CHUNK_SIZES, WORKERS):
         global stats
         stats = BenchStats()

@@ -57,6 +57,17 @@ _STRENGTH_TO_MODE_INDEX = {
     "rewrite_polish": 2,
 }
 
+_INLINE_HAZARD_RE = re.compile(
+    r'\b(?:https?://|www\.)\S+\b'  # URLs
+    r'|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'  # Emails
+    r'|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute backslash paths
+    r'|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute slash paths
+    r'|(?<=[\s"\'(])/[/\w.-]+/[/\w.-]+\b'  # Unix absolute paths
+    r'|(?<=[\s"\'(])\.\.?/[/\w.-]+/[/\w.-]+\b'  # Unix relative paths
+    r'|(?<=[\s"\'(])\.\.?\\[\\\w.-]+\\[\\\w.-]+\b'  # Windows relative backslash paths
+)
+_INLINE_SENTINEL_RE = re.compile(r"⟦U\d+⟧")
+
 
 def _resolve_mode_index(strength: str, modes: list) -> int:
     """Map a strength string to a correction_modes list index.
@@ -225,7 +236,11 @@ class ModelManager(QObject):
             from requests.adapters import HTTPAdapter
 
             session = requests.Session()
-            adapter = HTTPAdapter(pool_connections=4, pool_maxsize=8)
+            parallel_slots = self.cfg.get("parallel", 4)
+            adapter = HTTPAdapter(
+                pool_connections=parallel_slots,
+                pool_maxsize=parallel_slots * 2,
+            )
             # mount() is part of the real requests.Session API; some tests
             # monkeypatch requests.Session with a stub that lacks it. In that
             # case the session is still functional for post() — it just won't
@@ -261,25 +276,101 @@ class ModelManager(QObject):
     def _chat_url(self) -> str:
         return self._base_url() + "/v1/chat/completions"
 
+    def _correction_system_prompt(
+        self,
+        custom_sys: str | None,
+        strength: str,
+        mode_prompt_override: str | None = None,
+    ) -> str:
+        modes = self.cfg.get("correction_modes", [])
+        mode_index = _resolve_mode_index(strength, modes)
+        if mode_prompt_override:
+            system = _wrap_correction_prompt(mode_prompt_override, mode_index)
+        elif modes and mode_index < len(modes):
+            system = _wrap_correction_prompt(modes[mode_index]["prompt"], mode_index)
+        else:
+            system = _wrap_correction_prompt(
+                DEFAULT_CONFIG["correction_modes"][min(mode_index, 3)]["prompt"],
+                min(mode_index, 3),
+            )
+
+        if custom_sys:
+            system += f"\n\nAdditional instructions:\n{custom_sys}"
+        return system
+
+    def _build_correction_messages(
+        self,
+        chunk_text: str,
+        custom_sys: str | None,
+        strength: str,
+        mode_prompt_override: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Build the exact chat message shape used for patch correction.
+
+        Warmup and real correction must share this path so llama-server prompt
+        cache checkpoints match the first real request, including Gemma's
+        user-folded system prompt and assistant prefill.
+        """
+        system = self._correction_system_prompt(
+            custom_sys,
+            strength,
+            mode_prompt_override,
+        )
+        wrapped = f"<<<START>>>\n{chunk_text}\n<<<END>>>"
+        model_name = Path(self.cfg.get(self.model_path_key, "")).name.lower()
+        if "gemma" in model_name:
+            return [
+                {"role": "user", "content": f"{system}\n\n{wrapped}"},
+                {"role": "assistant", "content": "<<<START>>>\n"},
+            ]
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": wrapped},
+            {"role": "assistant", "content": "<<<START>>>\n"},
+        ]
+
     def _warmup_prompt_cache(self) -> None:
         """Pre-fill llama-server's KV cache so the first real correction doesn't
         pay full prompt-evaluation cost.
 
-        Sends a minimal /v1/chat/completions request with cache_prompt=True.
+        Sends ``parallel`` concurrent /v1/chat/completions requests using the
+        *actual* default correction system prompt (smart_fix / mode index 1)
+        with cache_prompt=True.  llama-server's prompt cache is prefix-based
+        and per-slot, so we must warm every slot for the first real correction
+        to hit the cache regardless of which slot handles it.
+
         Best-effort: failures are logged but never raised, so a broken warmup
         can't prevent model load from completing.
         """
         try:
-            log(f"[{self.label}] KV cache warmup — pre-filling prompt cache")
-            requests.post(
-                self._chat_url(),
-                json={
-                    "messages": [{"role": "system", "content": "warmup"}],
-                    "max_tokens": 1,
-                    "cache_prompt": True,
-                },
-                timeout=5,
+            parallel_slots = self.cfg.get("parallel", 4)
+            strength = self.cfg.get("streaming_strength", "full_correction")
+            for hotkey in self.cfg.get("hotkeys", []):
+                if isinstance(hotkey, dict) and hotkey.get("strength"):
+                    strength = hotkey["strength"]
+                    break
+            log(
+                f"[{self.label}] KV cache warmup — pre-filling {parallel_slots} "
+                f"slot(s) with real system prompt"
             )
+            payload = {
+                "messages": self._build_correction_messages(
+                    "warmup",
+                    None,
+                    strength,
+                ),
+                "max_tokens": 1,
+                "cache_prompt": True,
+            }
+            url = self._chat_url()
+
+            def _warm_one(_slot_idx: int) -> None:
+                requests.post(url, json=payload, timeout=10)
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=parallel_slots
+            ) as ex:
+                list(ex.map(_warm_one, range(parallel_slots)))
         except Exception as e:
             log(f"[{self.label}] KV cache warmup failed (non-fatal): {e}")
 
@@ -558,7 +649,10 @@ class ModelManager(QObject):
                 pass
             self.log_file = None
 
-            for i in range(180):
+            load_started_at = time.monotonic()
+            load_deadline = load_started_at + 180.0
+            next_status_at = load_started_at + 15.0
+            while time.monotonic() < load_deadline:
                 if self.server_process.poll() is not None:
                     # Dump server log into app_debug.log for easier diagnosis
                     try:
@@ -574,9 +668,12 @@ class ModelManager(QObject):
                         break
                 except requests.RequestException:
                     pass
-                if i and i % 15 == 0:
-                    self.status_changed.emit(f"Loading… ({i}s)")
-                time.sleep(1)
+                now = time.monotonic()
+                if now >= next_status_at:
+                    elapsed = int(now - load_started_at)
+                    self.status_changed.emit(f"Loading… ({elapsed}s)")
+                    next_status_at += 15.0
+                time.sleep(0.15)
             else:
                 raise RuntimeError("Server did not start within 180 s")
 
@@ -860,25 +957,16 @@ class ModelManager(QObject):
         # ~400-token prompt). Separator preserves inter-unit whitespace/newlines
         # so reassembly is lossless.
         
-        # Inline masking for URLs, emails, and file paths
-        inline_hazard_pattern = re.compile(
-            r'\b(?:https?://|www\.)\S+\b'  # URLs
-            r'|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'  # Emails
-            r'|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute backslash paths
-            r'|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute slash paths
-            r'|(?<=[\s"\'(])/[/\w.-]+/[/\w.-]+\b'  # Unix absolute paths
-            r'|(?<=[\s"\'(])\.\.?/[/\w.-]+/[/\w.-]+\b'  # Unix relative paths
-            r'|(?<=[\s"\'(])\.\.?\\[\\\w.-]+\\[\\\w.-]+\b'  # Windows relative backslash paths
-        )
+        # Inline masking for URLs, emails, and file paths.
         masked_entities = []
         def mask_repl(match):
             idx = len(masked_entities) + 1
             masked_entities.append(match.group(0))
             return f"⟦U{idx}⟧"
-            
-        pre_corrected = inline_hazard_pattern.sub(mask_repl, pre_corrected)
+
+        pre_corrected = _INLINE_HAZARD_RE.sub(mask_repl, pre_corrected)
         
-        chunk_size = self.cfg.get("patch_chunk_size", 40)
+        chunk_size = self.cfg.get("patch_chunk_size", 60)
         chunks = _chunk_text_by_sentences(pre_corrected, chunk_size)
         # if dict_fixes > 0:
         #     log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
@@ -890,6 +978,7 @@ class ModelManager(QObject):
 
         corrected_parts: list[tuple[str, str]] = [("", "")] * len(chunks)
         any_success = False
+        any_preserved = False
 
         from stet.core.text_utils import looks_like_prose
         
@@ -902,10 +991,17 @@ class ModelManager(QObject):
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {}
                 for idx, (chunk_text, sep) in enumerate(chunks):
-                    if not chunk_text.strip() or not looks_like_prose(chunk_text):
+                    editable_text = _INLINE_SENTINEL_RE.sub(" ", chunk_text)
+                    if (
+                        not chunk_text.strip()
+                        or not editable_text.strip()
+                        or not looks_like_prose(editable_text)
+                        or not looks_like_prose(chunk_text)
+                    ):
                         corrected_parts[idx] = (chunk_text, sep)
+                        any_preserved = True
                         continue
-                    
+
                     futures[executor.submit(
                         self._rewrite_sentence_chunk,
                         chunk_text,
@@ -942,6 +1038,8 @@ class ModelManager(QObject):
                         if corrected is None:
                             # Unit failed — keep original text for this unit.
                             corrected_parts[idx] = (chunk_text, sep)
+                            if _INLINE_SENTINEL_RE.search(chunk_text):
+                                any_preserved = True
                             continue
 
                         corrected = _normalize_newlines(
@@ -952,12 +1050,13 @@ class ModelManager(QObject):
                         # must survive verbatim in the corrected output. If a
                         # small model drops or mangles a sentinel the chunk is
                         # unusable because hazard unmasking will fail.
-                        _chunk_sentinels = re.findall(r'⟦U\d+⟧', chunk_text)
+                        _chunk_sentinels = _INLINE_SENTINEL_RE.findall(chunk_text)
                         if _chunk_sentinels and not all(
                             s in corrected for s in _chunk_sentinels
                         ):
                             log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost in correction")
                             corrected_parts[idx] = (chunk_text, sep)
+                            any_preserved = True
                             continue
 
                         # Reject if raw output exceeds the hallucination threshold
@@ -1014,8 +1113,14 @@ class ModelManager(QObject):
         # total failure so the caller falls back to streaming. Otherwise we
         # accept partial success (kept-original units are not a failure).
         if not any_success and dict_fixes == 0 and reassembled == text:
-            log(f"[{self.label}] Patch: no unit succeeded — streaming fallback")
-            return None, len(chunks)
+            if any_preserved or masked_entities:
+                log(
+                    f"[{self.label}] Patch: protected/non-prose unit(s) "
+                    "preserved original — skipping streaming fallback"
+                )
+            else:
+                log(f"[{self.label}] Patch: no unit succeeded — streaming fallback")
+                return None, len(chunks)
 
         final = reassembled
         if final != text:
@@ -1049,36 +1154,12 @@ class ModelManager(QObject):
         if not chunk_text.strip():
             return chunk_text
 
-        if mode_prompt_override:
-            modes = self.cfg.get("correction_modes", [])
-            system = _wrap_correction_prompt(mode_prompt_override, _resolve_mode_index(strength, modes))
-        else:
-            modes = self.cfg.get("correction_modes", [])
-            mode_index = _resolve_mode_index(strength, modes)
-            if modes and mode_index < len(modes):
-                system = _wrap_correction_prompt(modes[mode_index]["prompt"], mode_index)
-            else:
-                system = _wrap_correction_prompt(
-                    DEFAULT_CONFIG["correction_modes"][min(mode_index, 3)]["prompt"],
-                    min(mode_index, 3),
-                )
-
-        if custom_sys:
-            system += f"\n\nAdditional instructions:\n{custom_sys}"
-
-        wrapped = f"<<<START>>>\n{chunk_text}\n<<<END>>>"
-        model_name = Path(self.cfg.get(self.model_path_key, "")).name.lower()
-        if "gemma" in model_name:
-            messages = [
-                {"role": "user", "content": f"{system}\n\n{wrapped}"},
-                {"role": "assistant", "content": "<<<START>>>\n"},
-            ]
-        else:
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": wrapped},
-                {"role": "assistant", "content": "<<<START>>>\n"},
-            ]
+        messages = self._build_correction_messages(
+            chunk_text,
+            custom_sys,
+            strength,
+            mode_prompt_override,
+        )
 
         # Output budget: input tokens + 96 headroom. Per-slot ctx is
         # ~3200 tokens (ctx_size / parallel); paragraph units are ~200 words
@@ -1196,6 +1277,22 @@ class ModelManager(QObject):
         # Guard against LLM-introduced extra newlines (common with small models
         # that insert blank lines between lines that were single-spaced).
         corrected = _normalize_chunk_newlines(chunk_text, corrected)
+
+        # ── Per-chunk terminal-punctuation guard ──────────────────────
+        # The global _apply_post_fixes only guards the very last char of
+        # the reassembled text.  If the LLM drops a trailing period from
+        # a mid-text chunk, it would go unnoticed.  Restore it here.
+        orig_stripped = chunk_text.rstrip()
+        corr_stripped = corrected.rstrip()
+        if (
+            orig_stripped
+            and orig_stripped[-1] in ".!?"
+            and corr_stripped
+            and corr_stripped[-1] not in ".!?"
+        ):
+            # Preserve any trailing whitespace the corrected text may have
+            trailing = corrected[len(corr_stripped):]
+            corrected = corr_stripped + orig_stripped[-1] + trailing
 
         return corrected
 
