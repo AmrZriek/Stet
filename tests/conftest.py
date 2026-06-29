@@ -143,3 +143,12 @@ def mock_llm_get(monkeypatch):
 
     monkeypatch.setattr(requests, "get", mock_get)
 
+
+# TODO: Windows mock GC access violation in tests (Medium)
+# Root Cause: PyQt6 C++ destructor ordering during Python GC when StetApp instances are garbage-collected.
+# MagicMock objects that mock Qt widgets (e.g., QSystemTrayIcon, QTimer, signal connections) can be destroyed
+# in an order that triggers Qt's C++ destructor chain to access already-freed memory.
+# Proposed Fix: Add addFinalizer/addCleanup in test fixtures to explicitly call app.deleteLater() + QApplication.processEvents()
+# before GC runs to ensure clean C++ widget teardown before Python objects are garbage-collected.
+
+

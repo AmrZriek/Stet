@@ -351,7 +351,7 @@ class TestEventFilter:
         cw = _make_cw(cfg, qtbot)
         cw.strength_combo.setCurrentIndex(0)
         event = QKeyEvent(
-            QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier
+            QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.ControlModifier
         )
         result = cw.eventFilter(cw, event)
         assert result is True

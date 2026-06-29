@@ -25,6 +25,7 @@ from stet.core.text_utils import (
     _hallucination_ratio,
     _is_corrupt_output,
     _is_fewshot_echo,
+    _is_refusal_or_empty,
     _loses_meaningful_repetition,
     _normalize_chunk_newlines,
     _post_splice_sanity,
@@ -45,7 +46,7 @@ _HALLUCINATION_THRESHOLDS_BY_STRENGTH = {
     "smart_fix": _HALLUCINATION_THRESHOLD_SMARTFIX,
     "full_correction": 0.6,
     "aggressive": _HALLUCINATION_THRESHOLD_AGGRESSIVE,
-    "rewrite_polish": 0.8,
+    "rewrite_polish": 0.99,
 }
 
 _STRENGTH_TO_MODE_INDEX = {
@@ -364,8 +365,9 @@ class ModelManager(QObject):
             }
             url = self._chat_url()
 
+            session = self._get_session()
             def _warm_one(_slot_idx: int) -> None:
-                requests.post(url, json=payload, timeout=10)
+                session.post(url, json=payload, timeout=10)
 
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=parallel_slots
@@ -966,8 +968,24 @@ class ModelManager(QObject):
 
         pre_corrected = _INLINE_HAZARD_RE.sub(mask_repl, pre_corrected)
         
-        chunk_size = self.cfg.get("patch_chunk_size", 60)
-        chunks = _chunk_text_by_sentences(pre_corrected, chunk_size)
+        is_rewrite_polish = (strength in {"rewrite_polish", "aggressive"})
+        if is_rewrite_polish:
+            chunks = []
+            parts = re.split(r"(\r?\n)", pre_corrected)
+            for i in range(0, len(parts), 2):
+                chunk = parts[i]
+                sep = parts[i+1] if i+1 < len(parts) else ""
+                if len(chunk.split()) > 150:
+                    sub_chunks = _chunk_text_by_sentences(chunk, 150)
+                    if sub_chunks:
+                        last_c, _ = sub_chunks[-1]
+                        sub_chunks[-1] = (last_c, sep)
+                        chunks.extend(sub_chunks)
+                else:
+                    chunks.append((chunk, sep))
+        else:
+            chunk_size = self.cfg.get("patch_chunk_size", 60)
+            chunks = _chunk_text_by_sentences(pre_corrected, chunk_size)
         # if dict_fixes > 0:
         #     log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
         if len(chunks) > 1:
@@ -984,6 +1002,17 @@ class ModelManager(QObject):
         
         modes = self.cfg.get("correction_modes", [])
         mode_index = _resolve_mode_index(strength, modes)
+
+        # Config-driven threshold (single source of truth) for the
+        # rewrite-mode guards (raw + hunk). Falls back to the legacy dict so
+        # older configs still work.
+        threshold = (
+            modes[mode_index].get("hallucination_threshold")
+            if mode_index < len(modes) and isinstance(modes[mode_index], dict)
+            else None
+        )
+        if threshold is None:
+            threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(strength, 1.0)
 
         max_workers = min(len(chunks), self.cfg.get("parallel", 4)) if chunks else 1
 
@@ -1059,18 +1088,27 @@ class ModelManager(QObject):
                             any_preserved = True
                             continue
 
-                        # Reject if raw output exceeds the hallucination threshold
-                        threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(strength, 1.0)
+                        # Reject if raw output exceeds the (config-driven) hallucination threshold
                         if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
                             log(f"[{self.label}] Patch unit {idx + 1} rejected: raw hallucination ratio exceeds threshold")
                             corrected = None
                             corrected_parts[idx] = (chunk_text, sep)
                             continue
 
+                        # Reject if the model refused or returned an empty edit
+                        # (marker-wrapped "Please provide text" type output). The
+                        # divergence guard cannot separate refusals from legit
+                        # rewrites — distributions overlap (refusal 0.58–0.87 vs
+                        # legit max ~0.687) — so use a dedicated detector.
+                        if _is_refusal_or_empty(corrected, chunk_text):
+                            log(f"[{self.label}] Patch unit {idx + 1} rejected: refusal/empty output from model")
+                            corrected_parts[idx] = (chunk_text, sep)
+                            continue
+
                         # Phase 2: hunk-level hallucination guard
                         from stet.core.text_utils import apply_hunk_guard
-                        
-                        guarded_corrected = apply_hunk_guard(chunk_text, corrected, mode_index)
+
+                        guarded_corrected = apply_hunk_guard(chunk_text, corrected, mode_index, threshold=threshold)
                         if guarded_corrected != corrected:
                             log(
                                 f"[{self.label}] Patch unit {idx + 1}: hunk-level "
@@ -1279,20 +1317,23 @@ class ModelManager(QObject):
         corrected = _normalize_chunk_newlines(chunk_text, corrected)
 
         # ── Per-chunk terminal-punctuation guard ──────────────────────
-        # The global _apply_post_fixes only guards the very last char of
-        # the reassembled text.  If the LLM drops a trailing period from
-        # a mid-text chunk, it would go unnoticed.  Restore it here.
-        orig_stripped = chunk_text.rstrip()
-        corr_stripped = corrected.rstrip()
-        if (
-            orig_stripped
-            and orig_stripped[-1] in ".!?"
-            and corr_stripped
-            and corr_stripped[-1] not in ".!?"
-        ):
-            # Preserve any trailing whitespace the corrected text may have
-            trailing = corrected[len(corr_stripped):]
-            corrected = corr_stripped + orig_stripped[-1] + trailing
+        # Only for single-chunk inputs: if the LLM drops trailing .!?,
+        # restore it.  For multi-chunk inputs the per-chunk guard can
+        # introduce spurious punctuation at interior chunk boundaries,
+        # so we skip it and rely on _apply_post_fixes to guard the
+        # final character of the reassembled text.
+        if total == 1:
+            orig_stripped = chunk_text.rstrip()
+            corr_stripped = corrected.rstrip()
+            if (
+                orig_stripped
+                and orig_stripped[-1] in ".!?"
+                and corr_stripped
+                and corr_stripped[-1] not in ".!?"
+            ):
+                # Preserve any trailing whitespace the corrected text may have
+                trailing = corrected[len(corr_stripped):]
+                corrected = corr_stripped + orig_stripped[-1] + trailing
 
         return corrected
 

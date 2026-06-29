@@ -53,4 +53,55 @@ def test_chunk_normal_sentences_still_split():
     chunks = _chunk_text_by_sentences(text, max_words=5)
     assert len(chunks) == 2, f"Expected 2 chunks, got {len(chunks)}: {chunks}"
     assert "cat sat" in chunks[0][0]
-    assert "dog barked" in chunks[1][0]
+    assert "dog barked" in chunks[1][0]
+
+
+def test_looks_like_prose():
+    from stet.core.text_utils import looks_like_prose
+    import re
+
+    assert looks_like_prose("This is a normal paragraph of English text that should be accepted as prose.")
+    assert looks_like_prose("We will meet tomorrow at 10 AM. Please bring the document.")
+    assert looks_like_prose("(Note) this is true.")
+    assert looks_like_prose("I came; I saw; I conquered.")
+    assert looks_like_prose("[Citation Needed] this is true.")
+
+    # 2. No words
+    assert not looks_like_prose("123456 !!! ???")
+    assert not looks_like_prose("")
+
+    # 3. Indented bullets / lines
+    # Unindented markdown list should return True
+    assert looks_like_prose("- item 1\n- item 2\n- item 3")
+    # Indented lines (2+ indented) should return False (indented >= 2)
+    assert not looks_like_prose("  - indented item 1\n  - indented item 2")
+
+    # 4. Math equations / code characters (sym > 0.04)
+    # Inline equation with high symbol ratio
+    assert not looks_like_prose("Let x = y + z; if (x > 10) return;")
+    # Pure equation E = mc^2 has special symbols: '=' count = 1, len = 8 -> 0.125 > 0.04
+    assert not looks_like_prose("E = mc^2")
+
+    # 5. CamelCase / code tokens (avg_caps_mid > 0.05)
+    assert not looks_like_prose("Check the value of myVariable and run getUserId method.")
+
+    # 6. Code keywords regex
+    assert not looks_like_prose("def my_func():\n    pass")
+    assert not looks_like_prose("class StetApp(QMainWindow):\n    pass")
+    assert not looks_like_prose("const value = 42;")
+    assert not looks_like_prose("import sys\nprint(sys.argv)")
+
+    # 7. Log files / Hex patterns
+    assert not looks_like_prose("12:34:56 [INFO] Started server process")
+    assert not looks_like_prose("Error occurred at address 0x7fffb88c")
+
+    # 8. Double-call sentinel check pattern simulation
+    # Simulate a chunk that contains masked URL sentinels
+    chunk_text = "visit ⟦U1⟧ for details on ⟦U2⟧"
+    # Replacing sentinels with a space (like in model_manager.py:995)
+    editable_text = re.sub(r"⟦U\d+⟧", " ", chunk_text)
+
+    # Both must return True for the pipeline to accept it as prose
+    assert looks_like_prose(chunk_text)
+    assert looks_like_prose(editable_text)
+

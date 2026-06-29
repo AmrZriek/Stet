@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -70,14 +70,14 @@ GITHUB_RELEASES_API = "https://api.github.com/repos/AmrZriek/Stet/releases/lates
 # ── llama.cpp backend auto-download ──────────────────────────────────────────
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
-LLAMA_BACKEND_VERSION = "b9577"
+LLAMA_BACKEND_VERSION = "b9827"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BACKEND_VERSION}"
 LLAMA_BACKEND_URLS = {
     "llama": f"{_LLAMA_BASE}/llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip",
     "cuda": f"{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip",
 }
 LLAMA_BACKEND_HASHES = {
-    "llama": "49A7FFB9E68A6306A2CB0A7284D1565049CD978C3B130EAA1D2197E471F4F5D2",
+    "llama": "EAAA91EA991825FEA11028261A99F8F8FD27BF03f3DF6B0C59D95F0B6E62AB85",
     "cuda": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6",
 }
 LLAMA_BACKEND_DIR = f"llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
@@ -163,41 +163,6 @@ DEFAULT_CONFIG: dict = {
             ),
         },
         {
-            "name": "Polish and Refine",
-            "prompt": (
-                "Refine this text so it reads as polished, natural prose:\n"
-                "- Fix all spelling, grammar, and punctuation errors.\n"
-                "- Smooth awkward phrasing and improve sentence flow.\n"
-                "- Tighten wordy constructions without losing meaning.\n"
-                "- Choose more precise words where the original is vague.\n"
-                "- Keep the author's voice and tone — do not make casual "
-                "text formal or vice versa.\n"
-                "- Do not add new ideas or remove existing content.\n"
-                "Output ONLY the refined text without preamble or explanation."
-            ),
-        },
-        {
-            "name": "Fix Grammar Only",
-            "prompt": (
-                "Fix ONLY spelling, punctuation, and grammar errors. Do not "
-                "change wording, tone, sentence structure, or meaning in any "
-                "way. If the text is already correct, return it unchanged. "
-                "Output ONLY the corrected text without preamble or explanation."
-            ),
-        },
-        {
-            "name": "Simplify",
-            "prompt": (
-                "Rewrite this text so it is easy to understand:\n"
-                "- Replace jargon and technical terms with plain language.\n"
-                "- Break long, complex sentences into shorter ones.\n"
-                "- Use active voice where possible.\n"
-                "- Remove unnecessary qualifiers and hedging.\n"
-                "- Preserve all key information and the author's intent.\n"
-                "Output ONLY the simplified text without preamble or explanation."
-            ),
-        },
-        {
             "name": "Professional Tone",
             "prompt": (
                 "Rewrite this text in a clear, professional tone suitable "
@@ -209,6 +174,32 @@ DEFAULT_CONFIG: dict = {
                 "- Keep sentences direct and well-structured.\n"
                 "- Preserve the author's intent and all key information.\n"
                 "Output ONLY the rewritten text without preamble or explanation."
+            ),
+        },
+        {
+            "name": "Academic & Scholarly",
+            "prompt": (
+                "Rewrite this text in an objective, formal, and academic tone suitable "
+                "for research papers, essays, or scholarly publications:\n"
+                "- Use precise, scholarly vocabulary and formal sentence structures.\n"
+                "- Remove first-person pronouns (I, we, my) where possible, adopting "
+                "an objective, third-person perspective.\n"
+                "- Eliminate colloquialisms, contractions, slang, and conversational phrasing.\n"
+                "- Ensure arguments flow logically and transitions are smooth.\n"
+                "- Preserve the exact meaning, factual claims, and technical concepts "
+                "of the original text.\n"
+                "Output ONLY the academic version without preamble or explanation."
+            ),
+        },
+        {
+            "name": "Notes Assistant",
+            "prompt": (
+                "Format and structure the text cleanly as readable notes:\n"
+                "1. If input is already a list/notes layout, keep it but fix typos, grammar, and alignment.\n"
+                "2. If input is prose/dictation, convert it into structured bulleted notes.\n"
+                "3. Use headers (#, ##) for sections, bullet points (-) for items, and bolding (**) for key terms.\n"
+                "4. Keep all facts, names, code, and technical terms exactly as given. Do not summarize or omit.\n"
+                "5. Output ONLY the notes. No preamble, no explanation."
             ),
         },
     ],
@@ -225,14 +216,14 @@ DEFAULT_CONFIG: dict = {
         },
         {
             "name": "Full Correction",
-            "prompt": "Fix spelling, grammar, punctuation, and capitalization. Keep the author's words.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix typos, spelling, grammar, punctuation, and capitalization.\n2. Add missing terminal punctuation (periods or question marks) at the end of sentences that lack it.\n3. Keep the author's wording, tone, and meaning. Do not rewrite for style.\n4. If the text is already correct, copy it exactly as given.\n5. Keep line breaks and spacing exactly as given.\n6. Keep ALL-CAPS words, acronyms (NASA, USA), Title Case, repeated words, and repeated sentences exactly as given.\n7. Copy numbers, names, code, URLs, and symbols exactly as given. Never fix them.\n8. Add nothing else. Remove nothing. Reorder nothing beyond the minimum a fix requires.\n9. Fix ALL instances of a repeated error, not just the first one.\n10. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>him and me was late becuase the traffic.<<<END>>>\nOutput: <<<START>>>He and I were late because of the traffic.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>\nOutput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>",
+            "prompt": "Fix spelling, grammar, punctuation, and capitalization. Keep the author's words.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix typos, spelling, grammar, punctuation, and capitalization.\n2. Add missing terminal punctuation (periods or question marks) at the end of sentences that lack it.\n3. Never remove existing terminal punctuation (. ? !) from the end of a sentence — only add missing punctuation or fix incorrect punctuation.\n4. Keep the author's wording, tone, and meaning. Do not rewrite for style.\n5. If the text is already correct, copy it exactly as given.\n6. Keep line breaks and spacing exactly as given.\n7. Keep ALL-CAPS words, acronyms (NASA, USA), Title Case, repeated words, and repeated sentences exactly as given.\n8. Copy numbers, names, code, URLs, and symbols exactly as given. Never fix them.\n9. Add nothing else. Remove nothing. Reorder nothing beyond the minimum a fix requires.\n10. Fix ALL instances of a repeated error, not just the first one.\n11. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>him and me was late becuase the traffic.<<<END>>>\nOutput: <<<START>>>He and I were late because of the traffic.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>\nOutput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>",
             "hallucination_threshold": 1.0,
             "builtin": True,
         },
         {
             "name": "Rewrite & Polish",
-            "prompt": "Edit the text so it reads clearly and smoothly. Keep the author's voice.\n\nOUTPUT: the edited text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix all spelling, grammar, punctuation, and capitalization.\n2. Improve clarity, flow, and word choice. Cut filler words (um, uh, like, basically, you know, I mean, so yeah, kind of, sort of).\n3. Keep the author's tone: casual stays casual, formal stays formal. Keep slang, contractions, humor, and emphasis.\n4. Keep every fact, claim, name, and number exactly as given. Invent nothing.\n5. Add no greetings, sign-offs, examples, or commentary.\n6. Keep line breaks and paragraph structure as given.\n7. Copy code, URLs, and symbols exactly as given.\n8. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>basically the velvet sofa thing is, it kinda just dont fit in the hallway at all tbh.<<<END>>>\nOutput: <<<START>>>tbh the velvet sofa just doesn't fit in the hallway.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>\nOutput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>",
-            "hallucination_threshold": 1.0,
+            "prompt": "Edit the text so it reads clearly and smoothly. Keep the author's voice.\n\nOUTPUT: the edited text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix all spelling, grammar, punctuation, and capitalization.\n2. Preserve existing terminal punctuation (. ? !) at the end of sentences. Do not drop sentence-ending punctuation.\n3. Improve clarity, flow, and word choice. Cut filler words (um, uh, like, basically, you know, I mean, so yeah, kind of, sort of).\n4. Keep the author's tone: casual stays casual, formal stays formal. Keep slang, contractions, humor, and emphasis.\n5. Keep every fact, claim, name, and number exactly as given. Invent nothing.\n6. Add no greetings, sign-offs, examples, or commentary.\n7. Keep line breaks and paragraph structure as given.\n8. Copy code, URLs, and symbols exactly as given.\n9. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>basically the velvet sofa thing is, it kinda just dont fit in the hallway at all tbh.<<<END>>>\nOutput: <<<START>>>tbh the velvet sofa just doesn't fit in the hallway.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>\nOutput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>",
+            "hallucination_threshold": 0.99,
             "builtin": True,
         },
         {
@@ -266,41 +257,6 @@ DEFAULT_TEMPLATES: list[dict[str, str]] = [
         ),
     },
     {
-        "name": "Polish and Refine",
-        "prompt": (
-            "Refine this text so it reads as polished, natural prose:\n"
-            "- Fix all spelling, grammar, and punctuation errors.\n"
-            "- Smooth awkward phrasing and improve sentence flow.\n"
-            "- Tighten wordy constructions without losing meaning.\n"
-            "- Choose more precise words where the original is vague.\n"
-            "- Keep the author's voice and tone — do not make casual "
-            "text formal or vice versa.\n"
-            "- Do not add new ideas or remove existing content.\n"
-            "Output ONLY the refined text without preamble or explanation."
-        ),
-    },
-    {
-        "name": "Fix Grammar Only",
-        "prompt": (
-            "Fix ONLY spelling, punctuation, and grammar errors. Do not "
-            "change wording, tone, sentence structure, or meaning in any "
-            "way. If the text is already correct, return it unchanged. "
-            "Output ONLY the corrected text without preamble or explanation."
-        ),
-    },
-    {
-        "name": "Simplify",
-        "prompt": (
-            "Rewrite this text so it is easy to understand:\n"
-            "- Replace jargon and technical terms with plain language.\n"
-            "- Break long, complex sentences into shorter ones.\n"
-            "- Use active voice where possible.\n"
-            "- Remove unnecessary qualifiers and hedging.\n"
-            "- Preserve all key information and the author's intent.\n"
-            "Output ONLY the simplified text without preamble or explanation."
-        ),
-    },
-    {
         "name": "Professional Tone",
         "prompt": (
             "Rewrite this text in a clear, professional tone suitable "
@@ -312,6 +268,32 @@ DEFAULT_TEMPLATES: list[dict[str, str]] = [
             "- Keep sentences direct and well-structured.\n"
             "- Preserve the author's intent and all key information.\n"
             "Output ONLY the rewritten text without preamble or explanation."
+        ),
+    },
+    {
+        "name": "Academic & Scholarly",
+        "prompt": (
+            "Rewrite this text in an objective, formal, and academic tone suitable "
+            "for research papers, essays, or scholarly publications:\n"
+            "- Use precise, scholarly vocabulary and formal sentence structures.\n"
+            "- Remove first-person pronouns (I, we, my) where possible, adopting "
+            "an objective, third-person perspective.\n"
+            "- Eliminate colloquialisms, contractions, slang, and conversational phrasing.\n"
+            "- Ensure arguments flow logically and transitions are smooth.\n"
+            "- Preserve the exact meaning, factual claims, and technical concepts "
+            "of the original text.\n"
+            "Output ONLY the academic version without preamble or explanation."
+        ),
+    },
+    {
+        "name": "Notes Assistant",
+        "prompt": (
+            "Format and structure the text cleanly as readable notes:\n"
+            "1. If input is already a list/notes layout, keep it but fix typos, grammar, and alignment.\n"
+            "2. If input is prose/dictation, convert it into structured bulleted notes.\n"
+            "3. Use headers (#, ##) for sections, bullet points (-) for items, and bolding (**) for key terms.\n"
+            "4. Keep all facts, names, code, and technical terms exactly as given. Do not summarize or omit.\n"
+            "5. Output ONLY the notes. No preamble, no explanation."
         ),
     },
 ]

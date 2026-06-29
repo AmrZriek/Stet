@@ -52,7 +52,10 @@ def test_correction_mode_thresholds():
     thresholds = [
         m["hallucination_threshold"] for m in DEFAULT_CONFIG["correction_modes"]
     ]
-    assert thresholds == [0.4, 1.0, 1.0, 1.0]
+    # Rewrite & Polish (index 2) is the config-driven guard bar for the
+    # rewrite path. 0.99 is the coarse catastrophic backstop; refusals are
+    # caught by _is_refusal_or_empty in text_utils.
+    assert thresholds == [0.4, 1.0, 0.99, 1.0]
 
 
 def test_correction_modes_are_builtin():
@@ -296,3 +299,142 @@ def test_correct_text_patch_smartfix_accepts_with_threshold_1(monkeypatch):
     )
     assert result is not None
     assert units == 1
+
+
+# ── Rewrite & Polish config-driven guard tests (regression for the
+#    "divergence guard reverts legitimate rewrite" bug) ───────────────────
+
+
+def test_rewrite_polish_accepts_legitimate_rewrite(monkeypatch):
+    """Default config (threshold 0.9) accepts a rewrite in the (0.6, 0.8]
+    divergence band — the bug case the handoff plan identified. Under the
+    old stacked gates (raw 0.8 + hunk 0.6) this rewrite was reverted to the
+    original."""
+    from stet.core.text_utils import _hallucination_ratio
+
+    filler = (
+        "i was thinking maybe we could possibly go ahead and schedule a "
+        "meeting for next week tuesday if that works for you."
+    )
+    rewritten = "let us get a meeting on the calendar for next Tuesday if possible."
+
+    # Verify the divergence is in the (0.6, 0.8] revert window the old
+    # code would have hit. This anchors the test against the real bug.
+    div = _hallucination_ratio(filler, rewritten, "rewrite_polish")
+    assert 0.6 < div <= 0.7, f"expected ~0.6-0.7 band, got {div:.3f}"
+
+    cfg = MockConfig()
+    mgr = ModelManager(cfg)
+    mgr.is_loaded = lambda: True
+    mgr._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+            rewritten
+        )
+    )
+
+    result, units = mgr.correct_text_patch(filler, strength="rewrite_polish")
+    assert result is not None, "rewrite was reverted (bug regressed)"
+    assert "let us get a meeting" in result
+    assert units == 1
+
+
+def test_config_threshold_changes_behavior(monkeypatch):
+    """Vary the config value to prove the field is actually read."""
+    filler = (
+        "i was thinking maybe we could possibly go ahead and schedule a "
+        "meeting for next week tuesday if that works for you."
+    )
+    rewritten = "let us get a meeting on the calendar for next Tuesday if possible."
+
+    class Cfg(MockConfig):
+        """MockConfig variant that lets us vary correction_modes per-test."""
+        def __init__(self, modes):
+            super().__init__()
+            self._modes_override = modes
+
+        def get(self, key, default=None):
+            if key == "correction_modes":
+                return self._modes_override
+            return super().get(key, default)
+
+    base_modes = [
+        {"name": "S", "prompt": "x", "hallucination_threshold": 0.4, "builtin": True},
+        {"name": "F", "prompt": "x", "hallucination_threshold": 1.0, "builtin": True},
+        {"name": "Rewrite & Polish", "prompt": "x", "hallucination_threshold": 0.9, "builtin": True},
+    ]
+
+    # Lower threshold than the legitimate divergence → must revert to original.
+    cfg_low = Cfg([dict(m, hallucination_threshold=0.4 if i == 2 else m["hallucination_threshold"]) for i, m in enumerate(base_modes)])
+    mgr_low = ModelManager(cfg_low)
+    mgr_low.is_loaded = lambda: True
+    mgr_low._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+            rewritten
+        )
+    )
+    res_low, _ = mgr_low.correct_text_patch(filler, strength="rewrite_polish")
+    # Low threshold reverts via raw guard — original is returned, rewritten is not.
+    if res_low is not None:
+        assert rewritten not in res_low, (
+            f"low threshold (0.4) should not accept 0.6 divergence; got {res_low!r}"
+        )
+
+    # Default 0.9 → must accept the rewrite.
+    cfg_high = Cfg(base_modes)
+    mgr_high = ModelManager(cfg_high)
+    mgr_high.is_loaded = lambda: True
+    mgr_high._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+            rewritten
+        )
+    )
+    res_high, _ = mgr_high.correct_text_patch(filler, strength="rewrite_polish")
+    assert res_high is not None, "threshold 0.9 should accept 0.6-band divergence"
+    assert "let us get a meeting" in res_high
+
+
+def test_refusal_is_rejected_not_pasted(monkeypatch):
+    """Marker-wrapped refusals must not leak into the output as the
+    'correction' — the original text is returned instead."""
+    cfg = MockConfig()
+    mgr = ModelManager(cfg)
+    mgr.is_loaded = lambda: True
+
+    refusal = "<<<START>>>Please provide the text you want me to correct.<<<END>>>"
+    mgr._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+            refusal
+        )
+    )
+
+    original = "The quick brown fox jumps over the lazy dog."
+    # NOTE: caller falls back to streaming on total failure, but the
+    # patch result is None / original. Check no refusal text leaks in.
+    res, _ = mgr.correct_text_patch(original, strength="rewrite_polish")
+    # Patch path returns None when every unit failed (no success) — the
+    # important assertion is that the refusal text is NEVER returned.
+    if res is not None:
+        assert "Please provide" not in res
+        assert refusal not in res
+
+
+def test_is_refusal_or_empty_detects_marker_wrapped_refusal():
+    """Direct unit test of the refusal detector."""
+    from stet.core.text_utils import _is_refusal_or_empty
+
+    assert _is_refusal_or_empty("", "anything") is True
+    assert _is_refusal_or_empty("   ", "anything") is True
+    assert _is_refusal_or_empty(
+        "Please provide the text you want me to correct.", "orig"
+    ) is True
+    assert _is_refusal_or_empty(
+        "I'm sorry, I can't help with that.", "orig"
+    ) is True
+    # Legit rewrites (long enough + no refusal phrase) are NOT refusals.
+    assert _is_refusal_or_empty(
+        "Let's meet next Tuesday.", "i was thinking maybe..."
+    ) is False
+    assert _is_refusal_or_empty(
+        "tbh the velvet sofa just doesn't fit in the hallway.",
+        "basically the velvet sofa thing is, it kinda just dont fit in the hallway at all tbh.",
+    ) is False

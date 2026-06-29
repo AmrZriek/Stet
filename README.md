@@ -5,54 +5,96 @@
 </p>
 
 <p align="center">
-  <strong>Stet</strong> is a local, privacy-first AI autocorrect and text rewriting tool. Select text in any application, press a global hotkey, and instantly correct or rewrite it. Runs entirely offline on your machine — no API keys, cloud dependencies, or data leaks.
+  <strong>Stet</strong> is a local-first, privacy-respecting AI autocorrect and text rewriting utility for Windows. Select text in any desktop application, press a global hotkey, and instantly correct or rewrite it in place.
 </p>
+
+<p align="center">
+  <a href="https://github.com/AmrZriek/Stet/releases"><img src="https://img.shields.io/github/v/release/AmrZriek/Stet?style=flat-square&color=blue" alt="Latest Release"></a>
+  <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue?style=flat-square&logo=python" alt="Python Version">
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=flat-square&logo=windows" alt="Platform">
+  <img src="https://img.shields.io/badge/backend-llama.cpp-orange?style=flat-square" alt="Backend">
+  <img src="https://img.shields.io/badge/license-GPL%20v3-green?style=flat-square" alt="License">
+</p>
+
+<p align="center">
+  <strong>Latest release: v1.0.3</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.0.3">Download Installer</a>
+</p>
+
+---
+
+## 🔒 Why Stet?
+
+Stet was built to solve the privacy dilemma of modern AI writing tools. Writing sensitive emails, corporate documents, or legal briefs in standard cloud-based utilities transmits your drafts over the network. Stet keeps everything local.
+
+* **100% Offline & Private:** Powered by a local `llama.cpp` server. Your text never leaves your RAM or disk.
+* **Context-Aware:** Unlike simple dictionary checkers, Stet understands full paragraphs, tone, and sentence structure.
+* **Developer Friendly:** Automatically detects and skips code blocks, shell commands, and variables using structural heuristics.
+* **No Cloud Overhead:** Bypasses API keys, subscription limits, and latency spikes.
+
+---
+
+## 🚀 How it Works
+
+Stet runs in the background as a system tray app. When you press a global hotkey, the core pipeline executes:
+
+```mermaid
+graph TD
+    A[Highlight text in target app] -->|Global Hotkey F9 or F10| B(Capture Text via UI Automation/Clipboard)
+    B --> C{looks_like_prose?}
+    C -->|No: Code/Logs| D[Skip / Paste back unmodified]
+    C -->|Yes: Prose| E[Inline Sentinel Masking: URLs, emails, paths]
+    E --> F[Parallel Sentence Chunking]
+    F --> G[Local llama-server llama.cpp]
+    G --> H[Hallucination & Punctuation Guard]
+    H --> I[Reassemble & Unmask Sentinels]
+    I --> J[Diff View Window F9 or Auto-Paste F10]
+```
 
 ---
 
 ## ✨ Features
 
-- **Local & Private**: Powered by `llama.cpp` — all inference runs entirely on your local hardware. No text ever leaves your machine.
-- **4 Correction Strengths**:
-  - **Spelling Only**: Fixes typos, spelling errors, and grammar without changing your tone or style.
-  - **Full Correction**: Fixes grammar, punctuation, phrasing, and syntax.
-  - **Rewrite & Polish**: Overhauls sentence structure for better flow, clarity, and vocabulary.
-  - **Custom Patch**: Lets you apply custom rules or instructions to the selected text.
-- **Smart Selection Capture**: Directly reads the highlighted text in the active window (supports console, text editors, IDEs, and browser windows).
-- **Interactive Correction Window**: Edit the results, run custom prompt templates, or chat directly with the AI to refine your text.
-- **Custom System Prompts**: Override standard correction rules to stream token-by-token corrections using your own system prompts.
-- **System Tray Management**: Easily load or unload model weights from memory, toggle settings, and monitor model status in the background.
+* **4 Correction Strengths:**
+  * 🏷️ **Spelling Only:** Fixes typos and basic spelling/grammar without altering style or flow.
+  * 📝 **Full Correction:** Polishes punctuation, verb tense, prepositions, and phrasing.
+  * ✨ **Rewrite & Polish:** Reworks sentence structure for better flow, vocabulary, and readability.
+  * 🔧 **Custom Patch:** Allows you to input your own prompt instructions (e.g., "translate to Spanish", "make it formal").
+* **Interactive Correction Window:** Edit the corrected text, rerun custom templates, or chat directly with the local AI to refine the output.
+* **Smart Selection Capture:** Reads highlighted text in the active window (supports terminal consoles, text editors, IDEs, and browser fields).
+* **System Tray weight manager:** Unload model weights to free up system VRAM/RAM instantly, adjust settings, and monitor model status.
+* **Security-Hardened Autoupdater:** Secure download verification via SHA-256 hashes, tag validation, and HTTPS enforcement.
 
 ---
 
 ## ⌨️ Keyboard Shortcuts
 
-- **`F9`**: Open the Correction and Chat Window.
-- **`F10`**: Instantly correct selected text silently in the background and paste it back automatically.
-- **`Ctrl+Enter`** (in popup): Accept the corrected text and paste it back into your original app.
-- **`Escape`** (in popup): Close the popup and revert the text.
+* **`F9`**: Open the Correction & Chat popup with the captured text.
+* **`F10`**: Instantly correct selected text silently in the background and paste it back automatically.
+* **`Enter`** (inside popup): Accept the corrected text and paste it back into your active application.
+* **`Escape`** (inside popup): Close the window and discard changes.
 
 ---
 
 ## 📥 Installation
 
-### Option 1: Standalone Setup (Recommended)
-1. Download `StetSetup.exe` from the latest release.
-2. Run the installer to set up desktop/start-menu shortcuts.
-3. Follow the built-in wizard prompts to automatically download the recommended LLM model.
+### Option 1: Standalone Installer (Recommended)
+1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.0.3).
+2. Run the installer to register startup options and shortcuts.
+3. The built-in setup wizard will guide you to automatically download the recommended model weights.
 
 ### Option 2: Portable ZIP
-1. Download and extract the latest `Stet_*.zip`.
-2. Double-click `download_model.bat` to download the recommended model weights (~1.8 GB).
-3. Run `run.bat` or `Stet.exe` to launch the application.
+1. Download and extract the latest release ZIP.
+2. Run `download_model.bat` to fetch the default model file (~1.8 GB).
+3. Execute `run.bat` or `Stet.exe` to run the application.
 
 ---
 
 ## 💻 System Requirements
 
-- **OS**: Windows 10+ (64-bit).
-- **GPU**: NVIDIA Graphics Card with CUDA 12.4 support (recommended for fast acceleration).
-- **Model weights**: Gemma 4 E2B GGUF or similar model.
+* **OS:** Windows 10 or 11 (64-bit).
+* **GPU:** CUDA-compatible NVIDIA GPU (recommended for near-instant inference).
+* **RAM:** 8 GB minimum (16 GB recommended).
+* **Model:** Default GGUF weights (Gemma-2-2B-it or similar sub-3B instruction model).
 
 ---
 

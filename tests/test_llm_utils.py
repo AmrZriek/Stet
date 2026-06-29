@@ -14,6 +14,7 @@ from stet.llm.utils import (
     _find_shipped_llama_server,
     _model_size_billions,
     has_nvidia,
+    _is_valid_gguf,
 )
 
 # ── _model_size_billions ──────────────────────────────────────────────────
@@ -183,3 +184,33 @@ class TestCompiledPatterns:
 
     def test_preamble_patterns_count(self):
         assert len(_COMPILED_PREAMBLES) >= 10
+
+
+# ── _is_valid_gguf ────────────────────────────────────────────────────────
+
+
+class TestIsValidGguf:
+    """Verify GGUF file integrity validation."""
+
+    def test_valid_gguf(self, tmp_path):
+        f = tmp_path / "valid.gguf"
+        # Write magic bytes and pad to >10MB (10MB + 1 byte)
+        f.write_bytes(b"GGUF" + b"\x00" * (10 * 1024 * 1024))
+        assert _is_valid_gguf(f) is True
+
+    def test_invalid_magic(self, tmp_path):
+        f = tmp_path / "bad_magic.gguf"
+        f.write_bytes(b"FUGG" + b"\x00" * (10 * 1024 * 1024))
+        assert _is_valid_gguf(f) is False
+
+    def test_too_small(self, tmp_path):
+        f = tmp_path / "small.gguf"
+        f.write_bytes(b"GGUF" + b"\x00" * 1000)
+        assert _is_valid_gguf(f) is False
+
+    def test_missing_file(self, tmp_path):
+        assert _is_valid_gguf(tmp_path / "missing.gguf") is False
+
+    def test_is_directory(self, tmp_path):
+        assert _is_valid_gguf(tmp_path) is False
+

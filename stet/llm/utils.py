@@ -164,3 +164,24 @@ def has_nvidia() -> bool:
             pass
 
     return False
+
+
+def _is_valid_gguf(path) -> bool:
+    """Verify that a path is a valid GGUF file.
+
+    Checks if the file exists, is at least 10MB (to avoid matching empty/incomplete files),
+    and starts with the 'GGUF' magic bytes.
+    """
+    try:
+        from pathlib import Path
+        p = Path(path) if isinstance(path, (str, Path)) else path
+        if not p.is_file():
+            return False
+        if p.stat().st_size < 10 * 1024 * 1024:
+            return False
+        with open(p, "rb") as f:
+            magic = f.read(4)
+            return magic == b"GGUF"
+    except Exception:
+        return False
+

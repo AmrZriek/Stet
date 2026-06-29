@@ -395,6 +395,10 @@ class StetApp(QObject):
         self._last_register_ts = 0.0
         self._hotkey_handles: list = []
 
+        self._download_processes: list = []
+        self._download_timer = QTimer(self)
+        self._download_timer.timeout.connect(self._check_download_processes)
+
         self._trigger.connect(self._show_window)
         self._notify.connect(self._show_notify)
         self._hotkey_signal.connect(self._handle_hotkey_fired)
@@ -654,6 +658,12 @@ class StetApp(QObject):
             self._tray_menu.exec(QCursor.pos())
 
     def _rebuild_llm_menu(self):
+        # Auto-detect if any new models/servers were downloaded
+        if self.cfg.auto_detect():
+            self._update_llm_menu_initial_text()
+            if self.cfg.get("model_path", "") and not self.ac_model.is_loaded() and not self.ac_model.loading:
+                threading.Thread(target=self.ac_model.load_model, daemon=True).start()
+
         self._llm_menu.clear()
         act_llm_load = QAction("Load model", self)
         act_llm_unload = QAction("Unload model", self)
@@ -838,6 +848,12 @@ class StetApp(QObject):
 
     def _handle_hotkey_fired(self, hk_cfg: dict):
         """Called from main Qt thread via queue polling."""
+        # Auto-detect if any new models/servers were downloaded
+        if self.cfg.auto_detect():
+            self._update_llm_menu_initial_text()
+            if self.cfg.get("model_path", "") and not self.ac_model.is_loaded() and not self.ac_model.loading:
+                threading.Thread(target=self.ac_model.load_model, daemon=True).start()
+
         mode = hk_cfg.get("mode", "panel")
         strength = hk_cfg.get("strength", "smart_fix")
         custom_prompt = hk_cfg.get("custom_prompt", "")
@@ -1306,6 +1322,42 @@ class StetApp(QObject):
         if path:
             self._select_model(path)
 
+    def _check_download_processes(self):
+        """Monitor running download processes and auto-load backend/model upon completion."""
+        finished_any = False
+        active = []
+        for proc in self._download_processes:
+            if proc.poll() is not None:
+                finished_any = True
+            else:
+                active.append(proc)
+        self._download_processes = active
+
+        if finished_any:
+            log("[DownloadMonitor] A download process finished. Running auto-detection...")
+            updated = self.cfg.auto_detect()
+            
+            # If the backend download finished but model_path is still empty,
+            # trigger self._show_first_run() to guide the user to download/choose a model.
+            from stet.llm.utils import _find_shipped_llama_server
+            if _find_shipped_llama_server() and not self.cfg.get("model_path", ""):
+                log("[DownloadMonitor] llama-server detected, but model_path is empty. Showing model welcome prompt.")
+                QTimer.singleShot(800, self._show_first_run)
+            elif updated:
+                # New model/server detected! Trigger loading.
+                ac_name = friendly_name(self.cfg.get("model_path", ""))
+                self.tray.showMessage(
+                    "Stet",
+                    f"AI model auto-detected: {ac_name}\nLoading model now...",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    5000,
+                )
+                self._on_settings_saved()
+
+        if not self._download_processes:
+            self._download_timer.stop()
+            log("[DownloadMonitor] No active download processes. Polling stopped.")
+
     def _show_first_run(self):
         # Check for llama-server backend first — if missing, prompt to download
         if not _find_shipped_llama_server():
@@ -1379,12 +1431,18 @@ class StetApp(QObject):
             return
         try:
             if WINDOWS:
-                subprocess.Popen(
-                    ["cmd", "/c", "start", "", str(script)],
+                # start "" opens the .bat in its own console window so the user
+                # sees curl progress. /wait makes the outer cmd block until that
+                # console is closed, letting _download_timer detect completion.
+                proc = subprocess.Popen(
+                    ["cmd", "/c", "start", "/wait", "", str(script)],
                     cwd=str(SCRIPT_DIR),
                 )
             else:
-                subprocess.Popen(["bash", str(script)], cwd=str(SCRIPT_DIR))
+                proc = subprocess.Popen(["bash", str(script)], cwd=str(SCRIPT_DIR))
+            self._download_processes.append(proc)
+            self._download_timer.start(5000)
+            log(f"[Download] Started backend download process {proc.pid}")
         except Exception as e:
             log(f"[FirstRun] Failed to launch backend download script: {e}")
             self.tray.showMessage(
@@ -1412,13 +1470,17 @@ class StetApp(QObject):
         try:
             if WINDOWS:
                 # start "" opens the .bat in its own console window so the user
-                # sees curl's progress bar instead of a silent background fetch
-                subprocess.Popen(
-                    ["cmd", "/c", "start", "", str(script)],
+                # sees curl progress. /wait makes the outer cmd block until that
+                # console is closed, letting _download_timer detect completion.
+                proc = subprocess.Popen(
+                    ["cmd", "/c", "start", "/wait", "", str(script)],
                     cwd=str(SCRIPT_DIR),
                 )
             else:
-                subprocess.Popen(["bash", str(script)], cwd=str(SCRIPT_DIR))
+                proc = subprocess.Popen(["bash", str(script)], cwd=str(SCRIPT_DIR))
+            self._download_processes.append(proc)
+            self._download_timer.start(5000)
+            log(f"[Download] Started model download process {proc.pid}")
         except Exception as e:
             log(f"[FirstRun] Failed to launch download script: {e}")
             self.tray.showMessage(

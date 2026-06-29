@@ -241,8 +241,15 @@ class TestModelManagerCoverage:
         proc.poll.return_value = None
         mock_popen.return_value = proc
 
+        # Simulating time progression to avoid tight loop real-time wait
+        current_time = [0.0]
+        def mock_monotonic():
+            t = current_time[0]
+            current_time[0] += 10.0
+            return t
+
         # Load model should fail due to health check timeout (mock sleep so test is instant)
-        with patch("time.sleep"):
+        with patch("time.sleep"), patch("time.monotonic", side_effect=mock_monotonic):
             assert manager.load_model() is False
         assert manager.is_loaded() is False
 

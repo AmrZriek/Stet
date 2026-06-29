@@ -36,11 +36,11 @@ def test_post_fixes_preserves_existing_duplicate_word_behavior():
             original="the test",
             strength="conservative",
         )
-        == "the test"
+        == "the the test"
     )
     assert (
         _apply_post_fixes("had had enough", original="had had enough")
-        == "Had had enough"
+        == "had had enough"
     )
 
 

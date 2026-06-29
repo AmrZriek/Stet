@@ -156,3 +156,39 @@ def test_url_masking_mangled_sentinel(monkeypatch):
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
 
     assert result == original
+
+def test_url_masking_nested_and_markdown(monkeypatch):
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    captured_text = ""
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal captured_text
+        captured_text = chunk_text
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    # 1. Parenthesized URL (wrapped in longer sentence to pass looks_like_prose gate)
+    original_paren = "This is a paragraph with a parenthesized URL (see https://example.com) at the end of a sentence."
+    result_paren, _ = mgr.correct_text_patch(original_paren, strength="full_correction")
+    assert "⟦U1⟧" in captured_text
+    assert "https://example.com" not in captured_text
+    assert result_paren == original_paren
+
+    # 2. Markdown Link (wrapped in longer sentence to pass looks_like_prose gate)
+    original_md = "Please visit this markdown link [link](https://example.com) to find all of the relevant documentation for the project deployment."
+    result_md, _ = mgr.correct_text_patch(original_md, strength="full_correction")
+    assert "⟦U1⟧" in captured_text
+    assert "https://example.com" not in captured_text
+    assert result_md == original_md
+
+    # 3. Wikipedia-style URL with balanced parentheses (wrapped in longer sentence to pass looks_like_prose gate)
+    original_wiki = "You can read more on the Wikipedia page https://en.wikipedia.org/wiki/Stet_(disambiguation) for further context."
+    result_wiki, _ = mgr.correct_text_patch(original_wiki, strength="full_correction")
+    assert "⟦U1⟧" in captured_text
+    assert "https://en.wikipedia.org" not in captured_text
+    assert result_wiki == original_wiki
+
+

@@ -19,6 +19,9 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QAbstractButton,
+    QPlainTextEdit,
+    QScrollBar,
 )
 
 from stet.constants import SCRIPT_DIR
@@ -99,6 +102,7 @@ class CorrectionWindow(QWidget):
         self._position_window()
         self._connect_signals()
         self._setup_shortcuts()
+        self.setMouseTracking(True)
 
         self.method_badge.setText("STREAM CORRECT")
         self.method_badge.show()
@@ -194,19 +198,43 @@ class CorrectionWindow(QWidget):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            pos = e.pos()
+            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
+                self._resize_start = e.globalPosition().toPoint()
+                self._resize_start_geometry = self.geometry()
+                return
+
             ch = self.childAt(e.pos())
-            while ch is not None:
-                if ch.objectName() == "header":
-                    self._drag_pos = e.globalPosition().toPoint() - self.pos()
-                    return
-                ch = ch.parentWidget()
+            block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QAbstractButton)
+            is_interactive = False
+            curr = ch
+            while curr is not None:
+                if isinstance(curr, block_list) or curr.objectName() in ("chat_input", "acceptBtn", "cancelBtn", "copyBtn"):
+                    is_interactive = True
+                    break
+                curr = curr.parentWidget()
+            if not is_interactive:
+                self._drag_pos = e.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, e):
-        if self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
+        if not e.buttons():
+            pos = e.pos()
+            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            else:
+                self.unsetCursor()
+
+        if hasattr(self, "_resize_start") and self._resize_start:
+            delta = e.globalPosition().toPoint() - self._resize_start
+            new_w = max(self.minimumWidth(), self._resize_start_geometry.width() + delta.x())
+            new_h = max(self.minimumHeight(), self._resize_start_geometry.height() + delta.y())
+            self.resize(new_w, new_h)
+        elif self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+        self._resize_start = None
 
     def _setup_shortcuts(self):
         # Ctrl+Enter → send chat message (documented in shortcuts overlay)
@@ -237,7 +265,7 @@ class CorrectionWindow(QWidget):
             # not a child dialog (SettingsDialog, shortcuts overlay, etc.).
             if (
                 key == Qt.Key.Key_Tab
-                and not (event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+                and (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
                 and (obj is self or (hasattr(obj, "window") and obj.window() is self))
             ):
                 idx = (self.strength_combo.currentIndex() + 1) % 3
@@ -574,7 +602,7 @@ class CorrectionWindow(QWidget):
         self.copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(self.copy_btn)
 
-        self.accept_btn = QPushButton("Accept & Paste ⏎")
+        self.accept_btn = QPushButton("Accept and Paste ⏎")
         self.accept_btn.setObjectName("acceptBtn")
         self.accept_btn.setAccessibleName("Accept and paste corrected text")
         self.accept_btn.setEnabled(False)
@@ -756,7 +784,7 @@ class CorrectionWindow(QWidget):
         custom_templates = self.cfg.get("custom_templates", [])
 
         for idx, ct in enumerate(custom_templates):
-            b = QPushButton(ct.get("name", "Custom"))
+            b = QPushButton(ct.get("name", "Custom").replace("&", "&&"))
             b.setObjectName("templateBtn")
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.clicked.connect(lambda _, p=ct.get("prompt", ""): self._apply_template(p))
@@ -1121,8 +1149,29 @@ class CorrectionWindow(QWidget):
             )
             return
         from stet.core.text_utils import _hallucination_ratio, _post_splice_sanity
-        if _hallucination_ratio(self.original, cleaned) > 0.6:
-            log("[CW] streaming output diverged too far from input (ratio > 0.6)")
+        from stet.llm.model_manager import (
+            _HALLUCINATION_THRESHOLDS_BY_STRENGTH,
+            _resolve_mode_index,
+        )
+        # Config-driven threshold — single source of truth.
+        # Falls back to the legacy strength→threshold dict if the config row
+        # is missing, then to 0.6 as a last-resort backstop.
+        _modes = self.cfg.get("correction_modes", [])
+        _mi = _resolve_mode_index(self._correction_stream_strength, _modes)
+        _stream_threshold = (
+            _modes[_mi].get("hallucination_threshold")
+            if 0 <= _mi < len(_modes) and isinstance(_modes[_mi], dict)
+            else None
+        )
+        if _stream_threshold is None:
+            _stream_threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(
+                self._correction_stream_strength, 0.6
+            )
+        if _hallucination_ratio(self.original, cleaned) > _stream_threshold:
+            log(
+                f"[CW] streaming output diverged too far from input "
+                f"(ratio > {_stream_threshold})"
+            )
             self._on_correction_ready(
                 self.original, "Output diverged too much — try a larger model"
             )

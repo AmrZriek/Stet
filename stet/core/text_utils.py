@@ -88,7 +88,7 @@ def strip_meta_commentary(text: str, original: str = "") -> str:
 
 def looks_like_prose(text: str) -> bool:
     lines = text.splitlines() or [text]
-    sym = sum(text.count(c) for c in '{}[]();=<>\\|#$@`~') / max(len(text), 1)
+    sym = sum(text.count(c) for c in '{}=<>\\|#$@`~') / max(len(text), 1)
     indented = sum(1 for line in lines if line[:1] in (' ', '\t') and line.strip())
     words = re.findall(r"[A-Za-z']+", text)
     if not words:
@@ -391,20 +391,29 @@ def _edit_dist(a: str, b: str) -> int:
     return prev[lb]
 
 
-def apply_hunk_guard(orig: str, corr: str, mode_index: int) -> str:
-    """Hunk-level diff acceptance."""
+def apply_hunk_guard(orig: str, corr: str, mode_index: int, threshold: float | None = None) -> str:
+    """Hunk-level diff acceptance.
+
+    For mode_index >= 2 (rewrite_polish) we compare the full input/output via
+    ``difflib.SequenceMatcher`` and revert the unit to the original if the
+    character-level divergence exceeds ``threshold``. ``threshold`` is
+    config-driven (``correction_modes[mode_index]["hallucination_threshold"]``)
+    and shared with the raw-output guard in the patch path so both gates use
+    the same bar. Defaults to 0.6 for backward compatibility.
+    """
     if not orig or not corr:
         return corr
-    
+
     # Mode 3: Rewrite (Index 2)
     if mode_index >= 2:
-        # Keep global ratio (0.6)
+        # Keep global ratio; threshold is config-driven (default 0.6 for back-compat).
         o_chars = orig.replace(" ", "").replace("\n", "").lower()
         c_chars = corr.replace(" ", "").replace("\n", "").lower()
         if not o_chars or not c_chars:
             return corr
         ratio = 1.0 - difflib.SequenceMatcher(None, o_chars, c_chars).ratio()
-        if ratio > 0.6:
+        bar = threshold if threshold is not None else 0.6
+        if ratio > bar:
             return orig
         return corr
 
@@ -520,7 +529,7 @@ def _hallucination_ratio(orig: str, corr: str, strength: str = "conservative") -
 
 
 
-_DUP_WORD_PATTERN = re.compile(r"\b(\w+)(\s+)\1\b", re.IGNORECASE)
+
 _SENTENCE_TOKEN_PATTERN = re.compile(r"(\s*)([^.!?\n]+[.!?])(\s*)")
 _WORD_TOKEN_PATTERN = re.compile(r"\b[\w']+\b")
 _ACCIDENTAL_DUPLICATE_WORDS = {
@@ -650,45 +659,62 @@ def _loses_meaningful_repetition(original: str, corrected: str) -> bool:
     return False
 
 
-_I_PATTERN = re.compile(r"(?<![a-zA-Z])i(?![a-zA-Z'])")
-_CAP_PATTERN = re.compile(r"([.?!]\s+)([a-z])")
-
-
 def _apply_post_fixes(
     text: str, original: str = "", strength: str = "smart_fix"
 ) -> str:
     """Deterministic safety-net fixes the LLM may have missed.
 
-    - collapse immediate word duplication (``the the`` -> ``the``) IF the
-      original text did not already contain the same pair. The patch-apply
-      path can produce duplicates when the model emits identical replacements
-      at adjacent indices.
-    - standalone lowercase ``i`` → ``I``
-    - first-letter capitalization
-    - common missing-apostrophe contractions (case-preserving)
+    What survives here (deliberately NON-capitalization work only):
+    - common missing-apostrophe contractions (case-preserving).
+    - restore trailing sentence-ending punctuation from ``original`` if stripped.
+
+    What was REMOVED (see "Capitalization post-fix" note below) and why:
+    - standalone lowercase ``i`` -> ``I``
+    - first-letter capitalization (force-cap position 0)
     - capitalize first word after ``.?!``
-    - restore trailing sentence-ending punctuation from ``original`` if stripped
+    - duplicate word collapsing (``the the`` -> ``the``, which interfered with intentional repetition like ``very very``)
+
+    Capitalization post-fix — REMOVED 2026-06-23
+    ---------------------------------------------
+    Earlier versions applied three deterministic sentence-initial
+    capitalization rules above: standalone ``i``->``I``, force-cap the
+    first character of the whole text, and force-cap the first letter
+    after every ``.``, ``?``, ``!``. These ran in the patch path in
+    `correct_text_patch` *after* inline-hazard unmasking, so the URL/
+    email/path sentinels had already been restored to real text — meaning
+    the rules saw the raw char at position 0 and blindly capitalized it.
+
+    An A/B eval (scripts/eval_caps_ab.py) on the active Gemma-4-E2B model
+    measured the isolated effect of these rules across the eval corpus:
+
+        smart_fix   : needed=2  harmful=8   redundant=58
+        aggressive  : needed=2  harmful=2   redundant=64
+        conservative: needed=0  harmful=0   redundant=68   (rules never fired here)
+
+    ``harmful`` = the rule capitalized text that should NOT have been
+    capitalized: it turned ``https://...`` into ``Https://...`` at a sentence
+    start, ``john.doe@`` into ``John.doe@`` in an email, and
+    ``i.imgur.com`` into ``I.imgur.com`` (the standalone ``i`` rule's regex
+    ``(?<![a-zA-Z])i(?![a-zA-Z\'])`` matches the ``i`` because ``.`` is not a
+    letter). ``redundant`` = the model already capitalized, so the rule fired
+    on nothing. The Gemma model handles capitalization well itself; on the
+    rare case it leaves a lowercase start (``needed``), forcing a cap is
+    actively wrong for one-word instant-shortcut corrections (a user mid-
+    sentence who selects only a misspelled word would get back a wrongly
+    Title-cased word). Net: the rules did more silent damage than good.
+
+    Decision: remove all deterministic capitalization and let the LLM decide.
+    Case is now preserved exactly as the model emits it; URLs/emails/paths
+    can no longer be silently re-cased by a post-fix. The contraction and
+    trailing-punctuation-restore fixes remain — they never touch case.
     """
     if not text:
         return text
     result = text
-    # Only collapse duplicates that the model introduced — preserve legitimate
-    # ones that were in the source ("had had", "that that is").
-    if _DUP_WORD_PATTERN.search(result):
 
-        def _dedup(m: re.Match) -> str:
-            if original and m.group(0).lower() in original.lower():
-                return m.group(0)
-            return m.group(1)
-
-        result = _DUP_WORD_PATTERN.sub(_dedup, result)
     result = _remove_introduced_duplicate_sentences(result, original)
 
     if strength not in {"spelling_only", "conservative"}:
-        if _I_PATTERN.search(result):
-            result = _I_PATTERN.sub("I", result)
-        if result[0].islower():
-            result = result[0].upper() + result[1:]
         for c_pat, repl in _COMPILED_CONTRACTIONS:
             if c_pat.search(result):
 
@@ -700,8 +726,6 @@ def _apply_post_fixes(
                     return _r
 
                 result = c_pat.sub(_repl_fn, result)
-        if _CAP_PATTERN.search(result):
-            result = _CAP_PATTERN.sub(lambda m: m.group(1) + m.group(2).upper(), result)
         if original and original[-1] in ".?!":
             if not result.endswith(original[-1]) and result[-1] not in ".?!":
                 result += original[-1]
@@ -1113,3 +1137,53 @@ def _strip_structural_rules(full_prompt: str) -> str:
     if cleaned_rules:
         result += "\n" + "\n".join(cleaned_rules)
     return result.strip()
+
+
+# --- Refusal / empty-output detector (rewrite path) -----------------------
+# Why this exists: the divergence guard cannot separate marker-wrapped
+# refusals ("Please provide the text you want me to correct.") from
+# legitimate aggressive rewrites. Measured distributions overlap:
+#   legitimate rewrites:        max  ~0.687
+#   marker-wrapped refusals:    min  ~0.583
+# No single divergence threshold cleanly separates them. Refusals are
+# caught here so the divergence guard can stay as a coarse catastrophic
+# backstop.
+_REFUSAL_PATTERNS = [
+    r"\bplease\s+(provide|supply|paste|enter|give)\b.*\b(text|input|passage|content|sentence)\b",
+    r"\bi\s+didn'?t\s+receiv",
+    r"\bno\s+input\s+detected\b",
+    r"\bi'?m\s+sorry,?\s+i\s+can'?t\b",
+    r"\bcertainly!\s+please\b",
+    r"\bwhat\s+(text|would)\b.*\b(provide|paste|like)\b",
+    r"\bplease\s+provide\s+text\b",
+]
+_REFUSAL_RE = re.compile("|".join(_REFUSAL_PATTERNS), re.IGNORECASE)
+# Strip <<<START>>>/<<<END>>> markers (and whitespace) before the length
+# gate so the gate measures the refusal content, not the markers.
+_MARKER_RE = re.compile(r"<<<\s*(START|END)\s*>>>")
+
+
+def _is_refusal_or_empty(corrected: str, original: str) -> bool:
+    """Return True when the model bailed instead of rewriting.
+
+    Catches marker-wrapped refusals and empty outputs that the divergence
+    guard cannot separate from legitimate rewrites. The 60-char length
+    gate (on the marker-stripped content) keeps the false-positive rate
+    near zero — the shortest legit rewrite in the measured sample was
+    52 chars ("tbh the velvet sofa just doesn't fit in the hallway.")
+    and contained no refusal phrase.
+    """
+    if not corrected or not corrected.strip():
+        return True
+    # Strip marker wrappers so the length gate measures content, not
+    # "<<<START>>>" / "<<<END>>>" boilerplate around a refusal.
+    inner = _MARKER_RE.sub("", corrected).strip()
+    if not inner:
+        return True
+    # Length gate: a refusal phrase in a short reply is very likely a
+    # refusal; a refusal phrase in a long reply is more ambiguous (could
+    # be a meta-commentary fragment), so we let it through.
+    if _REFUSAL_RE.search(inner) and len(inner) < 60:
+        return True
+    return False
+

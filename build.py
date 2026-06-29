@@ -226,6 +226,7 @@ def _base_pyinstaller_cmd(
         "--clean",
         f"--workpath={artifacts_dir / 'build'}",
         f"--distpath={artifacts_dir}",
+        f"--specpath={artifacts_dir}",
         f"--name={output_name}",
     ]
 
@@ -368,7 +369,7 @@ RUN_SH = "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")\"\n./Stet\n"
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
 
-_LLAMA_BACKEND_VERSION = "b9577"
+_LLAMA_BACKEND_VERSION = "b9827"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{_LLAMA_BACKEND_VERSION}"
 
 DOWNLOAD_BACKEND_BAT = rf"""@echo off
@@ -377,13 +378,13 @@ cd /d "%~dp0"
 
 set LLAMA_URL={_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip
 set CUDA_URL={_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip
-set LLAMA_HASH=49A7FFB9E68A6306A2CB0A7284D1565049CD978C3B130EAA1D2197E471F4F5D2
+set LLAMA_HASH=EAAA91EA991825FEA11028261A99f8f8fd27bf03f3DF6B0C59D95f0b6e62ab85
 set CUDA_HASH=8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6
 set DEST=llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64
 
 echo.
 echo  ===================================================
-echo   Stet - Downloading llama.cpp backend (b9577)
+echo   Stet - Downloading llama.cpp backend ({_LLAMA_BACKEND_VERSION})
 echo   This is a one-time download (~652 MB).
 echo  ===================================================
 echo.
@@ -462,7 +463,7 @@ cd "$(dirname "$0")"
 
 LLAMA_URL="{_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip"
 CUDA_URL="{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip"
-LLAMA_HASH="49a7ffb9e68a6306a2cb0a7284d1565049cd978c3b130eaa1d2197e471f4f5d2"
+LLAMA_HASH="eaaa91ea991825fea11028261a99f8f8fd27bf03f3df6b0c59d95f0b6e62ab85"
 CUDA_HASH="8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
 DEST="llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 
@@ -527,17 +528,18 @@ MODEL_URL="{_RECOMMENDED_MODEL_URL}"
 DEST="{_RECOMMENDED_MODEL_FILE}"
 EXPECTED_HASH="{_RECOMMENDED_MODEL_HASH}"
 echo "Downloading $DEST ..."
-if command -v curl &>/dev/null; then curl -L --progress-bar -o "$DEST" "$MODEL_URL"
-elif command -v wget &>/dev/null; then wget -O "$DEST" "$MODEL_URL"
+if command -v curl &>/dev/null; then curl -L --progress-bar -o "$DEST.tmp" "$MODEL_URL"
+elif command -v wget &>/dev/null; then wget -O "$DEST.tmp" "$MODEL_URL"
 else echo "Error: neither curl nor wget found."; exit 1; fi
 
 echo "Verifying integrity (SHA-256)..."
 if command -v sha256sum &>/dev/null; then
-    ACTUAL_HASH=$(sha256sum "$DEST" | awk '{{print $1}}')
+    ACTUAL_HASH=$(sha256sum "$DEST.tmp" | awk '{{print $1}}')
 elif command -v shasum &>/dev/null; then
-    ACTUAL_HASH=$(shasum -a 256 "$DEST" | awk '{{print $1}}')
+    ACTUAL_HASH=$(shasum -a 256 "$DEST.tmp" | awk '{{print $1}}')
 else
     echo "WARNING: sha256sum or shasum not found. Skipping integrity check."
+    mv "$DEST.tmp" "$DEST"
     echo "Done. Open Settings and set Model Path."
     exit 0
 fi
@@ -548,12 +550,13 @@ EXPECTED_LOWER=$(echo "$EXPECTED_HASH" | tr '[:upper:]' '[:lower:]')
 
 if [ "$ACTUAL_LOWER" = "$EXPECTED_LOWER" ]; then
     echo "Integrity verification successful!"
+    mv "$DEST.tmp" "$DEST"
     echo "Done. Open Settings and set Model Path to: $(pwd)/$DEST"
 else
     echo "WARNING: SHA-256 mismatch!"
     echo "Expected: $EXPECTED_HASH"
     echo "Actual:   $ACTUAL_HASH"
-    rm "$DEST"
+    rm "$DEST.tmp"
     exit 1
 fi
 """
@@ -563,13 +566,13 @@ set MODEL_URL={_RECOMMENDED_MODEL_URL}
 set DEST={_RECOMMENDED_MODEL_FILE}
 set EXPECTED_HASH={_RECOMMENDED_MODEL_HASH}
 echo Downloading %DEST% ...
-curl -L --progress-bar -o "%DEST%" "%MODEL_URL%"
+curl -L --progress-bar -o "%DEST%.tmp" "%MODEL_URL%"
 if errorlevel 1 (
     echo Download failed.
     goto end
 )
 echo Verifying integrity (SHA-256)...
-for /f "skip=1 delims=" %%i in ('certutil -hashfile "%DEST%" SHA256') do (
+for /f "skip=1 delims=" %%i in ('certutil -hashfile "%DEST%.tmp" SHA256') do (
     set ACTUAL_HASH=%%i
     goto check
 )
@@ -577,12 +580,13 @@ for /f "skip=1 delims=" %%i in ('certutil -hashfile "%DEST%" SHA256') do (
 set ACTUAL_HASH=%ACTUAL_HASH: =%
 if /i "%ACTUAL_HASH%"=="%EXPECTED_HASH%" (
     echo Integrity verification successful!
+    rename "%DEST%.tmp" "%DEST%"
     echo Done. Open Settings and set Model Path.
 ) else (
     echo WARNING: SHA-256 mismatch! File might be corrupted or tampered with.
     echo Expected: %EXPECTED_HASH%
     echo Actual:   %ACTUAL_HASH%
-    del "%DEST%"
+    del "%DEST%.tmp"
 )
 :end
 pause

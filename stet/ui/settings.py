@@ -20,6 +20,10 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QAbstractButton,
+    QPlainTextEdit,
+    QScrollBar,
+    QSpinBox,
 )
 
 from stet.constants import SCRIPT_DIR
@@ -73,6 +77,7 @@ class SettingsDialog(QDialog):
             self.resize(900, 820)
         self._build_ui()
         self._load()
+        self.setMouseTracking(True)
         # Re-center on the screen after UI is built so the dialog can never
         # land with half of it outside the visible area
         if sr:
@@ -82,19 +87,43 @@ class SettingsDialog(QDialog):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
+            pos = e.pos()
+            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
+                self._resize_start = e.globalPosition().toPoint()
+                self._resize_start_geometry = self.geometry()
+                return
+
             ch = self.childAt(e.pos())
-            while ch is not None:
-                if ch.objectName() == "settingsHeader":
-                    self._drag_pos = e.globalPosition().toPoint() - self.pos()
-                    return
-                ch = ch.parentWidget()
+            block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QSpinBox, QListWidget, QAbstractButton)
+            is_interactive = False
+            curr = ch
+            while curr is not None:
+                if isinstance(curr, block_list):
+                    is_interactive = True
+                    break
+                curr = curr.parentWidget()
+            if not is_interactive:
+                self._drag_pos = e.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, e):
-        if self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
+        if not e.buttons():
+            pos = e.pos()
+            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
+                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            else:
+                self.unsetCursor()
+
+        if hasattr(self, "_resize_start") and self._resize_start:
+            delta = e.globalPosition().toPoint() - self._resize_start
+            new_w = max(self.minimumWidth(), self._resize_start_geometry.width() + delta.x())
+            new_h = max(self.minimumHeight(), self._resize_start_geometry.height() + delta.y())
+            self.resize(new_w, new_h)
+        elif self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
+        self._resize_start = None
 
     def _field_group(self, label: str, widget, desc: str = "") -> QVBoxLayout:
         lay = QVBoxLayout()
@@ -201,11 +230,16 @@ class SettingsDialog(QDialog):
         cancel.setObjectName("ghost")
         cancel.clicked.connect(self.reject)
 
-        save = QPushButton("Apply Changes")
+        apply_btn = QPushButton("Apply")
+        apply_btn.setObjectName("ghost")
+        apply_btn.clicked.connect(self._apply)
+
+        save = QPushButton("Save and Close")
         save.setObjectName("primary")
         save.clicked.connect(self._save)
 
         footer_lay.addWidget(cancel)
+        footer_lay.addWidget(apply_btn)
         footer_lay.addWidget(save)
         main_vlay.addWidget(footer)
 
@@ -740,7 +774,7 @@ class SettingsDialog(QDialog):
             if i < len(modes):
                 edit.setPlainText(modes[i].get("prompt", ""))
 
-    def _save(self):
+    def _write_settings_to_config(self):
         self.cfg.set("custom_templates", [t.copy() for t in self._temp_templates])
         self.cfg.set("hotkeys", [h.copy() for h in self._temp_hotkeys])
         self.cfg.set("llama_server_path", self.server_edit.text())
@@ -818,7 +852,13 @@ class SettingsDialog(QDialog):
         self.cfg.set("correction_modes", modes)
 
         self.saved.emit()
+
+    def _save(self):
+        self._write_settings_to_config()
         self.accept()
+
+    def _apply(self):
+        self._write_settings_to_config()
 
 
 # Dynamically load theme from stet.qss to maintain compatibility with other modules importing THEME

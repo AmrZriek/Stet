@@ -20,7 +20,7 @@ class ConfigManager:
     def __init__(self):
         self._needs_save = False
         self.config = self._load()
-        self._auto_detect()
+        self.auto_detect()
         if self._needs_save:
             self.save()
 
@@ -112,6 +112,14 @@ class ConfigManager:
             "Executive Briefing",
             "Fix Grammar",
             "Rewrite & Polish",
+            "Polish and Refine",
+            "Fix Grammar Only",
+            "Simplify",
+            "Clean Up Dictation",
+            "Professional Tone",
+            "Fix Note Formatting",
+            "Convert to Notes",
+            "Notes Assistant",
         }
         templates = cfg.get("custom_templates", [])
         template_names = {t.get("name", "") for t in templates if isinstance(t, dict)}
@@ -150,7 +158,7 @@ class ConfigManager:
                         self._needs_save = True
                 if t.get("prompt") == _OLD_REWRITE_POLISH_TEMPLATE_PROMPT:
                     t["prompt"] = DEFAULT_TEMPLATES[1]["prompt"]
-                    t["name"] = "Polish and Refine"
+                    t["name"] = "Professional Tone"
                     self._needs_save = True
 
         # Migrate correction_modes: add 4th "Custom Patch" mode if missing.
@@ -193,23 +201,48 @@ class ConfigManager:
         except Exception as e:
             log(f"Config save error: {e}")
 
-    def _auto_detect(self):
+    def auto_detect(self) -> bool:
+        """Scan the application directory for models and the llama-server.
+        Updates configuration if new paths are discovered.
+        Returns True if config was updated, False otherwise.
+        """
+        changed = False
+
+        # 1. Detect GGUF model
+        from stet.llm.utils import _is_valid_gguf
         path = self.config.get("model_path", "")
         if not path or not Path(path).exists():
-            gguf = sorted(SCRIPT_DIR.glob("*.gguf"))
+            gguf = [p for p in SCRIPT_DIR.glob("*.gguf") if _is_valid_gguf(p)]
+            gguf = sorted(gguf)
             if gguf:
                 self.config["model_path"] = str(gguf[0])
                 self.config["recent_models"] = [str(p) for p in gguf]
                 if not self.config.get("chat_use_separate_model", False):
                     self.config["chat_model_path"] = str(gguf[0])
-                self.save()
+                changed = True
+
         if self.config.get("chat_use_separate_model", False):
             cpath = self.config.get("chat_model_path", "")
             if not cpath or not Path(cpath).exists():
-                gguf = sorted(SCRIPT_DIR.glob("*.gguf"))
+                gguf = [p for p in SCRIPT_DIR.glob("*.gguf") if _is_valid_gguf(p)]
+                gguf = sorted(gguf)
                 if gguf:
                     self.config["chat_model_path"] = str(gguf[0])
-                    self.save()
+                    changed = True
+
+        # 2. Detect llama-server
+        server_path = self.config.get("llama_server_path", "")
+        if not server_path or not Path(server_path).exists():
+            from stet.llm.utils import _find_shipped_llama_server
+            detected_server = _find_shipped_llama_server()
+            if detected_server and detected_server != server_path:
+                self.config["llama_server_path"] = detected_server
+                changed = True
+
+        if changed:
+            self.save()
+
+        return changed
 
     def get(self, key, default=None):
         return self.config.get(key, default)

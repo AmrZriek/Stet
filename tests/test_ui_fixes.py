@@ -600,7 +600,7 @@ def test_tab_cycles_strength_combo(qtbot, monkeypatch):
     # Simulate Tab arriving via the app-level event filter.
     # In production, QApplication dispatches Tab to the focused child widget;
     # our eventFilter intercepts it and cycles the combo instead.
-    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.NoModifier)
+    ev = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, Qt.KeyboardModifier.ControlModifier)
 
     # Press Tab once → should go to smart_fix (index 1)
     assert win.eventFilter(win, ev)  # consumed by our event filter

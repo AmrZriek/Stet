@@ -418,7 +418,7 @@ class TestWarmupPromptCache:
         """Warmup posts to /v1/chat/completions with max_tokens=1, cache_prompt=True, once per parallel slot."""
         captured_calls = []
 
-        def fake_post(url, *args, **kwargs):
+        def fake_post(self, url, *args, **kwargs):
             captured_calls.append({
                 "url": url,
                 "json": kwargs.get("json"),
@@ -426,7 +426,7 @@ class TestWarmupPromptCache:
             })
             return MockResponse({"choices": [{"message": {"content": ""}}]})
 
-        monkeypatch.setattr("requests.post", fake_post)
+        monkeypatch.setattr("requests.Session.post", fake_post)
         manager._warmup_prompt_cache()
 
         parallel = manager.cfg.get("parallel", 4)
@@ -473,7 +473,7 @@ class TestWarmupPromptCache:
             captured_calls.append(kwargs.get("json"))
             return MockResponse({"choices": [{"message": {"content": ""}}]})
 
-        monkeypatch.setattr("requests.post", fake_post)
+        monkeypatch.setattr("requests.Session.post", fake_post)
         manager._warmup_prompt_cache()
 
         assert len(captured_calls) == 1
@@ -490,7 +490,7 @@ class TestWarmupPromptCache:
         def fake_post(url, *args, **kwargs):
             raise RuntimeError("connection refused")
 
-        monkeypatch.setattr("requests.post", fake_post)
+        monkeypatch.setattr("requests.Session.post", fake_post)
         # Should not raise
         manager._warmup_prompt_cache()
 
@@ -714,4 +714,45 @@ class TestTerminalPunctuationGuard:
         monkeypatch.setattr(requests.Session, "post", fake_post)
 
         res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "smart_fix")
-        assert res == "Hello world."
+        assert res == "Hello world."
+
+    def test_terminal_punctuation_skipped_for_multi_chunk(self, manager, monkeypatch):
+        """Per-chunk guard does NOT fire when total > 1 (multi-chunk input)."""
+        import requests
+
+        # LLM drops the period
+        mock_content = "<<<START>>>Hello world<<<END>>>"
+
+        def fake_post(self, url, *args, **kwargs):
+            return MockResponse(
+                {"choices": [{"message": {"content": mock_content}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+
+        # total=3 -> multi-chunk -> guard should NOT restore the period
+        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 3, "smart_fix")
+        assert res == "Hello world"  # period stays dropped
+
+    def test_rewrite_polish_paragraph_chunking_exceeding_max_words(self, manager):
+        """If a paragraph exceeds 150 words in rewrite_polish mode, it gets split at sentence boundaries."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        captured_chunks = []
+        def mock_rewrite(chunk_text, *args, **kwargs):
+            captured_chunks.append(chunk_text)
+            return chunk_text
+
+        manager._rewrite_sentence_chunk = mock_rewrite
+
+        # 16 sentences, each 10 words, total 160 words without newlines.
+        sentence = "This is a sentence of ten words for testing this. "
+        long_paragraph = sentence * 16
+
+        result, units = manager.correct_text_patch(long_paragraph, strength="rewrite_polish")
+        assert units > 1
+        assert len(captured_chunks) > 1
+        # The reconstructed result should match the original text
+        assert result.strip() == long_paragraph.strip()

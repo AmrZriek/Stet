@@ -136,8 +136,10 @@ def test_correct_text_patch_smartfix_accepts_rewrite_with_guard_disabled(monkeyp
     )
 
     # Hallucination guard is disabled for smart_fix (threshold = 1.0).
-    # The rewrite should be accepted.
-    assert result == "Hello different this is test"
+    # The rewrite should be accepted. Capitalization is left to the LLM
+    # (the deterministic cap post-fix was removed 2026-06-23), so the mock's
+    # lowercase casing is preserved verbatim.
+    assert result == "hello different this is test"
     assert units == 1
 
 
@@ -156,8 +158,9 @@ def test_correct_text_patch_aggressive_accepts_rewrite_with_guard_disabled(monke
     )
 
     # Both hallucination guard and repetition-loss guard are disabled
-    # for aggressive mode. The rewrite should be accepted.
-    assert result == "Hello new world this is test"
+    # for aggressive mode. The rewrite should be accepted. Capitalization is
+    # left to the LLM (cap post-fix removed 2026-06-23); mock casing preserved.
+    assert result == "hello new world this is test"
     assert units == 1
 
 

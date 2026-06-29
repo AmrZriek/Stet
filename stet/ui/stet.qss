@@ -828,8 +828,3 @@ QMenu::separator {
     background: #28292c;
     margin: 4px 0;
 }
-
-
-
-
-
