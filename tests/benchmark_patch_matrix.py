@@ -582,12 +582,12 @@ def generate_text(target_words: int, error_density: float, rng: random.Random) -
 
 def should_skip_chunk(chunk_text: str, strength: str) -> bool:
     """Return True if the chunk would be skipped (no LLM call needed)."""
-    if strength in ("aggressive", "rewrite_polish"):
+    if strength == "rewrite_polish":
         return False
     _, pre_fixes = _dict_prepass(chunk_text)
     if pre_fixes > 0:
         return False
-    if strength not in ("spelling_only", "conservative"):
+    if strength != "spelling_only":
         post_fixed = _apply_post_fixes(chunk_text, original=chunk_text, strength=strength)
         if post_fixed != chunk_text:
             return False
@@ -734,7 +734,7 @@ def main():
     print(f"Running {total} benchmark combinations...\n")
 
     for i, (chunk_size, prefilter, text_length, error_density) in enumerate(combos, 1):
-        row = run_single(chunk_size, prefilter, text_length, error_density, strength="smart_fix", rng=rng)
+        row = run_single(chunk_size, prefilter, text_length, error_density, strength="full_correction", rng=rng)
         results.append(row)
         if args.verbose:
             print(

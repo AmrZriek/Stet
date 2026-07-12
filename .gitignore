@@ -27,7 +27,6 @@ archive/
 .gemini/
 .codex/
 GEMINI.md
-# AGENT_CONTEXT.md is intentionally tracked — it is the shared AI context file
 
 # AI agent worktrees
 .claude/worktrees/
@@ -47,6 +46,8 @@ Stet_Release/
 graphify-out/
 *.spec
 *.zip
+artifacts/
+out/
 
 # Tests — centralized cache dir (pytest.ini sets cache_dir = .pytest_cache)
 .pytest
@@ -56,8 +57,12 @@ scripts/ci_checks/temp_e2e_launch/
 
 # AI agent files (local development workflows)
 .agents/
+.superpowers/
+.learned/
+.opencodeignore
 
 # Documentation and markdown files (local-only)
 docs/
 *.md
 !README.md
+marketing/

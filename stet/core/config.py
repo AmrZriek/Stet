@@ -29,11 +29,18 @@ class ConfigManager:
         saved: dict = {}
         if CONFIG_FILE.exists():
             try:
-                with open(CONFIG_FILE) as f:
+                with open(CONFIG_FILE, encoding="utf-8") as f:
                     saved = json.load(f)
                 cfg.update(saved)
             except Exception as e:
                 log(f"Config load error: {e}")
+
+        # Migrate Spelling Only threshold from legacy values (0.4, 0.55) to 0.7
+        modes = cfg.get("correction_modes", [])
+        if modes and len(modes) > 0 and isinstance(modes[0], dict):
+            if modes[0].get("hallucination_threshold") in (0.4, 0.55):
+                modes[0]["hallucination_threshold"] = 0.7
+                self._needs_save = True
 
         # Migrate legacy model keys if chat_model_path is not in saved configuration
         if "chat_model_path" not in saved:
@@ -58,7 +65,7 @@ class ConfigManager:
             cfg.setdefault("correction_method", "patch")
             cfg.setdefault(
                 "streaming_strength",
-                "conservative" if legacy == 0 else "smart_fix",
+                "spelling_only" if legacy == 0 else "full_correction",
             )
 
         # Migrate legacy hotkeys
@@ -67,7 +74,7 @@ class ConfigManager:
         )
         legacy_hotkey = cfg.pop("hotkey", None)
         legacy_silent = cfg.pop("silent_hotkey", None)
-        legacy_silent_strength = cfg.pop("silent_strength", "smart_fix")
+        legacy_silent_strength = cfg.pop("silent_strength", "full_correction")
         if had_legacy_hotkey_keys:
             self._needs_save = True
 
@@ -78,7 +85,7 @@ class ConfigManager:
                     {
                         "shortcut": legacy_hotkey,
                         "mode": "panel",
-                        "strength": cfg.get("streaming_strength", "smart_fix"),
+                        "strength": cfg.get("streaming_strength", "full_correction"),
                     }
                 )
             if legacy_silent:
@@ -134,17 +141,18 @@ class ConfigManager:
             # Strip emojis from existing template names (migration from previous versions)
             import re
 
+            _ranges = [
+                (0x1F600, 0x1F64F),  # emoticons
+                (0x1F300, 0x1F5FF),  # symbols & pictographs
+                (0x1F680, 0x1F6FF),  # transport & map
+                (0x1F100, 0x1F1FF),  # enclosed alphanumeric supplement (flags, etc)
+                (0x2460, 0x24FF),    # enclosed alphanumerics
+                (0x1F200, 0x1F2FF),  # enclosed ideographic supplement
+                (0x2600, 0x26FF),    # misc symbols
+                (0x2700, 0x27BF),    # dingbats
+            ]
             _emoji_pat = re.compile(
-                "["
-                "\U0001f600-\U0001f64f"  # emoticons
-                "\U0001f300-\U0001f5ff"  # symbols & pictographs
-                "\U0001f680-\U0001f6ff"  # transport & map
-                "\U0001f1e0-\U0001f1ff"  # flags
-                "\U00002702-\U000027b0"
-                "\U000024c2-\U0001f251"
-                "\u2600-\u26ff"  # misc symbols
-                "\u2700-\u27bf"  # dingbats
-                "]+",
+                "[" + "".join(f"{chr(s)}-{chr(e)}" for s, e in _ranges) + "]+",
                 flags=re.UNICODE,
             )
             for t in cfg["custom_templates"]:
@@ -190,6 +198,44 @@ class ConfigManager:
             prompt = mode.get("prompt", "")
             if "RULES (non-negotiable):" in prompt or "EXAMPLES:" in prompt:
                 mode["prompt"] = _strip_structural_rules(prompt)
+                self._needs_save = True
+
+        # Migrate new keys for welcome & presets
+        new_keys = [
+            "show_welcome_on_startup",
+            "chat_thinking_enabled",
+            "startup_on_login",
+        ]
+        if CONFIG_FILE.exists():
+            has_missing = False
+            for key in new_keys:
+                if key not in saved:
+                    has_missing = True
+                    if key == "startup_on_login":
+                        import sys
+                        is_startup_registered = False
+                        if sys.platform == "win32":
+                            try:
+                                import winreg
+                                reg_key = winreg.OpenKey(
+                                    winreg.HKEY_CURRENT_USER,
+                                    r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                    0,
+                                    winreg.KEY_READ,
+                                )
+                                try:
+                                    winreg.QueryValueEx(reg_key, "Stet")
+                                    is_startup_registered = True
+                                except FileNotFoundError:
+                                    pass
+                                finally:
+                                    winreg.CloseKey(reg_key)
+                            except Exception:
+                                pass
+                        cfg["startup_on_login"] = is_startup_registered
+                    else:
+                        cfg[key] = copy.deepcopy(DEFAULT_CONFIG[key])
+            if has_missing:
                 self._needs_save = True
 
         return cfg
@@ -262,3 +308,5 @@ class ConfigManager:
         r.insert(0, path)
         self.config["recent_models"] = r[:10]
         self.save()
+
+

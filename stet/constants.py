@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.1.0"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -70,20 +70,37 @@ GITHUB_RELEASES_API = "https://api.github.com/repos/AmrZriek/Stet/releases/lates
 # ── llama.cpp backend auto-download ──────────────────────────────────────────
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
-LLAMA_BACKEND_VERSION = "b9827"
+LLAMA_BACKEND_VERSION = "b9940"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BACKEND_VERSION}"
 LLAMA_BACKEND_URLS = {
     "llama": f"{_LLAMA_BASE}/llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip",
     "cuda": f"{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip",
 }
 LLAMA_BACKEND_HASHES = {
-    "llama": "EAAA91EA991825FEA11028261A99F8F8FD27BF03f3DF6B0C59D95F0B6E62AB85",
+    "llama": "1EB3AFEC18662B69A8E6716978E61263C8B9F4829A6E929B8FCDCC142BE51893",
     "cuda": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6",
 }
 LLAMA_BACKEND_DIR = f"llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 
+# Recommended Model Configuration
+RECOMMENDED_MODEL_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-UD-Q4_K_XL.gguf"
+RECOMMENDED_MODEL_FILE = "gemma-4-E2B-it-UD-Q4_K_XL.gguf"
+RECOMMENDED_MODEL_HASH = "b8906b8c5e05e57b657646bbc657bd35814a269b2c20f0a2579047fafa1a67dd"
+
+WELCOME_SAMPLE_TEXT = (
+    "Stet is running! Select any text in any app, and press the F9 hotkey "
+    "to correct spelling, grammar, and phrasing instantly.\n\n"
+    "Test correction with this sentence:\n"
+    "\"him and me was late becuase the traffic was super bad.\""
+)
+
 
 DEFAULT_CONFIG: dict = {
+    # Presets
+    "show_welcome_on_startup": True,
+    "chat_thinking_enabled": True,
+    "startup_on_login": False,
+
     # llama.cpp
     "llama_server_path": str(LLAMA_CPP_DIR / SERVER_EXE),
     "model_path": "",
@@ -127,6 +144,34 @@ DEFAULT_CONFIG: dict = {
     "chat_use_separate_model": False,
     "chat_keep_loaded": False,
     "chat_idle_timeout_seconds": 60,
+    "chat_context_size": 12800,
+    "chat_gpu_layers": 99,
+    "chat_threads": -1,
+    "chat_batch_size": 1024,
+    "chat_ubatch_size": 512,
+    "chat_flash_attn": True,
+    "chat_kv_cache_type_k": "q8_0",
+    "chat_kv_cache_type_v": "q8_0",
+    "chat_mtp_enabled": False,
+    "chat_mtp_max_draft": 2,
+    "chat_mtp_min_draft": 0,
+    "chat_temperature": 0.8,
+    "chat_top_k": 40,
+    "chat_top_p": 0.95,
+    "chat_min_p": 0.05,
+    "chat_seed": -1,
+    "chat_typical_p": 1.0,
+    "chat_tfs_z": 1.0,
+    "chat_mirostat": 0,
+    "chat_mirostat_tau": 5.0,
+    "chat_mirostat_eta": 0.1,
+    "chat_repeat_penalty": 1.1,
+    "chat_frequency_penalty": 0.0,
+    "chat_presence_penalty": 0.0,
+    "chat_rope_freq_base": 0.0,
+    "chat_rope_freq_scale": 0.0,
+    "chat_parallel": 1,
+    "chat_threads_batch": -1,
     # Hotkeys
     "hotkeys": [
         {"shortcut": "f9", "mode": "panel", "strength": "full_correction"},
@@ -211,7 +256,7 @@ DEFAULT_CONFIG: dict = {
         {
             "name": "Spelling Only",
             "prompt": "Fix spelling mistakes. Change nothing else.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix only misspelled words: \"libary\" -> \"library\", \"teh\" -> \"the\".\n2. Copy punctuation, capitalization, grammar, word order, line breaks, and spacing exactly as given.\n3. If nothing is misspelled, copy the text exactly as given.\n4. Repeated words and repeated sentences stay exactly as given.\n5. Copy numbers, names, ALL-CAPS words, code, URLs, and symbols exactly as given. Never fix them.\n6. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>She borowed teh red kayak yesterday.<<<END>>>\nOutput: <<<START>>>She borrowed the red kayak yesterday.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>the quartz lamp works fine fine.<<<END>>>\nOutput: <<<START>>>the quartz lamp works fine fine.<<<END>>>",
-            "hallucination_threshold": 0.4,
+            "hallucination_threshold": 0.7,
             "builtin": True,
         },
         {
@@ -223,7 +268,7 @@ DEFAULT_CONFIG: dict = {
         {
             "name": "Rewrite & Polish",
             "prompt": "Edit the text so it reads clearly and smoothly. Keep the author's voice.\n\nOUTPUT: the edited text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix all spelling, grammar, punctuation, and capitalization.\n2. Preserve existing terminal punctuation (. ? !) at the end of sentences. Do not drop sentence-ending punctuation.\n3. Improve clarity, flow, and word choice. Cut filler words (um, uh, like, basically, you know, I mean, so yeah, kind of, sort of).\n4. Keep the author's tone: casual stays casual, formal stays formal. Keep slang, contractions, humor, and emphasis.\n5. Keep every fact, claim, name, and number exactly as given. Invent nothing.\n6. Add no greetings, sign-offs, examples, or commentary.\n7. Keep line breaks and paragraph structure as given.\n8. Copy code, URLs, and symbols exactly as given.\n9. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>basically the velvet sofa thing is, it kinda just dont fit in the hallway at all tbh.<<<END>>>\nOutput: <<<START>>>tbh the velvet sofa just doesn't fit in the hallway.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>\nOutput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>",
-            "hallucination_threshold": 0.99,
+            "hallucination_threshold": 1.0,
             "builtin": True,
         },
         {

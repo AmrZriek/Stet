@@ -26,6 +26,24 @@ QWidget#card {
     padding: 1px;
 }
 
+/* ── Welcome Window ─────────────────────────────────────────────────── */
+QWidget#welcomeCard {
+    background: #121315;
+    border: 1px solid #28292c;
+    border-radius: 0px;
+}
+QWidget#welcomeHeader {
+    background: #090a0b;
+    border-bottom: 1px solid #28292c;
+}
+QWidget#welcomeContent {
+    background: #121315;
+}
+QWidget#welcomeFooter {
+    background: #090a0b;
+    border-top: 1px solid #28292c;
+}
+
 /* ── SettingsDialog ─────────────────────────────────────────────────── */
 SettingsDialog {
     background: #121315;
@@ -828,3 +846,205 @@ QMenu::separator {
     background: #28292c;
     margin: 4px 0;
 }
+
+/* ── Welcome Window ────────────────────────────────────────────────── */
+WelcomeWindow {
+    background: #090a0b;
+    border: 1px solid #28292c;
+}
+QWidget#welcomeHeader {
+    background: #090a0b;
+    border-bottom: 1px solid #28292c;
+}
+QLabel#welcomeHeaderTitle {
+    color: #ededee;
+    font-size: 12px;
+    font-weight: bold;
+    font-family: 'IBM Plex Mono', 'Consolas', monospace;
+}
+QPushButton#windowMinBtn,
+QPushButton#windowMaxBtn {
+    background: transparent;
+    border: none;
+    color: #b0b1b4;
+    font-size: 14px;
+    font-weight: bold;
+    border-radius: 4px;
+}
+QPushButton#windowMinBtn:hover,
+QPushButton#windowMaxBtn:hover {
+    background: #1f2123;
+    color: #ededee;
+}
+QPushButton#windowCloseBtn {
+    background: transparent;
+    border: none;
+    color: #b0b1b4;
+    font-size: 16px;
+    font-weight: bold;
+    border-radius: 4px;
+}
+QPushButton#windowCloseBtn:hover {
+    background: #ef4444;
+    color: #ffffff;
+}
+QLabel#welcomeTitle {
+    color: #ededee;
+    font-size: 18px;
+    font-weight: bold;
+    font-family: 'IBM Plex Mono', 'Consolas', monospace;
+}
+QLabel#welcomeSubtitle {
+    color: #88898c;
+    font-size: 12px;
+}
+QLabel#welcomeSectionHeader {
+    color: #d4a373;
+    font-size: 11px;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-top: 12px;
+    margin-bottom: 4px;
+}
+QLabel#welcomeSectionSubTitle {
+    color: #ededee;
+    font-size: 12px;
+    font-weight: bold;
+    margin-top: 8px;
+}
+QTextEdit#welcomeSampleInput {
+    background: #090a0b;
+    border: 1px solid #28292c;
+    color: #ededee;
+    font-size: 13px;
+    padding: 8px;
+}
+QTextEdit#welcomeSampleInput:focus {
+    border: 1px solid #d4a373;
+}
+QWidget#welcomeResultPanel {
+    background: #121315;
+    border: 1px solid #28292c;
+    margin-top: 8px;
+}
+QTextEdit#welcomeResultOutput {
+    background: #121315;
+    border: none;
+    color: #ededee;
+    font-size: 13px;
+    padding: 8px;
+}
+QPushButton#welcomeCorrectBtn {
+    background: #C0B8A8;
+    color: #121212;
+    border: 1px solid #C0B8A8;
+    font-size: 13px;
+    font-weight: bold;
+    padding: 7px 10px;
+    min-height: 30px;
+}
+QPushButton#welcomeCorrectBtn:hover {
+    background: #A8A094;
+    border: 1px solid #A8A094;
+}
+QPushButton#welcomeCorrectBtn:disabled {
+    background: transparent;
+    color: #88898c;
+    border: 1px solid #28292c;
+}
+QPushButton#welcomeLinkBtn {
+    color: #d4a373;
+    background: transparent;
+    border: none;
+    padding: 0px;
+    font-size: 12px;
+    font-weight: bold;
+    text-align: left;
+}
+QPushButton#welcomeLinkBtn:hover {
+    text-decoration: underline;
+}
+QPushButton#welcomeTemplateBtn {
+    background: #090a0b;
+    border: 1px solid #28292c;
+    color: #ededee;
+    font-size: 11px;
+    padding: 4px 12px;
+    border-radius: 0px;
+}
+QPushButton#welcomeTemplateBtn:hover {
+    border-color: #d4a373;
+    background: #1c1d1f;
+}
+QPushButton#welcomeTemplateBtn:checked {
+    border-color: #d4a373;
+    background: rgba(212, 163, 115, 0.15);
+    color: #d4a373;
+}
+QRadioButton#welcomeStrengthRadio {
+    color: #ededee;
+    font-size: 12px;
+}
+QRadioButton#welcomeStrengthRadio:hover {
+    color: #d4a373;
+}
+QCheckBox#welcomeCheckbox {
+    color: #ededee;
+    font-size: 12px;
+}
+QComboBox#welcomeChatCombo {
+    background: #090a0b;
+    border: 1px solid #28292c;
+    color: #ededee;
+    padding: 4px 8px;
+}
+QComboBox#welcomeChatCombo:hover {
+    border-color: #d4a373;
+}
+
+/* ── Tab Widget (Settings Parameters) ──────────────────────────────── */
+QTabWidget::pane {
+    border: none;
+    background: transparent;
+}
+QTabBar::tab {
+    background: #131416;
+    color: #88898c;
+    border: 1px solid #28292c;
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 8px 20px;
+    margin-right: 4px;
+}
+QTabBar::tab:selected {
+    background: #1a1b1d;
+    color: #ededee;
+}
+QTabBar::tab:hover:!selected {
+    background: #1f2123;
+    color: #ededee;
+}
+
+/* Custom titlebar dragging regions and icon configurations */
+QWidget#welcomeHeader, QWidget#settingsHeader, QWidget#header {
+    -webkit-app-region: drag;
+}
+
+QPushButton#windowMinBtn, QPushButton#windowMaxBtn, QPushButton#windowCloseBtn {
+    -webkit-app-region: no-drag;
+    qproperty-iconSize: 12px 12px;
+}
+
+/* Custom 2-column parameter tab headers */
+QLabel#pageTitle[active="false"] {
+    color: #555659;
+}
+QLabel#pageTitle[active="false"]:hover {
+    color: #b0b1b4;
+}
+QLabel#pageTitle[active="true"] {
+    color: #ededee;
+}
+

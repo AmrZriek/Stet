@@ -31,7 +31,7 @@ Write-Host "==> Running tests (Chunk 2)" -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "Tests failed in Chunk 2 (exit $LASTEXITCODE) - aborting release" }
 
 Write-Host "==> Staging files" -ForegroundColor Cyan
-git add stet/ build.py requirements.txt .gitignore release.ps1
+git add stet/ build.py requirements.txt .gitignore release.ps1 tests/
 
 
 # Only commit if there are staged changes
@@ -99,9 +99,12 @@ Stet is a local, privacy-first AI autocorrect and text rewriting tool. Runs enti
 
 **Installation:**
 1. Download and extract **stet_portable.zip**.
-2. Run **download_backend.bat** to fetch the llama.cpp backend (~652 MB, one-time).
-3. Run **download_model.bat** to fetch the AI model (~1.8 GB).
-4. Run **Stet.exe** (or run.bat).
+2. Run **Unblock_Stet.bat** (right-click → Run as administrator) to remove Windows security warnings from downloaded scripts.
+3. Run **download_backend.bat** to fetch the llama.cpp backend (~652 MB, one-time).
+4. Run **download_model.bat** to fetch the AI model (~1.8 GB).
+5. Run **Stet.exe** (or run.bat).
+
+> **Windows SmartScreen note:** Stet.exe is not code-signed. If Windows shows a "Windows protected your PC" warning, click **More info** → **Run anyway**. This warning will disappear once the executable builds reputation with Microsoft.
 
 **Requirements:**
 - Windows 10/11 (64-bit)
@@ -115,8 +118,28 @@ $checksumBlock
 
 **Full Changelog**: https://github.com/AmrZriek/Stet/commits/v$Version
 "@
-gh release create "v$Version" $artifacts --title "Stet v$Version" --notes $notes
-if ($LASTEXITCODE -ne 0) { throw "gh release create failed (exit $LASTEXITCODE)" }
+$notesFile = Join-Path $env:TEMP "stet-release-notes.txt"
+$notes | Out-File -FilePath $notesFile -Encoding utf8
+$env:GITHUB_TOKEN = $null
+gh release create "v$Version" $artifacts --title "Stet v$Version" -F $notesFile
+if ($LASTEXITCODE -ne 0) {
+    if (Test-Path $notesFile) { Remove-Item $notesFile }
+    throw "gh release create failed (exit $LASTEXITCODE)"
+}
+if (Test-Path $notesFile) { Remove-Item $notesFile }
+
+# Write-Host "==> Updating Gumroad Listing" -ForegroundColor Cyan
+# $grStatus = & gumroad auth status
+# if ($grStatus -like "*Not logged in*") {
+#     throw "Gumroad CLI is not authenticated. Please run 'gumroad auth login' in your terminal to authenticate."
+# }
+# 
+# $productId = "crcezg"
+# 
+# Write-Host "    Uploading portable ZIP to Gumroad..." -ForegroundColor Cyan
+# & gumroad products update $productId --file $zip.FullName --file-name "stet_portable.zip" --non-interactive
+# if ($LASTEXITCODE -ne 0) { throw "Gumroad product update failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
 Write-Host "Done. https://github.com/AmrZriek/Stet/releases/tag/v$Version" -ForegroundColor Green
+# Write-Host "Gumroad listing updated successfully!" -ForegroundColor Green

@@ -19,6 +19,7 @@ import hashlib
 import zipfile
 import importlib.util
 import urllib.error
+from urllib.parse import urlparse
 from pathlib import Path
 
 import pytest
@@ -593,7 +594,8 @@ def _wire_network(monkeypatch, upd, *, payload, sha_body=None,
 
     def _fake_urlopen(req, timeout=15):
         url = req.full_url
-        if url.endswith("/releases/latest") or "api.github.com" in url:
+        host = (urlparse(url).hostname or "").lower()
+        if url.endswith("/releases/latest") or host == "api.github.com":
             return _http_response(body=json.dumps(payload).encode())
         if url.endswith("SHA256SUMS.txt"):
             if sha_status != 200:

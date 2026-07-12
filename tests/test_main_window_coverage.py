@@ -159,10 +159,8 @@ class TestStrengthFromLabel:
 class TestStrengthIndex:
     def test_indices(self):
         assert CorrectionWindow._strength_index("spelling_only") == 0
-        assert CorrectionWindow._strength_index("conservative") == 0
         assert CorrectionWindow._strength_index("full_correction") == 1
         assert CorrectionWindow._strength_index("rewrite_polish") == 2
-        assert CorrectionWindow._strength_index("aggressive") == 2
         assert CorrectionWindow._strength_index("custom_patch") == 3
         assert CorrectionWindow._strength_index("unknown") == 1
 
@@ -482,8 +480,20 @@ class TestCloseEvent:
         cw._correction_stream_worker = mock_w
         event = QCloseEvent()
         cw.closeEvent(event)
-        # Workers should have been stopped
+        # Workers should have been stopped and set to None
         mock_w.stop.assert_called()
+        assert cw._stream_worker is None
+        assert cw._correction_stream_worker is None
+
+    def test_stops_chat_worker(self, qtbot, cfg):
+        cw = _make_cw(cfg, qtbot)
+        mock_w = MagicMock()
+        mock_w.isRunning.return_value = True
+        cw._chat_worker = mock_w
+        event = QCloseEvent()
+        cw.closeEvent(event)
+        mock_w.stop.assert_called()
+        assert cw._chat_worker is None
 
     def test_sets_cancelled(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
@@ -653,14 +663,14 @@ class TestStartStreamingCorrection:
     def test_suppressed_when_cancelled(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw._correction_cancelled = True
-        cw._start_streaming_correction("text", "", "smart_fix")
+        cw._start_streaming_correction("text", "", "full_correction")
 
     def test_starts_worker(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw._correction_cancelled = False
         mock_worker = MagicMock()
         cw.ac_model.make_stream_worker.return_value = mock_worker
-        cw._start_streaming_correction("Hello world", "", "smart_fix")
+        cw._start_streaming_correction("Hello world", "", "full_correction")
         mock_worker.start.assert_called()
 
 

@@ -3,6 +3,8 @@ import html as _html
 import re
 import threading
 import traceback
+import tempfile
+from pathlib import Path
 
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
@@ -32,6 +34,7 @@ from stet.core.text_utils import (
     _is_fewshot_echo,
     _dict_prepass,
     _apply_post_fixes,
+    recover_sentinels,
     strip_meta_commentary,
     strip_preamble,
     strip_think,
@@ -54,6 +57,8 @@ class CorrectionWindow(QWidget):
     _chat_done = pyqtSignal(str)
     _chat_error = pyqtSignal(str)
     _do_stream_signal = pyqtSignal()
+    _status_loading_signal = pyqtSignal()
+    _status_streaming_signal = pyqtSignal()
 
     def __init__(
         self,
@@ -77,7 +82,7 @@ class CorrectionWindow(QWidget):
         self._current_strength = self._normalize_strength(
             current_strength
             or initial_strength
-            or self.cfg.get("streaming_strength", "smart_fix")
+            or self.cfg.get("streaming_strength", "full_correction")
         )
         self._initial_strength = self._current_strength
         self._re_register_cb = re_register_cb or (lambda: None)
@@ -120,15 +125,18 @@ class CorrectionWindow(QWidget):
             "rewrite_polish",
         }:
             return value
+        # Backward compat: accept old alias names from saved user configs.
         if value == "conservative":
             return "spelling_only"
         if value == "aggressive":
             return "rewrite_polish"
+        if value == "smart_fix":
+            return "full_correction"
         if value == "custom_patch":
             # Legacy: map old hardcoded key → first enabled custom mode name,
             # or fall back to full_correction if none exist.
             return "custom_patch"  # will be resolved at combo-build time
-        if value and value not in {"smart_fix"}:
+        if value:
             # Unknown / custom mode name — pass through as-is so routing works.
             return value
         return "full_correction"
@@ -146,9 +154,9 @@ class CorrectionWindow(QWidget):
 
     @staticmethod
     def _strength_index(value: str) -> int:
-        if value in {"spelling_only", "conservative"}:
+        if value in {"spelling_only"}:
             return 0
-        if value in {"rewrite_polish", "aggressive"}:
+        if value in {"rewrite_polish"}:
             return 2
         if value == "custom_patch":
             return 3
@@ -193,6 +201,8 @@ class CorrectionWindow(QWidget):
         self._chat_done.connect(self._on_chat_done)
         self._chat_error.connect(self._on_chat_error)
         self._do_stream_signal.connect(self._do_stream)
+        self._status_loading_signal.connect(self._on_status_loading)
+        self._status_streaming_signal.connect(self._on_status_streaming)
         self.ac_model.status_changed.connect(self._on_model_status)
         self.chat_input.textChanged.connect(lambda text: self.send_btn.setEnabled(bool(text.strip())))
 
@@ -235,6 +245,21 @@ class CorrectionWindow(QWidget):
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
         self._resize_start = None
+
+    def _toggle_maximized(self):
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.WindowStateChange:
+            if hasattr(self, "_max_btn") and self._max_btn is not None:
+                max_svg = Path(tempfile.gettempdir()) / "stet_max.svg"
+                restore_svg = Path(tempfile.gettempdir()) / "stet_restore.svg"
+                icon_path = restore_svg if self.isMaximized() else max_svg
+                self._max_btn.setIcon(QIcon(str(icon_path)))
+        super().changeEvent(event)
 
     def _setup_shortcuts(self):
         # Ctrl+Enter → send chat message (documented in shortcuts overlay)
@@ -312,8 +337,7 @@ class CorrectionWindow(QWidget):
             shortcuts = [
                 ("Esc", "Cancel / Close Overlay"),
                 ("Enter", "Accept & Paste (or Send if typing)"),
-                ("Ctrl+Enter", "Send Chat"),
-                ("Tab", "Cycle Strength"),
+                ("Ctrl+Tab", "Cycle Strength"),
                 ("?", "Toggle Shortcuts"),
             ]
 
@@ -344,6 +368,22 @@ class CorrectionWindow(QWidget):
         self.status_lbl.style().unpolish(self.status_lbl)
         self.status_lbl.style().polish(self.status_lbl)
 
+    def _on_status_loading(self):
+        try:
+            self._status_label.setProperty("state", "loading")
+            self._status_label.setText("Model loading...")
+            self._status_label.style().polish(self._status_label)
+        except (AttributeError, RuntimeError):
+            pass
+
+    def _on_status_streaming(self):
+        try:
+            self._status_label.setProperty("state", "streaming")
+            self._status_label.setText("Generating...")
+            self._status_label.style().polish(self._status_label)
+        except (AttributeError, RuntimeError):
+            pass
+
     # NOTE: Tab cycling is handled by the app-level eventFilter installed in
     # _setup_shortcuts(). The old event() override did not work because Qt
     # dispatches key events to the focused child widget, not the parent.
@@ -373,7 +413,20 @@ class CorrectionWindow(QWidget):
     def _build_ui(self):
         self.setWindowTitle("Stet")
         self.setMinimumWidth(480)
-        self.setStyleSheet(THEME)
+        # Write checkmark SVG and replace placeholder in THEME
+        svg_path = Path(tempfile.gettempdir()) / "stet_checkmark.svg"
+        try:
+            if not svg_path.exists():
+                svg_path.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12">'
+                    '<path d="M2 6L5 9L10 3" stroke="white" stroke-width="2.2" '
+                    'fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
+        p = str(svg_path).replace("\\", "/")
+        self.setStyleSheet(THEME.replace("{checkmark_url}", p))
 
         card = QWidget()
         card.setObjectName("card")
@@ -399,6 +452,7 @@ class CorrectionWindow(QWidget):
 
         self.status_lbl = QLabel("● Idle")
         self.status_lbl.setObjectName("statusLabel")
+        self._status_label = self.status_lbl
         hdr.addWidget(self.status_lbl)
 
         self.strength_combo = QComboBox()
@@ -418,11 +472,8 @@ class CorrectionWindow(QWidget):
         # Determine the display label for the initial strength value.
         _builtin_to_label = {
             "spelling_only": "Spelling Only",
-            "conservative": "Spelling Only",
             "full_correction": "Full Correction",
-            "smart_fix": "Full Correction",
             "rewrite_polish": "Rewrite & Polish",
-            "aggressive": "Rewrite & Polish",
         }
         _initial_label = _builtin_to_label.get(
             self._current_strength, self._current_strength
@@ -440,6 +491,76 @@ class CorrectionWindow(QWidget):
         help_btn.setAccessibleName("Show keyboard shortcuts")
         help_btn.clicked.connect(self._toggle_shortcuts_overlay)
         hdr.addWidget(help_btn)
+
+        # Write standard SVG icons to tempfile
+        min_svg = Path(tempfile.gettempdir()) / "stet_min.svg"
+        max_svg = Path(tempfile.gettempdir()) / "stet_max.svg"
+        close_svg = Path(tempfile.gettempdir()) / "stet_close.svg"
+        restore_svg = Path(tempfile.gettempdir()) / "stet_restore.svg"
+        try:
+            if not min_svg.exists():
+                min_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<line x1="1" y1="5" x2="9" y2="5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+            if not max_svg.exists():
+                max_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<rect x="1.5" y="1.5" width="7" height="7" fill="none" stroke="#ffffff" stroke-width="1"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+            if not close_svg.exists():
+                close_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '<line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+            if not restore_svg.exists():
+                restore_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<path d="M3,1.5 h5.5 v5.5 h-1.5 v-4 h-4 z" fill="none" stroke="#ffffff" stroke-width="1"/>'
+                    '<rect x="1.5" y="3" width="5.5" height="5.5" fill="none" stroke="#ffffff" stroke-width="1"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+        except Exception:
+            pass
+
+        self._min_btn = QPushButton()
+        self._min_btn.setObjectName("windowMinBtn")
+        self._min_btn.setIcon(QIcon(str(min_svg)))
+        self._min_btn.setFixedSize(28, 28)
+        self._min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._min_btn.clicked.connect(self.showMinimized)
+        self._min_btn.setAccessibleName("Minimize window")
+        self._min_btn.setToolTip("Minimize")
+
+        self._max_btn = QPushButton()
+        self._max_btn.setObjectName("windowMaxBtn")
+        self._max_btn.setIcon(QIcon(str(restore_svg if self.isMaximized() else max_svg)))
+        self._max_btn.setFixedSize(28, 28)
+        self._max_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._max_btn.clicked.connect(self._toggle_maximized)
+        self._max_btn.setAccessibleName("Maximize or restore window")
+        self._max_btn.setToolTip("Maximize")
+
+        self._close_btn = QPushButton()
+        self._close_btn.setObjectName("windowCloseBtn")
+        self._close_btn.setIcon(QIcon(str(close_svg)))
+        self._close_btn.setFixedSize(28, 28)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.clicked.connect(self.close)
+        self._close_btn.setAccessibleName("Close window")
+        self._close_btn.setToolTip("Close")
+
+        hdr.addWidget(self._min_btn)
+        hdr.addWidget(self._max_btn)
+        hdr.addWidget(self._close_btn)
 
         lay.addWidget(hdr_widget)
 
@@ -839,8 +960,8 @@ class CorrectionWindow(QWidget):
           - "patch": indexed-word patches, single pass, word-level edits.
             On malformed model output, falls back to streaming Smart Fix.
           - "stream": full corrected text streamed token-by-token into the
-            correction pane. Strength is "conservative" (typos only) or
-            "smart_fix" (grammar/capitalization/punctuation).
+            correction pane. Strength is "spelling_only" (typos only) or
+             "full_correction" (grammar/capitalization/punctuation).
         """
         log("[CW] _do_correction started")
         # Use a unique object token to identify this specific correction run.
@@ -889,6 +1010,16 @@ class CorrectionWindow(QWidget):
             # Wait for /health to be 200 (model fully loaded and ready)
             import requests
             import time
+            from PyQt6.QtCore import QThread
+            from PyQt6.QtWidgets import QApplication
+            qapp = QApplication.instance()
+            if qapp and QThread.currentThread() == qapp.thread():
+                self._on_status_loading()
+            else:
+                try:
+                    self._status_loading_signal.emit()
+                except (AttributeError, RuntimeError):
+                    pass
             health_ready = not hasattr(self.ac_model, "_health_url")
             if not health_ready:
                 for i in range(180):
@@ -918,10 +1049,19 @@ class CorrectionWindow(QWidget):
                 self._correction_failed_with_msg.emit("Model error: Server health check timeout")
                 return
 
+            qapp = QApplication.instance()
+            if qapp and QThread.currentThread() == qapp.thread():
+                self._on_status_streaming()
+            else:
+                try:
+                    self._status_streaming_signal.emit()
+                except (AttributeError, RuntimeError):
+                    pass
+
             custom_sys = self.cfg.get("system_prompt", "").strip()
             if custom_sys:
                 log("[CW] system prompt override active -> direct streaming mode")
-                self._start_streaming_correction(text, custom_sys, "smart_fix")
+                self._start_streaming_correction(text, custom_sys, "full_correction")
                 return
 
             # method is always "patch" — stream mode was removed from settings
@@ -930,7 +1070,7 @@ class CorrectionWindow(QWidget):
             # deleted between the thread starting and this line executing.
             strength = self.__dict__.get(
                 "_current_strength",
-                self.__dict__.get("_initial_strength", "smart_fix"),
+                self.__dict__.get("_initial_strength", "full_correction"),
             )
             log(f"[CW] method={method} strength={strength}")
 
@@ -955,10 +1095,10 @@ class CorrectionWindow(QWidget):
                 self._start_streaming_correction(text, custom_sys, strength)
                 return
             label_strength = {
-                "smart_fix": "Smart Fix",
-                "aggressive": "Aggressive",
+                "full_correction": "Full Correction",
+                "rewrite_polish": "Rewrite & Polish",
                 "custom_patch": "Custom Patch",
-            }.get(strength, "Conservative")
+            }.get(strength, "Spelling Only")
             unit_suffix = f", {units} units" if units > 1 else ""
             if result == text:
                 self._correction_ready.emit(text, "Already correct")
@@ -969,7 +1109,10 @@ class CorrectionWindow(QWidget):
 
         except Exception as e:
             log(f"[CW] _do_correction CRASHED: {e}\n{traceback.format_exc()}")
-            self._correction_failed.emit()
+            try:
+                self._correction_failed.emit()
+            except RuntimeError:
+                pass
         finally:
             if self._correction_thread_token is thread_token:
                 self._correction_thread_token = None
@@ -1053,11 +1196,11 @@ class CorrectionWindow(QWidget):
             system = custom_sys
             wrapped = text
         else:
-            if strength == "conservative" or strength == "spelling_only":
+            if strength == "spelling_only":
                 fix_rule = "Fix only clear spelling mistakes and obvious typos. Do NOT change grammar, punctuation, capitalization, word choice, or style."
-            elif strength == "aggressive" or strength == "rewrite_polish":
+            elif strength == "rewrite_polish":
                 fix_rule = "Fix all errors and improve clarity, conciseness, and flow. Reorder sentences or change word choice if it significantly improves the text while preserving the author's core intent."
-            else:  # smart_fix or full_correction
+            else:  # full_correction
                 fix_rule = "Fix typos, spelling, grammar, punctuation, and capitalization errors. Preserve the author's wording, tone, and intent."
 
             system = (
@@ -1081,6 +1224,16 @@ class CorrectionWindow(QWidget):
         ]
         max_tokens = min(len(text.split()) * 3 + 500, 4096)
 
+        # NOTE: Sampling is intentionally hardcoded deterministic here. This path
+        # only fires when (a) the user set a custom system_prompt (opting out of
+        # patch mode) or (b) the patch method returned None (fallback recovery) —
+        # neither is the primary correction path. The primary path
+        # (correct_text_patch -> _rewrite_sentence_chunk) already honors user
+        # sampling via _get_param (model_manager.py:1239-1251). The streaming
+        # fallback stays deterministic for recovery reliability. Do NOT remove
+        # these overrides without also giving this path its own correction-style
+        # _get_param defaults (the shared make_stream_worker uses chat-style
+        # defaults of temp=0.3/top_k=40 which would regress correction quality).
         worker = self.ac_model.make_stream_worker(
             messages, max_tokens=max_tokens,
             temperature=0.0, top_k=1, repeat_penalty=1.0,
@@ -1119,16 +1272,27 @@ class CorrectionWindow(QWidget):
         cleaned = _apply_post_fixes(cleaned, original=self.original, strength=self._correction_stream_strength)
         cleaned = self._match_original_newlines(cleaned)
         if hasattr(self, '_streaming_masked') and self._streaming_masked:
-            _surviving = all(
-                f"⟦U{i+1}⟧" in cleaned
-                for i in range(len(self._streaming_masked))
-            )
+            _expected_sentinels = [
+                f"⟦U{i+1}⟧" for i in range(len(self._streaming_masked))
+            ]
+            _surviving = all(s in cleaned for s in _expected_sentinels)
             if not _surviving:
-                log("[CW] streaming output lost sentinel(s)")
-                self._on_correction_ready(
-                    self.original, "Sentinel lost — try a larger model"
-                )
-                return
+                # Try restoring mangled sentinels (⟦U1⟧ stripped to [U1],
+                # "U1", ⟦u1⟧, etc.) before bailing out with the "try a
+                # larger model" warning. Successful recovery keeps the
+                # streamed correction usable.
+                _recovered = recover_sentinels(cleaned, _expected_sentinels)
+                if _recovered != cleaned and all(
+                    s in _recovered for s in _expected_sentinels
+                ):
+                    log("[CW] streaming output: recovered mangled sentinel(s)")
+                    cleaned = _recovered
+                else:
+                    log("[CW] streaming output lost sentinel(s)")
+                    self._on_correction_ready(
+                        self.original, "Sentinel lost — try a larger model"
+                    )
+                    return
             for i, entity in enumerate(self._streaming_masked):
                 cleaned = cleaned.replace(f"⟦U{i+1}⟧", entity)
             self._streaming_masked = []
@@ -1185,14 +1349,14 @@ class CorrectionWindow(QWidget):
         custom_sys = self.cfg.get("system_prompt", "").strip()
         if custom_sys:
             label = "Stream (Custom System Prompt)"
-        elif self._correction_stream_strength == "smart_fix":
-            label = "Stream (Smart Fix)"
-        elif self._correction_stream_strength == "aggressive":
-            label = "Stream (Aggressive)"
+        elif self._correction_stream_strength == "full_correction":
+            label = "Stream (Full Correction)"
+        elif self._correction_stream_strength == "rewrite_polish":
+            label = "Stream (Rewrite & Polish)"
         elif self._correction_stream_strength == "custom_patch":
             label = "Stream (Custom Patch)"
         else:
-            label = "Stream (Conservative)"
+            label = "Stream (Spelling Only)"
         self._on_correction_ready(cleaned, label)
 
     def _on_correction_stream_error(self, err: str):
@@ -1435,6 +1599,14 @@ class CorrectionWindow(QWidget):
         self.send_btn.setEnabled(False)
         self.accept_btn.setEnabled(False)
 
+        # Kill any in-flight PATCH correction (parallel chunk workers in
+        # correct_text_patch poll this event). Do NOT replace _cancel_event with
+        # a fresh Event() here — chat starts no new correction thread, and per
+        # the documented intent in _reset, leaving the latch set guards against
+        # late patch-worker results slipping through after the chat output lands.
+        self._correction_cancelled = True
+        self._cancel_event.set()
+
         self._is_chat_mode = True
         self._conversation_mode = (
             self.cfg.get("chat_mode", "conversation") == "conversation"
@@ -1485,7 +1657,18 @@ class CorrectionWindow(QWidget):
             self.chat_history.append({"role": "user", "content": msg})
 
         self._add_chat_bubble("user", msg, is_template=is_template)
-        self._active_ai_bubble = self._add_chat_bubble("assistant", "AI is thinking…")
+        self._active_ai_bubble = self._add_chat_bubble("assistant", "Generating...")
+
+        from PyQt6.QtCore import QThread
+        from PyQt6.QtWidgets import QApplication
+        qapp = QApplication.instance()
+        if qapp and QThread.currentThread() == qapp.thread():
+            self._on_status_streaming()
+        else:
+            try:
+                self._status_streaming_signal.emit()
+            except (AttributeError, RuntimeError):
+                pass
 
         # Decouple chat routing based on is_template and chat_use_separate_model
         if is_template or not self.cfg.get("chat_use_separate_model", False):
@@ -1551,6 +1734,7 @@ class CorrectionWindow(QWidget):
         else:
             self._render_diff(full)
         self.method_badge.setText("via AI chat")
+        self._update_status("✓  Done", "done")
         self.send_btn.setEnabled(True)
         self.accept_btn.setEnabled(True)
         self.copy_btn.setEnabled(True)
@@ -1563,6 +1747,7 @@ class CorrectionWindow(QWidget):
 
     def _on_chat_error(self, err: str):
         self._replace_chat_stream_region(f"Error: {err}")
+        self._update_status("⚠  Error", "error")
         self.send_btn.setEnabled(True)
         self.accept_btn.setEnabled(True)
 
@@ -1656,15 +1841,26 @@ class CorrectionWindow(QWidget):
         self._correction_cancelled = True
         self._cancel_event.set()
         self._retry_correction_when_model_ready = False
-        if self._stream_worker and self._stream_worker.isRunning():
-            self._stream_worker.blockSignals(True)
-            self._stream_worker.stop()
-            self._stream_worker.wait(500)
-        if (
-            self._correction_stream_worker
-            and self._correction_stream_worker.isRunning()
-        ):
-            self._correction_stream_worker.blockSignals(True)
-            self._correction_stream_worker.stop()
-            self._correction_stream_worker.wait(500)
+
+        if getattr(self, "_stream_worker", None) is not None:
+            if hasattr(self._stream_worker, "isRunning") and self._stream_worker.isRunning():
+                self._stream_worker.blockSignals(True)
+                self._stream_worker.stop()
+                self._stream_worker.wait(500)
+            self._stream_worker = None
+
+        if getattr(self, "_chat_worker", None) is not None:
+            if hasattr(self._chat_worker, "isRunning") and self._chat_worker.isRunning():
+                self._chat_worker.blockSignals(True)
+                self._chat_worker.stop()
+                self._chat_worker.wait(500)
+            self._chat_worker = None
+
+        if getattr(self, "_correction_stream_worker", None) is not None:
+            if hasattr(self._correction_stream_worker, "isRunning") and self._correction_stream_worker.isRunning():
+                self._correction_stream_worker.blockSignals(True)
+                self._correction_stream_worker.stop()
+                self._correction_stream_worker.wait(500)
+            self._correction_stream_worker = None
+
         super().closeEvent(e)

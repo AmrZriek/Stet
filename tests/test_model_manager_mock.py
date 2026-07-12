@@ -203,15 +203,12 @@ class TestStrengthModeIndex:
     """_STRENGTH_TO_MODE_INDEX maps all variants correctly."""
 
     def test_conservative_variants(self):
-        assert _STRENGTH_TO_MODE_INDEX["conservative"] == 0
         assert _STRENGTH_TO_MODE_INDEX["spelling_only"] == 0
 
     def test_smart_fix_variants(self):
-        assert _STRENGTH_TO_MODE_INDEX["smart_fix"] == 1
         assert _STRENGTH_TO_MODE_INDEX["full_correction"] == 1
 
     def test_aggressive_variants(self):
-        assert _STRENGTH_TO_MODE_INDEX["aggressive"] == 2
         assert _STRENGTH_TO_MODE_INDEX["rewrite_polish"] == 2
 
 
@@ -556,7 +553,7 @@ class TestPersistentSession:
         pre = manager._get_session()
 
         result, units = manager.correct_text_patch(
-            "hello world this is test", strength="smart_fix"
+            "hello world this is test", strength="full_correction"
         )
         assert result is not None
         # The session must be the same object — not recreated, not closed
@@ -580,13 +577,13 @@ class TestPersistentSession:
         s1 = manager._get_session()
         mgr_id_after_first = id(manager._session)
 
-        manager.correct_text_patch("hello world this is test", strength="smart_fix")
+        manager.correct_text_patch("hello world this is test", strength="full_correction")
         assert id(manager._session) == mgr_id_after_first
 
-        manager.correct_text_patch("another sentence to fix", strength="smart_fix")
+        manager.correct_text_patch("another sentence to fix", strength="full_correction")
         assert id(manager._session) == mgr_id_after_first
 
-        manager.correct_text_patch("yet another chunk here", strength="smart_fix")
+        manager.correct_text_patch("yet another chunk here", strength="full_correction")
         assert id(manager._session) == mgr_id_after_first
 
         assert manager._session is s1
@@ -636,7 +633,7 @@ class TestPersistentSession:
 
         monkeypatch.setattr(requests.Session, "post", fake_post)
 
-        manager._rewrite_sentence_chunk("hello world", None, 1, 1, "smart_fix")
+        manager._rewrite_sentence_chunk("hello world", None, 1, 1, "full_correction")
 
         # The session that actually posted must be the manager's persistent one
         assert captured_session["session"] is manager._get_session()
@@ -670,15 +667,15 @@ class TestTerminalPunctuationGuard:
         monkeypatch.setattr(requests.Session, "post", fake_post)
 
         # Period dropped -> restored
-        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "smart_fix")
+        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "full_correction")
         assert res == "Hello world."
 
         # Exclamation dropped -> restored
-        res = manager._rewrite_sentence_chunk("Hello world!", None, 1, 1, "smart_fix")
+        res = manager._rewrite_sentence_chunk("Hello world!", None, 1, 1, "full_correction")
         assert res == "Hello world!"
 
         # Question mark dropped -> restored
-        res = manager._rewrite_sentence_chunk("Hello world?", None, 1, 1, "smart_fix")
+        res = manager._rewrite_sentence_chunk("Hello world?", None, 1, 1, "full_correction")
         assert res == "Hello world?"
 
     def test_terminal_punctuation_preserved_with_whitespace(self, manager, monkeypatch):
@@ -697,7 +694,7 @@ class TestTerminalPunctuationGuard:
         # Force the extracted sentence to have trailing whitespace to test preservation
         monkeypatch.setattr(mm, "_extract_rewritten_sentence", lambda raw: "Hello world ")
 
-        res = manager._rewrite_sentence_chunk("Hello world. ", None, 1, 1, "smart_fix")
+        res = manager._rewrite_sentence_chunk("Hello world. ", None, 1, 1, "full_correction")
         assert res == "Hello world. "
 
     def test_terminal_punctuation_not_duplicated(self, manager, monkeypatch):
@@ -713,7 +710,7 @@ class TestTerminalPunctuationGuard:
 
         monkeypatch.setattr(requests.Session, "post", fake_post)
 
-        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "smart_fix")
+        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 1, "full_correction")
         assert res == "Hello world."
 
     def test_terminal_punctuation_skipped_for_multi_chunk(self, manager, monkeypatch):
@@ -731,7 +728,7 @@ class TestTerminalPunctuationGuard:
         monkeypatch.setattr(requests.Session, "post", fake_post)
 
         # total=3 -> multi-chunk -> guard should NOT restore the period
-        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 3, "smart_fix")
+        res = manager._rewrite_sentence_chunk("Hello world.", None, 1, 3, "full_correction")
         assert res == "Hello world"  # period stays dropped
 
     def test_rewrite_polish_paragraph_chunking_exceeding_max_words(self, manager):
@@ -756,3 +753,51 @@ class TestTerminalPunctuationGuard:
         assert len(captured_chunks) > 1
         # The reconstructed result should match the original text
         assert result.strip() == long_paragraph.strip()
+
+
+class TestModelManagerPrefixAndPayload:
+    """Tests verify that prefix-specific configs (autocorrect vs. chat) resolve correctly, and payloads use them."""
+
+    def test_get_param_resolves_prefixes(self, cfg):
+        # Setup config manager with both prefixed and non-prefixed values
+        cfg.set("temperature", 0.15)
+        cfg.set("chat_temperature", 0.85)
+
+        # Autocorrect manager (model_path)
+        ac_manager = ModelManager(cfg, model_path_key="model_path")
+        assert ac_manager._get_param("temperature") == 0.15
+
+        # Chat manager (chat_model_path)
+        chat_manager = ModelManager(cfg, model_path_key="chat_model_path")
+        assert chat_manager._get_param("temperature") == 0.85
+
+    def test_make_stream_worker_uses_prefixed_payload(self, cfg, monkeypatch):
+        cfg.set("temperature", 0.15)
+        cfg.set("chat_temperature", 0.85)
+        
+        chat_manager = ModelManager(cfg, model_path_key="chat_model_path")
+        worker = chat_manager.make_stream_worker(messages=[])
+        assert worker.payload["temperature"] == 0.85
+
+    def test_rewrite_sentence_chunk_uses_config_parameters(self, cfg, monkeypatch):
+        import requests
+        cfg.set("temperature", 0.25)
+        cfg.set("top_k", 5)
+        cfg.set("repeat_penalty", 1.2)
+
+        ac_manager = ModelManager(cfg, model_path_key="model_path")
+        captured_payload = {}
+
+        def fake_post(self, url, json, *args, **kwargs):
+            captured_payload["payload"] = json
+            return MockResponse(
+                {"choices": [{"message": {"content": "<<<START>>>ok<<<END>>>"}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        ac_manager._rewrite_sentence_chunk("hello", None, 1, 1, "full_correction")
+
+        payload = captured_payload.get("payload", {})
+        assert payload.get("temperature") == 0.25
+        assert payload.get("top_k") == 5
+        assert payload.get("repeat_penalty") == 1.2

@@ -7,11 +7,11 @@ from stet.core.text_utils import (
 
 
 def test_ratio_identical_text():
-    assert _hallucination_ratio("hello world", "hello world", "conservative") == 0.0
+    assert _hallucination_ratio("hello world", "hello world", "spelling_only") == 0.0
 
 
 def test_ratio_completely_different():
-    ratio = _hallucination_ratio("hello world", "foo bar", "conservative")
+    ratio = _hallucination_ratio("hello world", "foo bar", "spelling_only")
     # Character-level matching will find some overlap ('o', ' ', 'r'),
     # but it should still be significantly higher than the 0.4 threshold.
     assert ratio > 0.6
@@ -21,9 +21,9 @@ def test_ratio_single_typo_vs_replacement_conservative():
     """
     Hypothesis: Char-level SequenceMatcher (minus whitespace) handles typos much better.
     """
-    ratio_typo = _hallucination_ratio("i beleive it", "i believe it", "conservative")
+    ratio_typo = _hallucination_ratio("i beleive it", "i believe it", "spelling_only")
     ratio_repl = _hallucination_ratio(
-        "i caterpiller it", "i believe it", "conservative"
+        "i caterpiller it", "i believe it", "spelling_only"
     )
 
     assert ratio_typo < ratio_repl
@@ -37,20 +37,20 @@ def test_ratio_thresholds():
     ratio_smart = _hallucination_ratio(
         "hello world",
         "this is a completely entirely different sentence and a rewrite",
-        "smart_fix",
+        "full_correction",
     )
     assert ratio_smart > 0.6
 
     ratio_aggressive = _hallucination_ratio(
         "hello world",
         "this is a completely entirely different sentence and a rewrite",
-        "aggressive",
+        "rewrite_polish",
     )
     assert ratio_aggressive > 0.8
 
 
 def test_strength_threshold_constants_are_ordered():
-    assert _HALLUCINATION_THRESHOLD_CONSERVATIVE == 0.4
+    assert _HALLUCINATION_THRESHOLD_CONSERVATIVE == 0.7
     assert _HALLUCINATION_THRESHOLD_SMARTFIX == 1.0
     assert _HALLUCINATION_THRESHOLD_AGGRESSIVE == 1.0
     assert (

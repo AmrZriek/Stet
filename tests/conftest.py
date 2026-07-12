@@ -18,14 +18,14 @@ if str(ROOT) not in sys.path:
 
 
 STRENGTH_KEYWORDS = {
-    "conservative": ["spelling mistakes", "spelling-only", "Spelling Only"],
-    "aggressive": ["clearly and smoothly", "expert editor", "Improve clarity"],
+    "spelling_only": ["spelling mistakes", "spelling-only", "Spelling Only"],
+    "rewrite_polish": ["clearly and smoothly", "expert editor", "Improve clarity"],
 }
 
 MOCK_STRENGTH_RESPONSES = {
-    "conservative": "<<<START>>>Teh project recieved the update.<<<END>>>",
-    "smart_fix": "<<<START>>>The project received the update.<<<END>>>",
-    "aggressive": "<<<START>>>Project update received successfully.<<<END>>>",
+    "spelling_only": "<<<START>>>Teh project recieved the update.<<<END>>>",
+    "full_correction": "<<<START>>>The project received the update.<<<END>>>",
+    "rewrite_polish": "<<<START>>>Project update received successfully.<<<END>>>",
 }
 
 
@@ -38,8 +38,8 @@ def _detect_strength_from_messages(messages: list) -> str:
                 for kw in keywords:
                     if kw in content:
                         return strength
-            return "smart_fix"
-    return "smart_fix"
+            return "full_correction"
+    return "full_correction"
 
 
 class MockResponse:
@@ -98,14 +98,16 @@ def block_model_load(monkeypatch, request):
 
 @pytest.fixture(autouse=True)
 def suppress_first_run_and_update(monkeypatch):
-    """Block the 'Welcome to Stet' dialog and auto-update checker.
+    """Block the 'Welcome to Stet' dialog, auto-update checker, and first-run downloads check.
 
     StetApp.__init__ fires QTimer.singleShot(800, _show_first_run) when no
-    model is configured and QTimer.singleShot(5000, _check_app_update).
-    Both can pop up blocking modal dialogs during test runs.
+    model is configured, QTimer.singleShot(5000, _check_app_update), and
+    QTimer.singleShot(100, _check_first_run_downloads).
+    All can pop up blocking modal dialogs during test runs.
     """
     monkeypatch.setattr("stet.core.app.StetApp._show_first_run", lambda self: None)
     monkeypatch.setattr("stet.core.app.StetApp._check_app_update", lambda self: None)
+    monkeypatch.setattr("stet.core.app.StetApp._check_first_run_downloads", lambda self: None)
 
 
 @pytest.fixture(autouse=True)

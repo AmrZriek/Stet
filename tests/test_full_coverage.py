@@ -354,7 +354,7 @@ class TestModelManagerCoverage:
         manager = ModelManager(cfg)
         manager.cfg.set(
             "hotkeys",
-            [{"shortcut": "ctrl+f9", "mode": "panel", "strength": "conservative"}],
+            [{"shortcut": "ctrl+f9", "mode": "panel", "strength": "spelling_only"}],
         )
 
         # Set hallucination threshold very low to reject changes
@@ -391,7 +391,7 @@ class TestModelManagerCoverage:
         # Call correction on a long sentence (> 3 words so word_count limit threshold doesn't boost to 0.7)
         # should reject hallucination and fall back to returning None (caller does stream fallback)
         orig_text = "Hello beautiful new world that we are living in."
-        res, units = manager.correct_text_patch(orig_text, strength="conservative")
+        res, units = manager.correct_text_patch(orig_text, strength="spelling_only")
         assert res is None
         assert units == 1
 

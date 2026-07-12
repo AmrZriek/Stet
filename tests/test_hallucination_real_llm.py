@@ -194,7 +194,7 @@ def test_real_llm_typo_fixes(model):
         try:
             # Call LLM with conservative strength
             result, units = model.correct_text_patch(
-                case["input"], strength="conservative"
+                case["input"], strength="spelling_only"
             )
 
             if result is None:
@@ -207,7 +207,7 @@ def test_real_llm_typo_fixes(model):
             # Calculate real drift
             orig = case["input"]
             corr = result.strip()
-            drift = _hallucination_ratio(orig, corr, "smart_fix")
+            drift = _hallucination_ratio(orig, corr, "full_correction")
 
             # Check if correction was applied
             expected = case.get("expected_contains")
@@ -294,9 +294,9 @@ def test_find_optimal_conservative_threshold(model):
     results = []
 
     for case in cases:
-        result, units = model.correct_text_patch(case["input"], strength="conservative")
+        result, units = model.correct_text_patch(case["input"], strength="spelling_only")
         if result:
-            drift = _hallucination_ratio(case["input"], result.strip(), "conservative")
+            drift = _hallucination_ratio(case["input"], result.strip(), "spelling_only")
             results.append((case["input"], result.strip(), drift))
 
     # Test different thresholds
@@ -322,9 +322,9 @@ def test_find_optimal_smartfix_threshold(model):
     results = []
 
     for case in cases:
-        result, units = model.correct_text_patch(case["input"], strength="smart_fix")
+        result, units = model.correct_text_patch(case["input"], strength="full_correction")
         if result:
-            drift = _hallucination_ratio(case["input"], result.strip(), "conservative")
+            drift = _hallucination_ratio(case["input"], result.strip(), "spelling_only")
             results.append((case["input"], result.strip(), drift))
 
     print("\nThreshold sensitivity:")
@@ -345,20 +345,20 @@ def test_full_regression_run(model):
     print("FULL REGRESSION RUN (20 cases, both strengths)")
     print("=" * 70)
 
-    all_results = {"conservative": [], "smart_fix": []}
+    all_results = {"spelling_only": [], "full_correction": []}
 
-    for strength in ["conservative", "smart_fix"]:
+    for strength in ["spelling_only", "full_correction"]:
         print(f"\n=== {strength.upper()} ===")
 
         for i, case in enumerate(REAL_TEST_CASES):
             result, units = model.correct_text_patch(case["input"], strength=strength)
             if result:
                 drift = _hallucination_ratio(
-                    case["input"], result.strip(), "conservative"
+                    case["input"], result.strip(), "spelling_only"
                 )
                 threshold = (
                     _HALLUCINATION_THRESHOLD_CONSERVATIVE
-                    if strength == "conservative"
+                    if strength == "spelling_only"
                     else _HALLUCINATION_THRESHOLD_SMARTFIX
                 )
                 passed = drift < threshold
@@ -381,18 +381,18 @@ def test_full_regression_run(model):
     print("SUMMARY")
     print("=" * 70)
 
-    for strength in ["conservative", "smart_fix"]:
+    for strength in ["spelling_only", "full_correction"]:
         if not all_results[strength]:
             pytest.skip("Local LLM not available")
         passed = sum(1 for r in all_results[strength] if r["passed"])
         total = len(all_results[strength])
         threshold = (
             _HALLUCINATION_THRESHOLD_CONSERVATIVE
-            if strength == "conservative"
+            if strength == "spelling_only"
             else _HALLUCINATION_THRESHOLD_SMARTFIX
         )
         print(
             f"{strength}: {passed}/{total} pass ({100 * passed / total:.1f}%) at threshold {threshold}"
         )
 
-    assert "conservative" in all_results
+    assert "spelling_only" in all_results

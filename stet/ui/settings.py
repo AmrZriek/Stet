@@ -47,12 +47,14 @@ class SettingsDialog(QDialog):
         cfg: ConfigManager,
         parent=None,
         re_register_cb=None,
+        unregister_cb=None,
         app_update_cb=None,
         app_update_label: str = "Check for Updates",
     ):
         super().__init__(parent)
         self.cfg = cfg
         self._re_register_cb = re_register_cb
+        self._unregister_cb = unregister_cb
         self._app_update_cb = app_update_cb
         self._app_update_label = app_update_label
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
@@ -176,6 +178,50 @@ class SettingsDialog(QDialog):
         lbl_header.setObjectName("settingsHeaderLabel")
         hdr_lay.addWidget(lbl_header)
         hdr_lay.addStretch()
+
+        # Add Minimize and Close buttons utilizing SVGs written to tempfile
+        min_svg = Path(tempfile.gettempdir()) / "stet_min.svg"
+        close_svg = Path(tempfile.gettempdir()) / "stet_close.svg"
+        try:
+            if not min_svg.exists():
+                min_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<line x1="1" y1="5" x2="9" y2="5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+            if not close_svg.exists():
+                close_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<line x1="1.5" y1="1.5" x2="8.5" y2="8.5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '<line x1="8.5" y1="1.5" x2="1.5" y2="8.5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+        except Exception:
+            pass
+
+        min_btn = QPushButton()
+        min_btn.setObjectName("windowMinBtn")
+        min_btn.setIcon(QIcon(str(min_svg)))
+        min_btn.setFixedSize(28, 28)
+        min_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        min_btn.clicked.connect(self.showMinimized)
+        min_btn.setAccessibleName("Minimize window")
+        min_btn.setToolTip("Minimize")
+
+        close_btn = QPushButton()
+        close_btn.setObjectName("windowCloseBtn")
+        close_btn.setIcon(QIcon(str(close_svg)))
+        close_btn.setFixedSize(28, 28)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.close)
+        close_btn.setAccessibleName("Close window")
+        close_btn.setToolTip("Close")
+
+        hdr_lay.addWidget(min_btn)
+        hdr_lay.addWidget(close_btn)
+
         main_vlay.addWidget(header)
 
         # ── Main Grid
@@ -285,6 +331,7 @@ class SettingsDialog(QDialog):
         self.chat_model_lbl.setEnabled(separate)
         self.chat_row_w.setEnabled(separate)
         self.chat_keep_cb.setEnabled(separate)
+        self.chat_params_tab.setEnabled(separate)
         
         keep_loaded = self.chat_keep_cb.isChecked()
         self.chat_idle_timeout_cell.setEnabled(separate and not keep_loaded)
@@ -292,11 +339,13 @@ class SettingsDialog(QDialog):
     def _on_model_changed(self, model_path: str):
         from stet.llm.utils import _supports_mtp
         supports_mtp = _supports_mtp(model_path)
-        
-        self.mtp_cb.setVisible(supports_mtp)
-        self.mtp_max_cell.setVisible(supports_mtp)
-        self.mtp_min_cell.setVisible(supports_mtp)
-        
+
+        # MTP controls are always exposed so users can toggle them; uncheck
+        # automatically only when the selected model definitely lacks support.
+        self.mtp_cb.setEnabled(supports_mtp)
+        self.mtp_max_cell.setEnabled(supports_mtp)
+        self.mtp_min_cell.setEnabled(supports_mtp)
+
         if not supports_mtp:
             self.mtp_cb.setChecked(False)
 
@@ -305,16 +354,12 @@ class SettingsDialog(QDialog):
             self.nav_list.item(i).setSelected(i == row)
         self.stack.setCurrentIndex(row)
 
-
     def _refresh_hotkeys(self):
         self.hotkeys_list_w.clear()
         _builtin_display = {
             "spelling_only": "Spelling Only",
             "full_correction": "Full Correction",
             "rewrite_polish": "Rewrite & Polish",
-            "conservative": "Spelling Only",
-            "smart_fix": "Full Correction",
-            "aggressive": "Rewrite & Polish",
         }
         for hk in self._temp_hotkeys:
             raw_strength = hk.get("strength", "")
@@ -351,7 +396,10 @@ class SettingsDialog(QDialog):
         lay = QVBoxLayout(dlg)
 
         lay.addWidget(QLabel("Shortcut Key:"))
-        shortcut_edit = HotkeyEdit(re_register_cb=lambda: None)
+        shortcut_edit = HotkeyEdit(
+            re_register_cb=self._re_register_cb,
+            unregister_cb=self._unregister_cb,
+        )
         shortcut_edit.setText(hk.get("shortcut", ""))
         lay.addWidget(shortcut_edit)
 
@@ -732,6 +780,33 @@ class SettingsDialog(QDialog):
         self.chat_keep_cb.setChecked(self.cfg.get("chat_keep_loaded", False))
         self.chat_idle_spin.setValue(self.cfg.get("chat_idle_timeout_seconds", 60))
         self.port_spin.setValue(self.cfg.get("server_port", 8080))
+
+        self.chat_ctx_spin.setValue(self.cfg.get("chat_context_size", 12800))
+        self.chat_gpu_spin.setValue(self.cfg.get("chat_gpu_layers", 99))
+        self.chat_threads_spin.setValue(self.cfg.get("chat_threads", -1))
+        self.chat_threads_batch_spin.setValue(self.cfg.get("chat_threads_batch", -1))
+        self.chat_parallel_spin.setValue(self.cfg.get("chat_parallel", 1))
+        self.chat_batch_spin.setValue(self.cfg.get("chat_batch_size", 1024))
+        self.chat_ubatch_spin.setValue(self.cfg.get("chat_ubatch_size", 512))
+        self.chat_flash_attn_cb.setChecked(self.cfg.get("chat_flash_attn", True))
+        self.chat_mtp_cb.setChecked(self.cfg.get("chat_mtp_enabled", False))
+        self.chat_mtp_max_spin.setValue(self.cfg.get("chat_mtp_max_draft", 2))
+        self.chat_mtp_min_spin.setValue(self.cfg.get("chat_mtp_min_draft", 0))
+        self.chat_rope_base_spin.setValue(self.cfg.get("chat_rope_freq_base", 0.0))
+        self.chat_rope_scale_spin.setValue(self.cfg.get("chat_rope_freq_scale", 0.0))
+        self.chat_temp_spin.setValue(self.cfg.get("chat_temperature", 0.8))
+        self.chat_topk_spin.setValue(self.cfg.get("chat_top_k", 40))
+        self.chat_topp_spin.setValue(self.cfg.get("chat_top_p", 0.95))
+        self.chat_minp_spin.setValue(self.cfg.get("chat_min_p", 0.05))
+        self.chat_seed_spin.setValue(self.cfg.get("chat_seed", -1))
+        self.chat_typical_p_spin.setValue(self.cfg.get("chat_typical_p", 1.0))
+        self.chat_tfs_z_spin.setValue(self.cfg.get("chat_tfs_z", 1.0))
+        self.chat_mirostat_spin.setValue(self.cfg.get("chat_mirostat", 0))
+        self.chat_mirostat_tau_spin.setValue(self.cfg.get("chat_mirostat_tau", 5.0))
+        self.chat_mirostat_eta_spin.setValue(self.cfg.get("chat_mirostat_eta", 0.1))
+        self.chat_repeat_penalty_spin.setValue(self.cfg.get("chat_repeat_penalty", 1.1))
+        self.chat_freq_penalty_spin.setValue(self.cfg.get("chat_frequency_penalty", 0.0))
+        self.chat_pres_penalty_spin.setValue(self.cfg.get("chat_presence_penalty", 0.0))
         self.ctx_spin.setValue(self.cfg.get("context_size", 12800))
         self.gpu_spin.setValue(self.cfg.get("gpu_layers", 99))
         self.threads_spin.setValue(self.cfg.get("threads", -1))
@@ -766,7 +841,6 @@ class SettingsDialog(QDialog):
         self.chat_mode_combo.setCurrentIndex(0 if _chat_mode == "conversation" else 1)
         self._update_chat_model_controls_state()
         self._on_model_changed(self.model_edit.text())
-
         # Load correction modes prompts (built-ins 0-2 only).
         # Custom modes (3+) are populated directly from cfg in CorrectionModesPage._build_ui.
         modes = self.cfg.get("correction_modes", [])
@@ -786,6 +860,33 @@ class SettingsDialog(QDialog):
         self.cfg.set("chat_keep_loaded", self.chat_keep_cb.isChecked())
         self.cfg.set("chat_idle_timeout_seconds", self.chat_idle_spin.value())
         self.cfg.set("server_port", self.port_spin.value())
+
+        self.cfg.set("chat_context_size", self.chat_ctx_spin.value())
+        self.cfg.set("chat_gpu_layers", self.chat_gpu_spin.value())
+        self.cfg.set("chat_threads", self.chat_threads_spin.value())
+        self.cfg.set("chat_threads_batch", self.chat_threads_batch_spin.value())
+        self.cfg.set("chat_parallel", self.chat_parallel_spin.value())
+        self.cfg.set("chat_batch_size", self.chat_batch_spin.value())
+        self.cfg.set("chat_ubatch_size", self.chat_ubatch_spin.value())
+        self.cfg.set("chat_flash_attn", self.chat_flash_attn_cb.isChecked())
+        self.cfg.set("chat_mtp_enabled", self.chat_mtp_cb.isChecked())
+        self.cfg.set("chat_mtp_max_draft", self.chat_mtp_max_spin.value())
+        self.cfg.set("chat_mtp_min_draft", self.chat_mtp_min_spin.value())
+        self.cfg.set("chat_rope_freq_base", self.chat_rope_base_spin.value())
+        self.cfg.set("chat_rope_freq_scale", self.chat_rope_scale_spin.value())
+        self.cfg.set("chat_temperature", self.chat_temp_spin.value())
+        self.cfg.set("chat_top_k", self.chat_topk_spin.value())
+        self.cfg.set("chat_top_p", self.chat_topp_spin.value())
+        self.cfg.set("chat_min_p", self.chat_minp_spin.value())
+        self.cfg.set("chat_seed", self.chat_seed_spin.value())
+        self.cfg.set("chat_typical_p", self.chat_typical_p_spin.value())
+        self.cfg.set("chat_tfs_z", self.chat_tfs_z_spin.value())
+        self.cfg.set("chat_mirostat", self.chat_mirostat_spin.value())
+        self.cfg.set("chat_mirostat_tau", self.chat_mirostat_tau_spin.value())
+        self.cfg.set("chat_mirostat_eta", self.chat_mirostat_eta_spin.value())
+        self.cfg.set("chat_repeat_penalty", self.chat_repeat_penalty_spin.value())
+        self.cfg.set("chat_frequency_penalty", self.chat_freq_penalty_spin.value())
+        self.cfg.set("chat_presence_penalty", self.chat_pres_penalty_spin.value())
         self.cfg.set("context_size", self.ctx_spin.value())
         self.cfg.set("gpu_layers", self.gpu_spin.value())
         self.cfg.set("threads", self.threads_spin.value())

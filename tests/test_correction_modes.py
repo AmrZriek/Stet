@@ -55,7 +55,7 @@ def test_correction_mode_thresholds():
     # Rewrite & Polish (index 2) is the config-driven guard bar for the
     # rewrite path. 0.99 is the coarse catastrophic backstop; refusals are
     # caught by _is_refusal_or_empty in text_utils.
-    assert thresholds == [0.4, 1.0, 0.99, 1.0]
+    assert thresholds == [0.7, 1.0, 1.0, 1.0]
 
 
 def test_correction_modes_are_builtin():
@@ -71,7 +71,7 @@ def test_correction_modes_are_builtin():
 
 
 def test_strength_mapping_conservative():
-    assert _STRENGTH_TO_MODE_INDEX["conservative"] == 0
+    assert _STRENGTH_TO_MODE_INDEX["spelling_only"] == 0
 
 
 def test_strength_mapping_spelling_only():
@@ -79,7 +79,7 @@ def test_strength_mapping_spelling_only():
 
 
 def test_strength_mapping_smart_fix():
-    assert _STRENGTH_TO_MODE_INDEX["smart_fix"] == 1
+    assert _STRENGTH_TO_MODE_INDEX["full_correction"] == 1
 
 
 def test_strength_mapping_full_correction():
@@ -87,7 +87,7 @@ def test_strength_mapping_full_correction():
 
 
 def test_strength_mapping_aggressive():
-    assert _STRENGTH_TO_MODE_INDEX["aggressive"] == 2
+    assert _STRENGTH_TO_MODE_INDEX["rewrite_polish"] == 2
 
 
 def test_strength_mapping_rewrite_polish():
@@ -128,7 +128,7 @@ def test_rewrite_chunk_uses_config_mode_prompt(monkeypatch):
 
 
 def test_rewrite_chunk_conservative_maps_to_mode_0(monkeypatch):
-    """conservative strength should use mode index 0 (Spelling Only)."""
+    """spelling_only strength should use mode index 0 (Spelling Only)."""
     mgr = ModelManager(MockConfig())
     captured_sys = ""
 
@@ -147,13 +147,13 @@ def test_rewrite_chunk_conservative_maps_to_mode_0(monkeypatch):
 
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
-    mgr._rewrite_sentence_chunk("test", None, 1, 1, "conservative")
+    mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
     # Mode 0 prompt should be the spelling-only one
     assert "Fix spelling mistakes" in captured_sys
 
 
 def test_rewrite_chunk_smartfix_maps_to_mode_1(monkeypatch):
-    """smart_fix strength should use mode index 1 (Full Correction)."""
+    """full_correction strength should use mode index 1 (Full Correction)."""
     mgr = ModelManager(MockConfig())
     captured_sys = ""
 
@@ -172,14 +172,14 @@ def test_rewrite_chunk_smartfix_maps_to_mode_1(monkeypatch):
 
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
-    mgr._rewrite_sentence_chunk("test", None, 1, 1, "smart_fix")
+    mgr._rewrite_sentence_chunk("test", None, 1, 1, "full_correction")
     assert (
         "Fix spelling, grammar, punctuation, and capitalization" in captured_sys
     )
 
 
 def test_rewrite_chunk_aggressive_maps_to_mode_2(monkeypatch):
-    """aggressive strength should use mode index 2 (Rewrite & Polish)."""
+    """rewrite_polish strength should use mode index 2 (Rewrite & Polish)."""
     mgr = ModelManager(MockConfig())
     captured_sys = ""
 
@@ -198,7 +198,7 @@ def test_rewrite_chunk_aggressive_maps_to_mode_2(monkeypatch):
 
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
-    mgr._rewrite_sentence_chunk("test", None, 1, 1, "aggressive")
+    mgr._rewrite_sentence_chunk("test", None, 1, 1, "rewrite_polish")
     assert "Edit the text so it reads clearly and smoothly" in captured_sys
 
 
@@ -229,8 +229,7 @@ def test_rewrite_chunk_falls_back_to_hardcoded_when_no_modes(monkeypatch):
 
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
-    mgr._rewrite_sentence_chunk("test", None, 1, 1, "conservative")
-    # Should still work via hardcoded fallback
+    mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
     assert (
         "Fix spelling mistakes" in captured_sys
         or "spelling-only" in captured_sys.lower()
@@ -260,7 +259,7 @@ def test_rewrite_chunk_uses_mode_prompt_override(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     custom = "You are a custom test prompt. {lang}"
     mgr._rewrite_sentence_chunk(
-        "test", None, 1, 1, "smart_fix", mode_prompt_override=custom
+        "test", None, 1, 1, "full_correction", mode_prompt_override=custom
     )
     assert "custom test prompt" in captured_sys
 
@@ -271,20 +270,20 @@ def test_correct_text_patch_reads_hallucination_threshold_from_config(monkeypatc
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
         lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
-            "hello different phrase was today"
+            "completely different text that has absolutely nothing to do with the original"
         )
     )
 
-    # Conservative mode (index 0) has threshold 0.4, should reject wild rewrites
+    # spelling_only mode (index 0) has threshold 0.7, should reject wild rewrites
     result, units = mgr.correct_text_patch(
         "hello world this is test",
-        strength="conservative",
+        strength="spelling_only",
     )
     assert result is None  # rejected by hallucination guard
 
 
 def test_correct_text_patch_smartfix_accepts_with_threshold_1(monkeypatch):
-    """smart_fix (index 1) has threshold 1.0, should accept rewrites."""
+    """full_correction (index 1) has threshold 1.0, should accept rewrites."""
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
@@ -295,7 +294,7 @@ def test_correct_text_patch_smartfix_accepts_with_threshold_1(monkeypatch):
 
     result, units = mgr.correct_text_patch(
         "hello world this is test",
-        strength="smart_fix",
+        strength="full_correction",
     )
     assert result is not None
     assert units == 1

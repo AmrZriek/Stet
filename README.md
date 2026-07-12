@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <strong>Latest release: v1.0.3</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.0.3">Download Installer</a>
+  <strong>Latest release: v1.1.0</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.1.0">Download Installer</a>
 </p>
 
 ---
@@ -59,6 +59,8 @@ graph TD
   * 📝 **Full Correction:** Polishes punctuation, verb tense, prepositions, and phrasing.
   * ✨ **Rewrite & Polish:** Reworks sentence structure for better flow, vocabulary, and readability.
   * 🔧 **Custom Patch:** Allows you to input your own prompt instructions (e.g., "translate to Spanish", "make it formal").
+* **Onboarding & Welcome Window:** A premium draggable welcome window on first boot with SVG technical flowcharts, interactive preset options, templates, and live diff output.
+* **Native GUI Downloader:** Handles first-run downloading and verification of the recommended AI model and `llama.cpp` backend directly inside a native progress dialog, replacing CLI console terminals.
 * **Interactive Correction Window:** Edit the corrected text, rerun custom templates, or chat directly with the local AI to refine the output.
 * **Smart Selection Capture:** Reads highlighted text in the active window (supports terminal consoles, text editors, IDEs, and browser fields).
 * **System Tray weight manager:** Unload model weights to free up system VRAM/RAM instantly, adjust settings, and monitor model status.
@@ -78,14 +80,18 @@ graph TD
 ## 📥 Installation
 
 ### Option 1: Standalone Installer (Recommended)
-1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.0.3).
-2. Run the installer to register startup options and shortcuts.
+1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.1.0).
+2. If SmartScreen warns you, click **More info** → **Run anyway** (the installer is not code-signed yet).
 3. The built-in setup wizard will guide you to automatically download the recommended model weights.
 
 ### Option 2: Portable ZIP
 1. Download and extract the latest release ZIP.
-2. Run `download_model.bat` to fetch the default model file (~1.8 GB).
-3. Execute `run.bat` or `Stet.exe` to run the application.
+2. Run `Unblock_Stet.bat` (right-click → Run as administrator) to remove Windows security warnings from downloaded scripts.
+3. Run `download_backend.bat` to fetch the llama.cpp backend (~652 MB, one-time).
+4. Run `download_model.bat` to fetch the default model file (~1.8 GB).
+5. Execute `run.bat` or `Stet.exe` to run the application.
+
+> **Windows SmartScreen note:** `Stet.exe` is not code-signed. If Windows shows a "Windows protected your PC" warning, click **More info** → **Run anyway**. This warning will disappear once the executable builds reputation with Microsoft.
 
 ---
 

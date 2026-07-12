@@ -626,7 +626,7 @@ class TestStetAppShowWindow:
         with patch("stet.core.app.CorrectionWindow") as mock_cw:
             mock_win = MagicMock()
             mock_cw.return_value = mock_win
-            app._show_window("Hello world", "smart_fix")
+            app._show_window("Hello world", "full_correction")
             mock_cw.assert_called_once()
             mock_win.show.assert_called_once()
             assert app._window is mock_win
@@ -640,7 +640,7 @@ class TestStetAppShowWindow:
         with patch("stet.core.app.CorrectionWindow") as mock_cw:
             mock_new = MagicMock()
             mock_cw.return_value = mock_new
-            app._show_window("text", "smart_fix")
+            app._show_window("text", "full_correction")
             old_win.close.assert_called_once()
             old_win.deleteLater.assert_called_once()
 
@@ -1415,7 +1415,7 @@ class TestStetAppHandleHotkeyFired:
         mock_win = MagicMock()
         mock_win.isVisible.return_value = True
         app._window = mock_win
-        hk_cfg = {"mode": "panel", "strength": "smart_fix", "custom_prompt": ""}
+        hk_cfg = {"mode": "panel", "strength": "full_correction", "custom_prompt": ""}
         app._handle_hotkey_fired(hk_cfg)
         mock_win.raise_.assert_called()
 
@@ -1424,7 +1424,7 @@ class TestStetAppHandleHotkeyFired:
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._hotkey_busy.acquire(blocking=False)
-        hk_cfg = {"mode": "panel", "strength": "smart_fix"}
+        hk_cfg = {"mode": "panel", "strength": "full_correction"}
         app._handle_hotkey_fired(hk_cfg)
         app._hotkey_busy.release()
 

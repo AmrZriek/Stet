@@ -29,7 +29,7 @@ def cfg(tmp_path, monkeypatch):
                 "min_p": 0.05,
                 "keep_alive": False,
                 "idle_timeout": 300,
-                "streaming_strength": "smart_fix",
+                "streaming_strength": "full_correction",
                 "hotkeys": [
                     {"shortcut": "f9", "mode": "panel", "strength": "full_correction"},
                 ],
@@ -65,10 +65,10 @@ class TestSettingsConstruction:
         assert dialog is not None
         assert dialog.stack is not None
 
-    def test_sidebar_has_four_pages(self, dialog):
+    def test_sidebar_has_five_pages(self, dialog):
         assert dialog.nav_list.count() == 5
 
-    def test_stack_has_four_pages(self, dialog):
+    def test_stack_has_five_pages(self, dialog):
         assert dialog.stack.count() == 5
 
     def test_sidebar_labels(self, dialog):
@@ -86,8 +86,15 @@ class TestSettingsConstruction:
     def test_nav_changes_stack(self, dialog):
         dialog.nav_list.setCurrentRow(1)
         assert dialog.stack.currentIndex() == 1
-        dialog.nav_list.setCurrentRow(2)
-        assert dialog.stack.currentIndex() == 2
+        dialog.nav_list.setCurrentRow(4)
+        assert dialog.stack.currentIndex() == 4
+
+    def test_parameters_page_has_model_and_chat_tabs(self, dialog):
+        dialog.nav_list.setCurrentRow(1)
+        tabs = dialog.params_page.tabs
+        assert tabs.count() == 2
+        assert tabs.tabText(0) == "Model Parameters"
+        assert tabs.tabText(1) == "Chat Parameters"
 
 
 # ── State loading ─────────────────────────────────────────────────────────
@@ -174,3 +181,6 @@ class TestThemeConstant:
 
     def test_theme_contains_checkmark_placeholder(self):
         assert "{checkmark_url}" in THEME
+
+
+

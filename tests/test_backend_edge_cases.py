@@ -95,8 +95,8 @@ def test_model_returning_garbage(manager):
         }
         mock_post.return_value = mock_resp
 
-        # Using conservative strength so hallucination guard kicks in for fallback text
-        result, _ = manager.correct_text_patch("Fix this", strength="conservative")
+        # Using spelling_only strength so hallucination guard kicks in for fallback text
+        result, _ = manager.correct_text_patch("Fix this", strength="spelling_only")
         assert result is None  # Total failure triggers fallback
 
 
@@ -184,7 +184,7 @@ def test_rewrite_chunk_cancellation(monkeypatch):
 
     threading.Thread(target=cancel_later).start()
     res = mgr._rewrite_sentence_chunk(
-        "test", None, 1, 1, "smart_fix", cancel_event=cancel_event
+        "test", None, 1, 1, "full_correction", cancel_event=cancel_event
     )
     assert res is None
 

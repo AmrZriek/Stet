@@ -1,6 +1,7 @@
 import re
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtGui import QContextMenuEvent
 from PyQt6.QtWidgets import QLineEdit, QWidget
 
 
@@ -38,15 +39,17 @@ class HotkeyEdit(QLineEdit):
         QLineEdit:focus { border: none; }
     """
 
-    def __init__(self, parent=None, re_register_cb=None):
+    def __init__(self, parent=None, re_register_cb=None, unregister_cb=None):
         super().__init__(parent)
         self._combo = ""
         self._recording = False
         self._manual_editing = False
         self._re_register_cb = re_register_cb
+        self._unregister_cb = unregister_cb
         self.setReadOnly(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(self._IDLE)
+        self._saved_context_menu_policy = self.contextMenuPolicy()
         self._refresh()
         self.returnPressed.connect(self._commit_manual_edit)
 
@@ -91,15 +94,32 @@ class HotkeyEdit(QLineEdit):
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and not self._recording:
             self._recording = True
+            if self._unregister_cb:
+                try:
+                    self._unregister_cb()
+                except Exception:
+                    pass
+            self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             self.setStyleSheet(self._REC)
             super().setText("Press keys" + "\u2026")
             self._update_container_style()
 
+    def _stop_recording(self):
+        """End recording mode and restore context-menu policy."""
+        self._recording = False
+        self.setContextMenuPolicy(self._saved_context_menu_policy)
+        self.setStyleSheet(self._IDLE)
+        self._refresh()
+        self._update_container_style()
+        if self._re_register_cb:
+            try:
+                self._re_register_cb()
+            except Exception:
+                pass
+
     def focusOutEvent(self, e):
         if self._recording:
-            self._recording = False
-            self.setStyleSheet(self._IDLE)
-            self._refresh()
+            self._stop_recording()
         elif self._manual_editing:
             self._commit_manual_edit()
         super().focusOutEvent(e)
@@ -166,10 +186,7 @@ class HotkeyEdit(QLineEdit):
         key = e.key()
         mods = e.modifiers()
         if key == Qt.Key.Key_Escape:
-            self._recording = False
-            self.setStyleSheet(self._IDLE)
-            self._refresh()
-            self._update_container_style()
+            self._stop_recording()
             # Escape cancels recording — no hotkey changed, no re-register needed.
             return
         if key in _MOD_KEYS:
@@ -186,17 +203,9 @@ class HotkeyEdit(QLineEdit):
             if key in _STANDALONE_OK and kn:
                 parts.append(kn)
                 combo = kn
-                self._recording = False
                 self._combo = combo
-                self.setStyleSheet(self._IDLE)
-                self._refresh()
-                self._update_container_style()
+                self._stop_recording()
                 self.shortcut_changed.emit(combo)
-                if self._re_register_cb:
-                    try:
-                        self._re_register_cb()
-                    except Exception:
-                        pass
                 return
             super().setText("Add Ctrl / Shift / Alt…")
             return
@@ -204,18 +213,54 @@ class HotkeyEdit(QLineEdit):
             return
         parts.append(kn)
         combo = "+".join(parts)
-        self._recording = False
         self._combo = combo
-        self.setStyleSheet(self._IDLE)
-        self._refresh()
-        self._update_container_style()
+        self._stop_recording()
         self.shortcut_changed.emit(combo)
-        if self._re_register_cb:
-            try:
-                self._re_register_cb()
-            except Exception:
-                pass
 
+    def event(self, e):
+        if self._recording:
+            if e.type() == QEvent.Type.ShortcutOverride:
+                e.accept()
+                # Return False (via super) — NOT True. Returning True consumes
+                # the ShortcutOverride and prevents Qt from dispatching the
+                # subsequent KeyPress event.  accept() alone is what tells Qt
+                # "don't treat this as a shortcut."
+                return super().event(e)
+            if e.type() == QEvent.Type.ContextMenu:
+                # On Windows, Shift+F10 triggers a keyboard-originated
+                # QContextMenuEvent instead of (or before) a KeyPress.
+                # Detect this and record "shift+f10" rather than silently
+                # swallowing the event.
+                if (
+                    isinstance(e, QContextMenuEvent)
+                    and e.reason() == QContextMenuEvent.Reason.Keyboard
+                ):
+                    self._combo = "shift+f10"
+                    self._stop_recording()
+                    self.shortcut_changed.emit("shift+f10")
+                e.accept()
+                return True
+            if e.type() == QEvent.Type.KeyPress:
+                k = e.key()
+                mods = e.modifiers()
+                if k in _SHIFT_F10_REMAPS or (
+                    k == Qt.Key.Key_F10
+                    and (mods & Qt.KeyboardModifier.ShiftModifier)
+                ):
+                    self.keyPressEvent(e)
+                    return True
+        return super().event(e)
+
+    def contextMenuEvent(self, e):
+        if self._recording:
+            e.ignore()  # swallow context-menu summoning while recording
+            return
+        super().contextMenuEvent(e)
+
+
+_SHIFT_F10_REMAPS = {
+    Qt.Key.Key_Menu,  # Qt may remap Shift+F10 → Menu on some keyboard layouts
+}
 
 _QT_KEYS = {
     Qt.Key.Key_Space: "space",

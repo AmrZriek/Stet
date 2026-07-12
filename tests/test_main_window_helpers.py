@@ -51,11 +51,8 @@ class TestStrengthIndex:
         "strength, index",
         [
             ("spelling_only", 0),
-            ("conservative", 0),
             ("full_correction", 1),
-            ("smart_fix", 1),
             ("rewrite_polish", 2),
-            ("aggressive", 2),
         ],
     )
     def test_index(self, strength, index):
@@ -68,7 +65,7 @@ def test_send_button_enabled_state(qtbot, monkeypatch):
     class WindowCfg:
         def get(self, key, default=None):
             values = {
-                "streaming_strength": "smart_fix",
+                "streaming_strength": "full_correction",
                 "correction_modes": [],
                 "chat_mode": "conversation"
             }

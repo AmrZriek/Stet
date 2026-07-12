@@ -24,7 +24,7 @@ def test_conservative_preserves_user_repeated_word():
     original = "This is very very important."
 
     assert (
-        _apply_post_fixes(original, original=original, strength="conservative")
+        _apply_post_fixes(original, original=original, strength="spelling_only")
         == original
     )
 
@@ -34,7 +34,7 @@ def test_post_fixes_preserves_existing_duplicate_word_behavior():
         _apply_post_fixes(
             "the the test",
             original="the test",
-            strength="conservative",
+            strength="spelling_only",
         )
         == "the the test"
     )
@@ -54,7 +54,7 @@ def test_aggressive_patch_accepts_model_judgment_on_repeated_word(monkeypatch):
         )
     )
 
-    result, units = mgr.correct_text_patch(original, strength="aggressive")
+    result, units = mgr.correct_text_patch(original, strength="rewrite_polish")
 
     # Repetition-loss guard is relaxed (log-only for aggressive).
     # The AI model's judgment is trusted to handle repetition appropriately.
@@ -72,7 +72,7 @@ def test_aggressive_patch_accepts_model_judgment_on_repeated_sentence(monkeypatc
         )
     )
 
-    result, units = mgr.correct_text_patch(original, strength="aggressive")
+    result, units = mgr.correct_text_patch(original, strength="rewrite_polish")
 
     # Repetition-loss guard is relaxed (log-only for aggressive).
     assert result == "Stop."

@@ -68,6 +68,21 @@ from stet.core.utils import log
 
 
 def main():
+    if sys.platform == "win32":
+        # Unblock all files in the application directory on Windows to prevent SmartScreen/Mark of the Web
+        # blocks on updater executables or download helper scripts.
+        try:
+            _boot_log(f"[BOOT] Unblocking files in directory {_SCRIPT_DIR}...")
+            for root, _, files in os.walk(str(_SCRIPT_DIR)):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    try:
+                        os.remove(f"{full_path}:Zone.Identifier")
+                    except OSError:
+                        pass
+        except Exception as _e:
+            _boot_log(f"[BOOT] Failed to unblock files: {_e}")
+
     def _excepthook(exc_type, exc_value, exc_tb):
         msg = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
         log(f"[UNCAUGHT EXCEPTION]\n{msg}")
@@ -96,6 +111,12 @@ def main():
         _boot_log(
             "[BOOT] Another instance is already running (shared memory attached). Exiting."
         )
+        import tempfile
+        _SHOW_WELCOME_FLAG = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
+        try:
+            _SHOW_WELCOME_FLAG.write_text("show", encoding="utf-8")
+        except OSError:
+            pass
         sys.exit(0)
     if not _shared_mem.create(1):
         _boot_log(

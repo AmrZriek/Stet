@@ -1,5 +1,6 @@
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
+
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -12,6 +13,7 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -20,7 +22,20 @@ from PyQt6.QtWidgets import (
 from stet.ui.utils import no_scroll
 
 
-def make_scrollable_page(title_str, page):
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+
+def make_scrollable_page(title_str, page, add_to_stack=True):
     """Configures the given page widget with a full-height scrollable area.
     The title is placed inside the scrollable layout so the vertical
     scrollbar naturally spans top-to-bottom of the entire content container."""
@@ -40,14 +55,16 @@ def make_scrollable_page(title_str, page):
     form.setContentsMargins(0, 0, 32, 0)
     form.setSpacing(16)
 
-    t = QLabel(title_str)
-    t.setObjectName("pageTitle")
-    form.addWidget(t)
+    if title_str:
+        t = QLabel(title_str)
+        t.setObjectName("pageTitle")
+        form.addWidget(t)
 
     scroll.setWidget(inner)
     pl.addWidget(scroll, 1)
 
-    page.dialog.stack.addWidget(page)
+    if add_to_stack:
+        page.dialog.stack.addWidget(page)
     return form
 
 
@@ -174,6 +191,25 @@ class ServerPage(QWidget):
         form.addStretch()
 
 
+def _apply_tooltips(dialog, prefix: str = ""):
+    tooltips = {
+        "temp_spin": "Higher = more creative, lower = more precise",
+        "topk_spin": "Limits choices to the K most likely next words",
+        "topp_spin": "Only considers words whose probabilities sum to this value",
+        "minp_spin": "Filters out words less likely than this threshold",
+        "tfs_z_spin": "Tail Free Sampling \u2014 reduces unlikely word choices",
+        "mirostat_spin": "Dynamic sampling that targets a specific surprise level",
+        "mtp_cb": "Multi-Token Prediction \u2014 generates multiple tokens at once for speed",
+        "gpu_spin": "How many model layers run on GPU (more = faster, uses more VRAM)",
+        "ctx_spin": "How much text the model can 'see' at once (in tokens)",
+        "flash_attn_cb": "Faster attention computation \u2014 requires GPU support",
+        "batch_spin": "How many tokens are processed together (higher = faster, more RAM)",
+    }
+    for key, text in tooltips.items():
+        widget = getattr(dialog, f"{prefix}{key}", None)
+        if widget is not None:
+            widget.setToolTip(text)
+
 
 class ParametersPage(QWidget):
     def __init__(self, dialog):
@@ -182,7 +218,40 @@ class ParametersPage(QWidget):
         self._build_ui()
 
     def _build_ui(self):
-        form = make_scrollable_page("Model Parameters", self)
+        pl = QVBoxLayout(self)
+        pl.setContentsMargins(0, 0, 0, 0)
+        pl.setSpacing(0)
+
+        # Custom header labels acting as tabs
+        header_widget = QWidget()
+        header_lay = QHBoxLayout(header_widget)
+        header_lay.setContentsMargins(0, 0, 32, 8)
+        header_lay.setSpacing(16)
+
+        self.tab_model_lbl = ClickableLabel("Model Parameters")
+        self.tab_model_lbl.setObjectName("pageTitle")
+        self.tab_model_lbl.setProperty("active", True)
+        self.tab_model_lbl.clicked.connect(lambda: self._switch_tab(0))
+
+        self.tab_chat_lbl = ClickableLabel("Chat Parameters")
+        self.tab_chat_lbl.setObjectName("pageTitle")
+        self.tab_chat_lbl.setProperty("active", False)
+        self.tab_chat_lbl.clicked.connect(lambda: self._switch_tab(1))
+
+        header_lay.addWidget(self.tab_model_lbl, 1)
+        header_lay.addWidget(self.tab_chat_lbl, 1)
+        pl.addWidget(header_widget)
+
+        self.tabs = QTabWidget()
+        self.tabs.setObjectName("paramsTabWidget")
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().hide()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+        # Model Parameters tab
+        model_tab = QWidget()
+        model_tab.setObjectName("modelParamsTab")
+        form = make_scrollable_page(None, model_tab, add_to_stack=False)
 
         # Helper for a labeled grid cell
         def _grid_cell(label: str, widget) -> QWidget:
@@ -420,7 +489,30 @@ class ParametersPage(QWidget):
         hw_grid.addWidget(self.dialog.idle_timeout_cell, 2, 2)
 
         form.addWidget(hw_grid_w)
+        
+        _apply_tooltips(self.dialog, "")
+        
         form.addStretch()
+
+        # Chat Parameters tab
+        self.dialog.chat_params_tab = ChatParametersPage(self.dialog)
+
+        self.tabs.addTab(model_tab, "Model Parameters")
+        self.tabs.addTab(self.dialog.chat_params_tab, "Chat Parameters")
+        pl.addWidget(self.tabs, 1)
+        self.dialog.stack.addWidget(self)
+
+    def _switch_tab(self, index):
+        self.tabs.setCurrentIndex(index)
+
+    def _on_tab_changed(self, index):
+        self.tab_model_lbl.setProperty("active", index == 0)
+        self.tab_chat_lbl.setProperty("active", index == 1)
+        self.tab_model_lbl.style().unpolish(self.tab_model_lbl)
+        self.tab_model_lbl.style().polish(self.tab_model_lbl)
+        self.tab_chat_lbl.style().unpolish(self.tab_chat_lbl)
+        self.tab_chat_lbl.style().polish(self.tab_chat_lbl)
+
 
 
 class ProfilesPage(QWidget):
@@ -898,4 +990,243 @@ class CorrectionModesPage(QWidget):
             self.dialog._mode_prompt_edits[idx].setPlainText(
                 default_modes[idx]["prompt"]
             )
+
+
+
+class ChatParametersPage(QWidget):
+    def __init__(self, dialog):
+        super().__init__(dialog)
+        self.dialog = dialog
+        self._build_ui()
+
+    def _build_ui(self):
+        form = make_scrollable_page(None, self, add_to_stack=False)
+
+        # Helper for a labeled grid cell
+        def _grid_cell(label: str, widget) -> QWidget:
+            cell = QWidget()
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(4)
+            lbl = QLabel(label)
+            lbl.setObjectName("fieldGroupLabel")
+            cell_lay.addWidget(lbl)
+            cell_lay.addWidget(widget)
+            return cell
+
+        # --- Architecture Section ---
+        arch_title = QLabel("Architecture")
+        arch_title.setObjectName("pageSubtitle")
+        form.addWidget(arch_title)
+
+        self.dialog.chat_ctx_spin = no_scroll(QSpinBox())
+        self.dialog.chat_ctx_spin.setRange(512, 131072)
+        self.dialog.chat_ctx_spin.setSingleStep(512)
+        self.dialog.chat_ctx_spin.setFixedWidth(100)
+
+        self.dialog.chat_rope_base_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_rope_base_spin.setRange(0.0, 10000000.0)
+        self.dialog.chat_rope_base_spin.setSingleStep(1000.0)
+        self.dialog.chat_rope_base_spin.setDecimals(1)
+        self.dialog.chat_rope_base_spin.setFixedWidth(100)
+        self.dialog.chat_rope_base_spin.setSpecialValueText("Auto (0.0)")
+
+        self.dialog.chat_rope_scale_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_rope_scale_spin.setRange(0.0, 1000.0)
+        self.dialog.chat_rope_scale_spin.setSingleStep(0.1)
+        self.dialog.chat_rope_scale_spin.setDecimals(2)
+        self.dialog.chat_rope_scale_spin.setFixedWidth(100)
+        self.dialog.chat_rope_scale_spin.setSpecialValueText("Auto (0.0)")
+
+        self.dialog.chat_flash_attn_cb = QCheckBox("Flash Attention")
+        self.dialog.chat_mtp_cb = QCheckBox("MTP Speculative Decoding")
+
+        self.dialog.chat_mtp_max_spin = no_scroll(QSpinBox())
+        self.dialog.chat_mtp_max_spin.setRange(1, 16)
+        self.dialog.chat_mtp_max_spin.setFixedWidth(100)
+
+        self.dialog.chat_mtp_min_spin = no_scroll(QSpinBox())
+        self.dialog.chat_mtp_min_spin.setRange(0, 16)
+        self.dialog.chat_mtp_min_spin.setFixedWidth(100)
+
+        self.dialog.chat_mtp_max_cell = _grid_cell("MTP Max Draft", self.dialog.chat_mtp_max_spin)
+        self.dialog.chat_mtp_min_cell = _grid_cell("MTP Min Draft", self.dialog.chat_mtp_min_spin)
+
+        arch_grid_w = QWidget()
+        arch_grid = QGridLayout(arch_grid_w)
+        arch_grid.setContentsMargins(0, 0, 0, 0)
+        arch_grid.setHorizontalSpacing(24)
+        arch_grid.setVerticalSpacing(12)
+
+        arch_grid.addWidget(_grid_cell("Context size", self.dialog.chat_ctx_spin), 0, 0)
+        arch_grid.addWidget(_grid_cell("RoPE Base", self.dialog.chat_rope_base_spin), 0, 1)
+        arch_grid.addWidget(_grid_cell("RoPE Scale", self.dialog.chat_rope_scale_spin), 0, 2)
+        arch_grid.addWidget(self.dialog.chat_flash_attn_cb, 1, 0)
+        arch_grid.addWidget(self.dialog.chat_mtp_cb, 1, 1, 1, 2)
+        arch_grid.addWidget(self.dialog.chat_mtp_max_cell, 2, 0)
+        arch_grid.addWidget(self.dialog.chat_mtp_min_cell, 2, 1)
+
+        form.addWidget(arch_grid_w)
+        
+        sep_arch = QFrame()
+        sep_arch.setObjectName("sep")
+        sep_arch.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_arch)
+
+        # --- Sampling & Penalties Section ---
+        samp_title = QLabel("Sampling & Penalties")
+        samp_title.setObjectName("pageSubtitle")
+        form.addWidget(samp_title)
+
+        self.dialog.chat_temp_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_temp_spin.setRange(0.0, 2.0)
+        self.dialog.chat_temp_spin.setSingleStep(0.05)
+        self.dialog.chat_temp_spin.setDecimals(2)
+        self.dialog.chat_temp_spin.setFixedWidth(100)
+
+        self.dialog.chat_topk_spin = no_scroll(QSpinBox())
+        self.dialog.chat_topk_spin.setRange(0, 1000)
+        self.dialog.chat_topk_spin.setFixedWidth(100)
+
+        self.dialog.chat_topp_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_topp_spin.setRange(0.0, 1.0)
+        self.dialog.chat_topp_spin.setSingleStep(0.05)
+        self.dialog.chat_topp_spin.setDecimals(2)
+        self.dialog.chat_topp_spin.setFixedWidth(100)
+
+        self.dialog.chat_minp_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_minp_spin.setRange(0.0, 1.0)
+        self.dialog.chat_minp_spin.setSingleStep(0.01)
+        self.dialog.chat_minp_spin.setDecimals(2)
+        self.dialog.chat_minp_spin.setFixedWidth(100)
+        
+        self.dialog.chat_typical_p_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_typical_p_spin.setRange(0.0, 1.0)
+        self.dialog.chat_typical_p_spin.setSingleStep(0.05)
+        self.dialog.chat_typical_p_spin.setDecimals(2)
+        self.dialog.chat_typical_p_spin.setFixedWidth(100)
+
+        self.dialog.chat_tfs_z_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_tfs_z_spin.setRange(1.0, 10.0)
+        self.dialog.chat_tfs_z_spin.setSingleStep(0.1)
+        self.dialog.chat_tfs_z_spin.setDecimals(2)
+        self.dialog.chat_tfs_z_spin.setFixedWidth(100)
+
+        self.dialog.chat_seed_spin = no_scroll(QSpinBox())
+        self.dialog.chat_seed_spin.setRange(-1, 2147483647)
+        self.dialog.chat_seed_spin.setFixedWidth(100)
+        self.dialog.chat_seed_spin.setSpecialValueText("Random (-1)")
+
+        self.dialog.chat_mirostat_spin = no_scroll(QSpinBox())
+        self.dialog.chat_mirostat_spin.setRange(0, 2)
+        self.dialog.chat_mirostat_spin.setFixedWidth(100)
+
+        self.dialog.chat_mirostat_tau_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_mirostat_tau_spin.setRange(0.0, 10.0)
+        self.dialog.chat_mirostat_tau_spin.setSingleStep(0.1)
+        self.dialog.chat_mirostat_tau_spin.setDecimals(2)
+        self.dialog.chat_mirostat_tau_spin.setFixedWidth(100)
+
+        self.dialog.chat_mirostat_eta_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_mirostat_eta_spin.setRange(0.0, 1.0)
+        self.dialog.chat_mirostat_eta_spin.setSingleStep(0.05)
+        self.dialog.chat_mirostat_eta_spin.setDecimals(2)
+        self.dialog.chat_mirostat_eta_spin.setFixedWidth(100)
+
+        self.dialog.chat_repeat_penalty_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_repeat_penalty_spin.setRange(1.0, 2.0)
+        self.dialog.chat_repeat_penalty_spin.setSingleStep(0.05)
+        self.dialog.chat_repeat_penalty_spin.setDecimals(2)
+        self.dialog.chat_repeat_penalty_spin.setFixedWidth(100)
+
+        self.dialog.chat_freq_penalty_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_freq_penalty_spin.setRange(0.0, 2.0)
+        self.dialog.chat_freq_penalty_spin.setSingleStep(0.05)
+        self.dialog.chat_freq_penalty_spin.setDecimals(2)
+        self.dialog.chat_freq_penalty_spin.setFixedWidth(100)
+
+        self.dialog.chat_pres_penalty_spin = no_scroll(QDoubleSpinBox())
+        self.dialog.chat_pres_penalty_spin.setRange(0.0, 2.0)
+        self.dialog.chat_pres_penalty_spin.setSingleStep(0.05)
+        self.dialog.chat_pres_penalty_spin.setDecimals(2)
+        self.dialog.chat_pres_penalty_spin.setFixedWidth(100)
+
+        samp_grid_w = QWidget()
+        samp_grid = QGridLayout(samp_grid_w)
+        samp_grid.setContentsMargins(0, 0, 0, 0)
+        samp_grid.setHorizontalSpacing(24)
+        samp_grid.setVerticalSpacing(12)
+
+        samp_grid.addWidget(_grid_cell("Temperature", self.dialog.chat_temp_spin), 0, 0)
+        samp_grid.addWidget(_grid_cell("Top-K", self.dialog.chat_topk_spin), 0, 1)
+        samp_grid.addWidget(_grid_cell("Top-P", self.dialog.chat_topp_spin), 0, 2)
+        samp_grid.addWidget(_grid_cell("Min-P", self.dialog.chat_minp_spin), 1, 0)
+        samp_grid.addWidget(_grid_cell("Typical-P", self.dialog.chat_typical_p_spin), 1, 1)
+        samp_grid.addWidget(_grid_cell("TFS-Z", self.dialog.chat_tfs_z_spin), 1, 2)
+        samp_grid.addWidget(_grid_cell("Seed", self.dialog.chat_seed_spin), 2, 0)
+        samp_grid.addWidget(_grid_cell("Mirostat", self.dialog.chat_mirostat_spin), 2, 1)
+        samp_grid.addWidget(_grid_cell("Mirostat Tau", self.dialog.chat_mirostat_tau_spin), 2, 2)
+        samp_grid.addWidget(_grid_cell("Mirostat Eta", self.dialog.chat_mirostat_eta_spin), 3, 0)
+        samp_grid.addWidget(_grid_cell("Repeat Penalty", self.dialog.chat_repeat_penalty_spin), 3, 1)
+        samp_grid.addWidget(_grid_cell("Freq Penalty", self.dialog.chat_freq_penalty_spin), 3, 2)
+        samp_grid.addWidget(_grid_cell("Pres Penalty", self.dialog.chat_pres_penalty_spin), 4, 0)
+
+        form.addWidget(samp_grid_w)
+        
+        sep_samp = QFrame()
+        sep_samp.setObjectName("sep")
+        sep_samp.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_samp)
+
+        # --- Hardware & Server Section ---
+        hw_title = QLabel("Hardware & Server")
+        hw_title.setObjectName("pageSubtitle")
+        form.addWidget(hw_title)
+
+        self.dialog.chat_gpu_spin = no_scroll(QSpinBox())
+        self.dialog.chat_gpu_spin.setRange(0, 999)
+        self.dialog.chat_gpu_spin.setFixedWidth(100)
+
+        self.dialog.chat_threads_spin = no_scroll(QSpinBox())
+        self.dialog.chat_threads_spin.setRange(-1, 256)
+        self.dialog.chat_threads_spin.setSpecialValueText("Auto (-1)")
+        self.dialog.chat_threads_spin.setFixedWidth(100)
+
+        self.dialog.chat_threads_batch_spin = no_scroll(QSpinBox())
+        self.dialog.chat_threads_batch_spin.setRange(-1, 256)
+        self.dialog.chat_threads_batch_spin.setSpecialValueText("Auto (-1)")
+        self.dialog.chat_threads_batch_spin.setFixedWidth(100)
+        
+        self.dialog.chat_parallel_spin = no_scroll(QSpinBox())
+        self.dialog.chat_parallel_spin.setRange(1, 16)
+        self.dialog.chat_parallel_spin.setFixedWidth(100)
+
+        self.dialog.chat_batch_spin = no_scroll(QSpinBox())
+        self.dialog.chat_batch_spin.setRange(1, 131072)
+        self.dialog.chat_batch_spin.setSingleStep(512)
+        self.dialog.chat_batch_spin.setFixedWidth(100)
+
+        self.dialog.chat_ubatch_spin = no_scroll(QSpinBox())
+        self.dialog.chat_ubatch_spin.setRange(1, 131072)
+        self.dialog.chat_ubatch_spin.setSingleStep(128)
+        self.dialog.chat_ubatch_spin.setFixedWidth(100)
+
+        hw_grid_w = QWidget()
+        hw_grid = QGridLayout(hw_grid_w)
+        hw_grid.setContentsMargins(0, 0, 0, 0)
+        hw_grid.setHorizontalSpacing(24)
+        hw_grid.setVerticalSpacing(12)
+
+        hw_grid.addWidget(_grid_cell("GPU layers", self.dialog.chat_gpu_spin), 0, 0)
+        hw_grid.addWidget(_grid_cell("Parallel slots", self.dialog.chat_parallel_spin), 0, 1)
+        hw_grid.addWidget(_grid_cell("CPU Threads", self.dialog.chat_threads_spin), 0, 2)
+        hw_grid.addWidget(_grid_cell("CPU Threads Batch", self.dialog.chat_threads_batch_spin), 1, 0)
+        hw_grid.addWidget(_grid_cell("Eval Batch", self.dialog.chat_batch_spin), 1, 1)
+        hw_grid.addWidget(_grid_cell("Phys Batch", self.dialog.chat_ubatch_spin), 1, 2)
+        
+        form.addWidget(hw_grid_w)
+        
+        _apply_tooltips(self.dialog, "chat_")
+        
+        form.addStretch()
 

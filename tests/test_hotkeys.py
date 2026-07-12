@@ -270,8 +270,8 @@ def test_register_hotkey_with_safe_combo_succeeds(qtbot):
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
         app.cfg.config["hotkeys"] = [
-            {"shortcut": "ctrl+shift+space", "mode": "panel", "strength": "smart_fix"},
-            {"shortcut": "ctrl+shift+c", "mode": "silent", "strength": "smart_fix"},
+            {"shortcut": "ctrl+shift+space", "mode": "panel", "strength": "full_correction"},
+            {"shortcut": "ctrl+shift+c", "mode": "silent", "strength": "full_correction"},
         ]
         app._last_register_ts = 0.0
         mock_user32.RegisterHotKey.reset_mock()
@@ -304,7 +304,7 @@ def test_register_hotkey_gracefully_handles_exception(qtbot):
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
         app.cfg.config["hotkeys"] = [
-            {"shortcut": "f9", "mode": "panel", "strength": "smart_fix"}
+            {"shortcut": "f9", "mode": "panel", "strength": "full_correction"}
         ]
         app._last_register_ts = 0.0
         notify_calls = []
@@ -327,8 +327,8 @@ def test_register_hotkey_silent_gracefully_handles_exception(qtbot):
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
         app.cfg.config["hotkeys"] = [
-            {"shortcut": "f9", "mode": "panel", "strength": "smart_fix"},
-            {"shortcut": "f10", "mode": "silent", "strength": "smart_fix"},
+            {"shortcut": "f9", "mode": "panel", "strength": "full_correction"},
+            {"shortcut": "f10", "mode": "silent", "strength": "full_correction"},
         ]
         app._last_register_ts = 0.0
         mock_user32.RegisterHotKey.reset_mock()
@@ -404,7 +404,7 @@ def test_various_modifier_combos_register_without_crash(qtbot, combo):
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
         app.cfg.config["hotkeys"] = [
-            {"shortcut": combo, "mode": "panel", "strength": "smart_fix"}
+            {"shortcut": combo, "mode": "panel", "strength": "full_correction"}
         ]
         app._last_register_ts = 0.0
         mock_user32.RegisterHotKey.reset_mock()
@@ -465,6 +465,171 @@ def test_hotkey_edit_rejects_common_conflict_keys_without_modifier(qtbot):
     )
     w.keyPressEvent(ev)
     assert w.text() != "c"
+
+
+def test_hotkey_edit_overrides_event_to_intercept_shift_f10():
+    """HotkeyEdit must override QWidget.event so the Qt Shift+F10 -> ContextMenu
+    synthesis cannot swallow the keypress before our keyPressEvent runs."""
+    import re
+
+    body = re.search(
+        r"class HotkeyEdit.*?(?=\nclass |\n_QT_KEYS)",
+        SRC, re.DOTALL,
+    ).group(0)
+    assert "def event(self, e):" in body, "HotkeyEdit must override event()"
+    assert "Key_F10" in body and "ShiftModifier" in body, (
+        "event() override must explicitly intercept Shift+F10"
+    )
+    assert "def contextMenuEvent(self" in body, (
+        "HotkeyEdit must suppress context menu while recording"
+    )
+
+
+def test_hotkey_edit_shift_f10_registers_via_real_dispatcher(qtbot):
+    """Send Shift+F10 through QApplication.sendEvent (the real Qt event path,
+    not a direct keyPressEvent call) so Shift+F10 -> ContextMenu synthesis
+    is the actual behavior under test."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtWidgets import QApplication
+
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    w.show()
+    w.setFocus()
+    qtbot.mouseClick(w, Qt.MouseButton.LeftButton)
+    assert w._recording is True
+
+    ev = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_F10,
+        Qt.KeyboardModifier.ShiftModifier,
+        "",
+    )
+    QApplication.sendEvent(w, ev)
+    assert w._recording is False
+    assert w.text() == "shift+f10"
+    w.close()
+
+
+def test_keyboard_context_menu_records_shift_f10(qtbot):
+    """On Windows, pressing Shift+F10 causes Qt to generate a keyboard-triggered
+    QContextMenuEvent instead of (or before) a KeyPress event.  The widget must
+    detect this and record 'shift+f10' rather than silently swallowing the event.
+
+    This test reproduces the exact bug: the ContextMenu handler accepted and
+    consumed the event without recording any combo, so on Windows Shift+F10
+    was never captured."""
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtGui import QContextMenuEvent
+    from PyQt6.QtWidgets import QApplication
+
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    w.show()
+    w.setFocus()
+    qtbot.mouseClick(w, Qt.MouseButton.LeftButton)
+    assert w._recording is True
+
+    # Simulate what Windows does: send a keyboard-triggered ContextMenu event.
+    # On Windows, Shift+F10 is the system context-menu shortcut, and Qt's
+    # platform integration generates a QContextMenuEvent(Keyboard) for it
+    # instead of (or before) a normal KeyPress.
+    ctx = QContextMenuEvent(
+        QContextMenuEvent.Reason.Keyboard,
+        QPoint(0, 0),  # local pos
+        w.mapToGlobal(QPoint(0, 0)),  # global pos
+    )
+    QApplication.sendEvent(w, ctx)
+
+    # The bug: previously, the ContextMenu handler just swallowed the event
+    # without recording a combo.  After the fix, keyboard-triggered context
+    # menus must be captured as "shift+f10".
+    assert w._recording is False, (
+        "Recording should stop after keyboard-triggered ContextMenu"
+    )
+    assert w.text() == "shift+f10", (
+        f"Expected 'shift+f10' but got '{w.text()}' — "
+        "keyboard ContextMenu event was swallowed without recording"
+    )
+    w.close()
+
+
+def test_shortcut_override_then_keypress_full_sequence(qtbot):
+    """Simulate the full Qt event pipeline: ShortcutOverride → KeyPress.
+
+    In a real Qt event loop, when Shift+F10 is pressed:
+    1. Qt sends ShortcutOverride to ask if the widget wants the key
+    2. If accepted, Qt sends KeyPress
+    3. If not accepted, Qt synthesises a ContextMenu event instead
+
+    The bug was that event() returned True for step 1, which consumed the
+    ShortcutOverride and prevented Qt from proceeding to step 2."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtWidgets import QApplication
+
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    w.show()
+    w.setFocus()
+    qtbot.mouseClick(w, Qt.MouseButton.LeftButton)
+    assert w._recording is True
+
+    # Step 1: Qt sends ShortcutOverride first
+    override = QKeyEvent(
+        QEvent.Type.ShortcutOverride,
+        Qt.Key.Key_F10,
+        Qt.KeyboardModifier.ShiftModifier,
+        "",
+    )
+    QApplication.sendEvent(w, override)
+    assert override.isAccepted(), "ShortcutOverride must be accepted"
+    # Widget should still be recording — ShortcutOverride is just a query,
+    # no combo should be captured yet
+    assert w._recording is True, (
+        "Widget must still be recording after ShortcutOverride (it's just a query)"
+    )
+
+    # Step 2: Qt sends KeyPress (only if ShortcutOverride was handled correctly)
+    keypress = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_F10,
+        Qt.KeyboardModifier.ShiftModifier,
+        "",
+    )
+    QApplication.sendEvent(w, keypress)
+    # After both events, the combo must be recorded
+    assert w._recording is False, "Recording should stop after KeyPress"
+    assert w.text() == "shift+f10", (
+        f"Expected 'shift+f10' but got '{w.text()}' — "
+        "ShortcutOverride likely consumed the event, blocking KeyPress"
+    )
+    w.close()
+
+
+def test_hotkey_edit_manual_edit_unchanged_on_shift_f10(qtbot):
+    """Shift+F10 must NOT be remapped while in manual-edit mode."""
+    from PyQt6.QtCore import QEvent, Qt
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtWidgets import QApplication
+
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    w.setText("f9")
+    w.enable_manual_edit()
+    assert w._manual_editing is True
+
+    ev = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_F10,
+        Qt.KeyboardModifier.ShiftModifier,
+        "",
+    )
+    QApplication.sendEvent(w, ev)
+    assert w._manual_editing is True
+    assert w.text() == "f9"
+    w.close()
 
 
 def test_hotkey_edit_manual_edit_drops_focus_on_enter(qtbot):
@@ -633,8 +798,8 @@ def test_silent_hotkey_profile_strength_reaches_patch_worker(qtbot, monkeypatch)
                 self.target(*self.args)
 
         monkeypatch.setattr(app_module.threading, "Thread", ImmediateThread)
-        app._handle_hotkey_fired({"mode": "silent", "strength": "conservative"})
-        assert patch_calls == ["conservative"]
+        app._handle_hotkey_fired({"mode": "silent", "strength": "spelling_only"})
+        assert patch_calls == ["spelling_only"]
 
 
 def test_panel_hotkey_worker_receives_profile_strength(qtbot, monkeypatch):
@@ -661,8 +826,8 @@ def test_panel_hotkey_worker_receives_profile_strength(qtbot, monkeypatch):
                 self.target(*self.args)
 
         monkeypatch.setattr(app_module.threading, "Thread", ImmediateThread)
-        app._handle_hotkey_fired({"mode": "panel", "strength": "aggressive"})
-        assert worker_calls == ["aggressive"]
+        app._handle_hotkey_fired({"mode": "panel", "strength": "rewrite_polish"})
+        assert worker_calls == ["rewrite_polish"]
 
 
 def test_show_window_constructs_with_profile_strength(qtbot, monkeypatch):
@@ -704,8 +869,8 @@ def test_show_window_constructs_with_profile_strength(qtbot, monkeypatch):
 
         monkeypatch.setattr(app_module, "CorrectionWindow", DummyWindow)
         app = StetApp()
-        app._show_window("rough text", "aggressive")
-        assert constructed == ["aggressive"]
+        app._show_window("rough text", "rewrite_polish")
+        assert constructed == ["rewrite_polish"]
 
 
 # ── Quit/teardown tests ─────────────────────────────────────────────────

@@ -211,7 +211,7 @@ def test_settings_save_does_not_write_removed_global_profile_controls(qapp):
 
     cfg = _make_cfg({
         "correction_method": "stream",
-        "streaming_strength": "aggressive",
+        "streaming_strength": "rewrite_polish",
     })
     dlg = SettingsDialog(cfg)
     dlg._save()
@@ -725,7 +725,7 @@ def test_correction_ready_preserves_windows_newlines(monkeypatch, qtbot):
 def test_stream_done_preserves_windows_newlines(monkeypatch, qtbot):
     """Streaming completion should normalize line endings before copy/paste paths."""
     cw = _make_window(monkeypatch, qtbot, "Line 1\r\n\r\nLine 2")
-    cw._correction_stream_strength = "smart_fix"
+    cw._correction_stream_strength = "full_correction"
 
     cw._on_correction_stream_done("Line 1\n\nLine 2")
 

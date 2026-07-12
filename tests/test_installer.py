@@ -21,6 +21,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+@pytest.fixture(autouse=True)
+def mock_downloader_dialog():
+    with patch("stet.ui.downloader.DownloadProgressDialog") as mock:
+        yield mock
+
 # ---------------------------------------------------------------------------
 # Ensure PyQt6 is available; skip entire module if not (e.g., headless CI).
 # In practice PyQt6 is always installed for this project.
@@ -446,7 +451,8 @@ class TestCompletionPage:
         page = CompletionPage()
         assert page.create_desktop_shortcut is True
         assert page.create_startmenu_shortcut is True
-        assert page.download_model is False
+        assert page.download_backend is True
+        assert page.download_model is True
         assert page.launch_stet is True
 
     def test_is_final_page(self, qapp):
@@ -464,12 +470,14 @@ class TestCompletionPage:
         page = CompletionPage()
         page._desktop_cb.setChecked(False)
         page._startmenu_cb.setChecked(False)
-        page._download_cb.setChecked(True)
+        page._download_backend_cb.setChecked(False)
+        page._download_model_cb.setChecked(False)
         page._launch_cb.setChecked(False)
 
         assert page.create_desktop_shortcut is False
         assert page.create_startmenu_shortcut is False
-        assert page.download_model is True
+        assert page.download_backend is False
+        assert page.download_model is False
         assert page.launch_stet is False
 
 
@@ -513,21 +521,22 @@ class TestPostInstallActions:
         mock_sc.assert_not_called()
 
     def test_model_download_launched(self, qapp, installer_zip, tmp_path):
-        """Popen called with download_model.bat when checkbox is checked."""
+        """DownloadProgressDialog exec is called when either download checkbox is checked."""
         from windows_installer_payload import StetInstaller
 
         wizard = StetInstaller(installer_zip)
         wizard.setField("installDir", str(tmp_path))
-        wizard._completion_page._download_cb.setChecked(True)
+        wizard._completion_page._download_backend_cb.setChecked(True)
+        wizard._completion_page._download_model_cb.setChecked(True)
         wizard._completion_page._launch_cb.setChecked(False)
 
         with patch("windows_installer_payload.create_shortcut"), \
-             patch("windows_installer_payload.subprocess.Popen") as mock_popen:
+             patch("stet.ui.downloader.DownloadProgressDialog") as mock_dialog:
+            mock_dialog_inst = mock_dialog.return_value
             wizard._run_post_install_actions()
 
-        mock_popen.assert_called_once()
-        cmd = mock_popen.call_args[0][0]
-        assert any("download_model.bat" in str(arg) for arg in cmd)
+        mock_dialog.assert_called_once()
+        mock_dialog_inst.exec.assert_called_once()
 
     def test_launch_stet_called(self, qapp, installer_zip, tmp_path):
         """Popen called with Stet.exe when launch checkbox is checked."""
@@ -541,7 +550,8 @@ class TestPostInstallActions:
         wizard.setField("installDir", str(tmp_path))
         wizard._completion_page._desktop_cb.setChecked(False)
         wizard._completion_page._startmenu_cb.setChecked(False)
-        wizard._completion_page._download_cb.setChecked(False)
+        wizard._completion_page._download_backend_cb.setChecked(False)
+        wizard._completion_page._download_model_cb.setChecked(False)
         wizard._completion_page._launch_cb.setChecked(True)
 
         with patch("windows_installer_payload.subprocess.Popen") as mock_popen:
@@ -562,7 +572,8 @@ class TestPostInstallActions:
         wizard.setField("installDir", str(tmp_path))
         wizard._completion_page._desktop_cb.setChecked(False)
         wizard._completion_page._startmenu_cb.setChecked(False)
-        wizard._completion_page._download_cb.setChecked(False)
+        wizard._completion_page._download_backend_cb.setChecked(False)
+        wizard._completion_page._download_model_cb.setChecked(False)
         wizard._completion_page._launch_cb.setChecked(False)
 
         with patch("windows_installer_payload.subprocess.Popen") as mock_popen:
@@ -652,7 +663,8 @@ class TestARPRegistry:
         wizard.setField("installDir", str(tmp_path))
         wizard._completion_page._desktop_cb.setChecked(False)
         wizard._completion_page._startmenu_cb.setChecked(False)
-        wizard._completion_page._download_cb.setChecked(False)
+        wizard._completion_page._download_backend_cb.setChecked(False)
+        wizard._completion_page._download_model_cb.setChecked(False)
         wizard._completion_page._launch_cb.setChecked(False)
 
         with patch.object(wizard, "_write_arp_registry") as mock_arp:

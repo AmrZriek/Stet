@@ -92,6 +92,115 @@ def _windows_resource_version(version: str) -> str:
     return ".".join(parts)
 
 
+def _generate_manifest_file(name: str, artifacts_dir: Path, admin: bool = False) -> Path:
+    """Generate custom Windows manifest declaring compatibility with Win 10 & 11."""
+    level = "requireAdministrator" if admin else "asInvoker"
+    content = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity
+    version="1.0.0.0"
+    processorArchitecture="amd64"
+    name="{name}"
+    type="win32"
+  />
+  <description>{name} application</description>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="{level}" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <!-- Windows 10 and Windows 11 -->
+      <supportedOS Id="{{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}}"/>
+      <!-- Windows 8.1 -->
+      <supportedOS Id="{{1f676c76-80e1-4239-95bb-83d0f6d0da78}}"/>
+      <!-- Windows 8 -->
+      <supportedOS Id="{{4a2f28e3-53b9-4441-ba9c-d69d4a4a6e38}}"/>
+      <!-- Windows 7 -->
+      <supportedOS Id="{{35138b9a-5d96-4fbd-8e2d-a2440225f93a}}"/>
+    </application>
+  </compatibility>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"""
+    path = artifacts_dir / f"{name}_manifest.xml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
+def _generate_version_file(
+    version: str,
+    product_name: str,
+    description: str,
+    internal_name: str,
+    artifacts_dir: Path,
+) -> Path:
+    """Generate a Windows VERSIONINFO file for PyInstaller --version-file."""
+    parts = _windows_resource_version(version).split(".")
+    major, minor, patch, build_num = (parts + ["0", "0", "0", "0"])[:4]
+    ver_str = f"{major}.{minor}.{patch}.{build_num}"
+    content = f"""# UTF-8
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=({major}, {minor}, {patch}, {build_num}),
+    prodvers=({major}, {minor}, {patch}, {build_num}),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          '040904B0',
+          [
+            StringStruct('CompanyName', 'Stet'),
+            StringStruct('FileDescription', '{description}'),
+            StringStruct('FileVersion', '{ver_str}'),
+            StringStruct('InternalName', '{internal_name}'),
+            StringStruct('OriginalFilename', '{internal_name}.exe'),
+            StringStruct('ProductName', '{product_name}'),
+            StringStruct('ProductVersion', '{ver_str}'),
+            StringStruct('LegalCopyright', 'Copyright (C) {datetime.now().year} AmrZriek'),
+            StringStruct('LegalTrademarks', 'GPLv3'),
+          ]
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)"""
+    path = artifacts_dir / f"{internal_name}_version_info.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return path
+
+
 # ── Resolve llama-server directory ────────────────────────────────────────────
 
 def _find_llama_dir() -> Path | None:
@@ -218,17 +327,27 @@ def _base_pyinstaller_cmd(
     console: str = "disable",
     product_name: str = "Stet",
     description: str = "Stet - AI Writing Assistant",
+    admin: bool = False,
     extra_flags: list[str] | None = None,
 ) -> list:
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "-y",
         "--clean",
+        "--noupx",
         f"--workpath={artifacts_dir / 'build'}",
         f"--distpath={artifacts_dir}",
         f"--specpath={artifacts_dir}",
         f"--name={output_name}",
     ]
+
+    # Exclude unused modules to reduce surface area and trigger fewer heuristic AV warnings
+    for mod in [
+        "unittest", "test", "_testcapi", "_testinternalcapi",
+        "tkinter", "_tkinter", "lib2to3", "pydoc", "doctest",
+        "multiprocessing"
+    ]:
+        cmd.append(f"--exclude-module={mod}")
 
     if mode == "onefile":
         cmd.append("--onefile")
@@ -237,6 +356,7 @@ def _base_pyinstaller_cmd(
 
     if console == "disable":
         cmd.append("--noconsole")
+        cmd.append("--disable-windowed-traceback")
         if PLATFORM == "macOS":
             cmd.append("--windowed")
     else:
@@ -246,6 +366,14 @@ def _base_pyinstaller_cmd(
         cmd.append(f"--icon={ICON_ICO}")
     elif PLATFORM == "macOS" and ICON_PNG.exists():
         cmd.append(f"--icon={ICON_PNG}")
+
+    # Embed VERSIONINFO, custom Manifest (reduces AV heuristics)
+    if PLATFORM == "Windows":
+        if version:
+            ver_file = _generate_version_file(version, product_name, description, output_name, artifacts_dir)
+            cmd.append(f"--version-file={ver_file}")
+        manifest_file = _generate_manifest_file(output_name, artifacts_dir, admin=admin)
+        cmd.append(f"--manifest={manifest_file}")
 
     if extra_flags:
         cmd.extend(extra_flags)
@@ -301,6 +429,7 @@ def _installer_pyinstaller_cmd(version: str, artifacts_dir: Path, portable_zip: 
         mode="onefile", console="disable",
         product_name="Stet Setup",
         description="Stet desktop writing assistant installer",
+        admin=True,
         extra_flags=extra,
     )
     cmd.append(str(INSTALLER_SCRIPT))
@@ -313,6 +442,7 @@ def _uninstaller_pyinstaller_cmd(version: str, artifacts_dir: Path) -> list:
         mode="onefile", console="disable",
         product_name="Stet Uninstaller",
         description="Stet uninstaller",
+        admin=True,
     )
     cmd.append(str(UNINSTALLER_SCRIPT))
     return cmd
@@ -363,13 +493,38 @@ RELEASE_CONFIG = {
 }
 
 RUN_BAT = "@echo off\ncd /d \"%~dp0\"\nStet.exe\n"
+
+UNBLOCK_BAT = r"""@echo off
+echo.
+echo  ===================================================
+echo   Stet - Unblocking downloaded files
+echo   This removes the "Mark of the Web" that triggers
+echo   Windows security warnings on downloaded scripts.
+echo  ===================================================
+echo.
+
+set "SCRIPT_DIR=%~dp0"
+powershell -NoProfile -Command "Get-ChildItem -LiteralPath $env:SCRIPT_DIR -Recurse | Unblock-File"
+if errorlevel 1 (
+    echo ERROR: Failed to unblock files. Try right-clicking this
+    echo script and selecting "Run as administrator".
+    pause
+    exit /b 1
+)
+
+echo  Done! All files in this folder have been unblocked.
+echo  You can now run download_model.bat and download_backend.bat
+echo  without security warnings.
+echo.
+pause
+"""
 RUN_SH = "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")\"\n./Stet\n"
 
 # ── llama.cpp backend auto-download ──────────────────────────────────────────
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
 
-_LLAMA_BACKEND_VERSION = "b9827"
+_LLAMA_BACKEND_VERSION = "b9940"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{_LLAMA_BACKEND_VERSION}"
 
 DOWNLOAD_BACKEND_BAT = rf"""@echo off
@@ -378,7 +533,7 @@ cd /d "%~dp0"
 
 set LLAMA_URL={_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip
 set CUDA_URL={_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip
-set LLAMA_HASH=EAAA91EA991825FEA11028261A99f8f8fd27bf03f3DF6B0C59D95f0b6e62ab85
+set LLAMA_HASH=1EB3AFEC18662B69A8E6716978E61263C8B9F4829A6E929B8FCDCC142BE51893
 set CUDA_HASH=8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6
 set DEST=llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64
 
@@ -463,13 +618,13 @@ cd "$(dirname "$0")"
 
 LLAMA_URL="{_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip"
 CUDA_URL="{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip"
-LLAMA_HASH="eaaa91ea991825fea11028261a99f8f8fd27bf03f3df6b0c59d95f0b6e62ab85"
+LLAMA_HASH="1eb3afec18662b69a8e6716978e61263c8b9f4829a6e929b8fcdcc142be51893"
 CUDA_HASH="8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
 DEST="llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 
 echo ""
 echo "==================================================="
-echo "  Stet - Downloading llama.cpp backend (b9577)"
+echo "  Stet - Downloading llama.cpp backend ({_LLAMA_BACKEND_VERSION})"
 echo "  This is a one-time download (~652 MB)."
 echo "==================================================="
 echo ""
@@ -742,7 +897,8 @@ class PlatformBuilder:
             (self.portable_dir / "run.bat").write_text(RUN_BAT, encoding="utf-8")
             (self.portable_dir / "download_model.bat").write_text(DOWNLOAD_BAT, encoding="utf-8")
             (self.portable_dir / "download_backend.bat").write_text(DOWNLOAD_BACKEND_BAT, encoding="utf-8")
-            print("  Created run.bat, download_model.bat, download_backend.bat")
+            (self.portable_dir / "Unblock_Stet.bat").write_text(UNBLOCK_BAT, encoding="utf-8")
+            print("  Created run.bat, download_model.bat, download_backend.bat, Unblock_Stet.bat")
         else:
             for name, content in [
                 ("run.sh", RUN_SH),
@@ -780,12 +936,78 @@ class PlatformBuilder:
     def build_installer(self):
         if PLATFORM != "Windows" or self.skip_installer:
             return
-        if not INSTALLER_SCRIPT.exists():
-            print("  Skipping installer (windows_installer_payload.py not found)")
-            return
 
         total = self._total_steps()
         banner(f"Step 6 / {total} — Compile self-contained StetSetup.exe")
+
+        # Check if Inno Setup compiler (ISCC) is available
+        iscc = shutil.which("ISCC.exe") or shutil.which("iscc")
+        if not iscc:
+            # Fallback to standard installation paths
+            paths = [
+                Path(os.path.expandvars(r"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe")),
+                Path(os.path.expandvars(r"%ProgramFiles%\Inno Setup 6\ISCC.exe")),
+            ]
+            for p in paths:
+                if p.exists():
+                    iscc = str(p)
+                    break
+
+        if iscc:
+            print("  ✓ Inno Setup compiler detected — compiling native installer...")
+            # Generate setup.iss dynamically in the artifacts directory
+            icon_line = f'SetupIconFile="{ICON_ICO.resolve()}"' if ICON_ICO.exists() else ""
+            iss_content = f"""; Dynamic setup.iss generated at build time
+[Setup]
+AppName=Stet
+AppVersion={self.version}
+AppPublisher=Amr Zriek
+AppPublisherURL=https://github.com/AmrZriek/Stet
+DefaultDirName={{autopf}}\\Stet
+DefaultGroupName=Stet
+UninstallDisplayIcon={{app}}\\Stet.exe
+Compression=lzma2/max
+SolidCompression=yes
+OutputDir="{DIST.resolve()}"
+OutputBaseFilename=StetSetup
+{icon_line}
+PrivilegesRequired=admin
+ArchitecturesInstallIn64BitMode=x64
+
+[Files]
+Source: "{self.portable_dir.resolve()}\\*"; DestDir: "{{app}}"; Flags: recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{{group}}\\Stet"; Filename: "{{app}}\\Stet.exe"
+Name: "{{autodesktop}}\\Stet"; Filename: "{{app}}\\Stet.exe"; Tasks: desktopicon
+
+[Tasks]
+Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional tasks:"
+
+[Run]
+Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall nowait
+"""
+            iss_path = self.artifacts_dir / "setup.iss"
+            iss_path.write_text(iss_content, encoding="utf-8")
+            
+            try:
+                # Run the Inno Setup compiler
+                run([iscc, str(iss_path)])
+                print("  ✓ Native Inno Setup installer compiled successfully.")
+                return
+            except subprocess.CalledProcessError as e:
+                print(f"  WARNING: Inno Setup compilation failed (exit {e.returncode}) — falling back to PyInstaller...")
+            except Exception as e:
+                print(f"  WARNING: Inno Setup compiler error ({e}) — falling back to PyInstaller...")
+            finally:
+                # Delete temporary setup.iss to keep things clean
+                if iss_path.exists():
+                    iss_path.unlink()
+
+        # Fallback to PyInstaller onefile installer script if ISCC is not installed or failed
+        if not INSTALLER_SCRIPT.exists():
+            print("  Skipping installer (windows_installer_payload.py not found)")
+            return
 
         zip_path = getattr(self, "_portable_zip", DIST / "stet_portable.zip")
         if not zip_path.exists():
@@ -805,7 +1027,7 @@ class PlatformBuilder:
             final_path = DIST / "StetSetup.exe"
             shutil.copy2(installer_exe, final_path)
             size_mb = final_path.stat().st_size / 1_048_576
-            print(f"  Created: dist/StetSetup.exe  ({size_mb:.1f} MB)")
+            print(f"  Created: dist/StetSetup.exe (PyInstaller fallback)  ({size_mb:.1f} MB)")
         else:
             print("  WARNING: StetSetup.exe not found in build output")
 

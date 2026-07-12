@@ -25,7 +25,7 @@ from PyQt6.QtWidgets import (
     QWidgetAction,
 )
 
-from stet.constants import APP_VERSION, GITHUB_RELEASES_API, SCRIPT_DIR, WINDOWS
+from stet.constants import APP_VERSION, GITHUB_RELEASES_API, SCRIPT_DIR, WINDOWS, DEFAULT_TEMPLATES
 from stet.core.clipboard import (
     VK_C,
     VK_V,
@@ -51,6 +51,7 @@ from stet.ui.main_window import CorrectionWindow
 from stet.ui.osd import SilentCorrectionOSD
 from stet.ui.settings import SettingsDialog
 from stet.ui.tray import make_tray_icon, make_left_arrow_icon
+from stet.ui.welcome_window import WelcomeWindow
 
 
 def _quote_cmd(args: list[str]) -> str:
@@ -344,6 +345,7 @@ class StetApp(QObject):
         str, str
     )  # message, state ('loading'|'success'|'warning')
     _large_doc_warning_signal = pyqtSignal(str)  # text that is too large
+    _welcome_corr_finished = pyqtSignal(str, object)  # (original_text, result)
 
     def __init__(self):
         super().__init__()
@@ -365,7 +367,7 @@ class StetApp(QObject):
         log(f"[APP] Boot — gpu_layers: {self.cfg.get('gpu_layers', 99)}")
         log("[APP] Boot — correction_method: patch (fixed)")
         log(
-            f"[APP] Boot — default_strength: {self.cfg.get('streaming_strength', 'smart_fix')}"
+            f"[APP] Boot — default_strength: {self.cfg.get('streaming_strength', 'full_correction')}"
         )
         self.ac_model = ModelManager(
             self.cfg,
@@ -382,13 +384,19 @@ class StetApp(QObject):
             idle_timeout_key="chat_idle_timeout_seconds",
         )
         self._window: CorrectionWindow | None = None
+        self._welcome_window: WelcomeWindow | None = None
+        self._welcome_cancel_event: threading.Event | None = None
+        self._first_run_setup_active = False
+        self._first_run_setup_done = False
+        self._status_lbl = QLabel("● AC: Offline")
+        self._chat_status_lbl = QLabel("● Chat: Offline")
         self._old_clip = ""
         # Hotkey re-entrancy guard — holding the keys or rapid repeat presses
         # used to spawn overlapping _hotkey_fired threads, each firing its own
         # "no text selected" notification in a feedback loop. This lock ensures
         # only one hotkey flow runs at a time.
         self._hotkey_busy = threading.Lock()
-        self._pending_panel_strength = "smart_fix"
+        self._pending_panel_strength = "full_correction"
         self._last_empty_notify_ts = 0.0
         # Debounce guard for _register_hotkey — prevents rapid re-registration
         # cycles from corrupting keyboard library internal state.
@@ -404,6 +412,7 @@ class StetApp(QObject):
         self._hotkey_signal.connect(self._handle_hotkey_fired)
         self._silent_osd_signal.connect(self._show_silent_osd)
         self._large_doc_warning_signal.connect(self._on_large_doc_warning)
+        self._welcome_corr_finished.connect(self._on_welcome_correction_finished)
         self.ac_model.status_changed.connect(self._on_ac_status)
         self.chat_model.status_changed.connect(self._on_chat_status)
         self.ac_model.model_loaded.connect(lambda: self._set_tray_icon("#3b82f6"))
@@ -451,13 +460,17 @@ class StetApp(QObject):
         # Clean up legacy startup scheduled task if present to avoid dual launching
         self._cleanup_legacy_startup_task()
 
+        # Check if first run download is needed (backend or model missing)
+        QTimer.singleShot(100, self._check_first_run_downloads)
+
         # Check for Stet updates 5 s after boot (non-blocking)
         self._update_checker: AppUpdateChecker | None = None
         self._available_update: tuple[str, str] | None = None
         QTimer.singleShot(5000, self._check_app_update)
 
-        if not self.cfg.get("model_path", ""):
-            QTimer.singleShot(800, self._show_first_run)
+        self._welcome_poll_timer = QTimer(self)
+        self._welcome_poll_timer.timeout.connect(self._check_welcome_flag)
+        self._welcome_poll_timer.start(2000)
 
     def __del__(self):
         try:
@@ -551,21 +564,20 @@ class StetApp(QObject):
             "QMenu::item:disabled{color:#88898c;}"
         )
 
+        # Status header (non-clickable, shows model load state)
         header_widget = QWidget()
         header_widget.setStyleSheet("background:transparent;")
         header_lay = QVBoxLayout(header_widget)
         header_lay.setContentsMargins(32, 4, 16, 8)
         header_lay.setSpacing(4)
 
-        title_lbl = QLabel("STREAM CORRECT")
+        title_lbl = QLabel("STET")
         title_lbl.setStyleSheet(
-            "font-size: 11px; font-weight: 500; color: #d4a373; text-transform: uppercase; letter-spacing: 0.05em; border: none;"
+            "font-size: 11px; font-weight: 500; color: #d4a373;"
+            "text-transform: uppercase; letter-spacing: 0.05em; border: none;"
         )
 
-        self._status_lbl = QLabel("● AC: Offline")
         self._status_lbl.setStyleSheet("font-size: 12px; color: #ededee; border: none;")
-
-        self._chat_status_lbl = QLabel("● Chat: Offline")
         self._chat_status_lbl.setStyleSheet("font-size: 12px; color: #88898c; border: none;")
 
         header_lay.addWidget(title_lbl)
@@ -577,26 +589,39 @@ class StetApp(QObject):
         menu.addAction(header_act)
         menu.addSeparator()
 
+        act_home = QAction("Open Home", self)
+        font = act_home.font()
+        font.setBold(True)
+        act_home.setFont(font)
+        act_home.triggered.connect(self._show_welcome)
+        menu.addAction(act_home)
+
+
+
+        menu.addSeparator()
+
         self._llm_menu = menu.addMenu("Model: Offline")
         self._llm_menu_action = self._llm_menu.menuAction()
         self._llm_menu_action.setIcon(make_left_arrow_icon())
         self._llm_menu.setStyleSheet(menu.styleSheet())
         self._llm_menu.aboutToShow.connect(self._rebuild_llm_menu)
 
+        menu.addSeparator()
+
         act_settings = QAction("Settings...", self)
         act_settings.triggered.connect(self._open_settings)
         menu.addAction(act_settings)
 
-
         self._update_action = QAction("Check for Updates", self)
 
         if WINDOWS:
-            menu.addSeparator()
             self._act_startup = QAction("Run at Startup", self)
             self._act_startup.setCheckable(True)
             self._act_startup.triggered.connect(self._toggle_startup)
             menu.addAction(self._act_startup)
             menu.aboutToShow.connect(self._update_startup_action)
+
+        menu.addSeparator()
 
         act_quit = QAction("Quit", self)
         act_quit.triggered.connect(self._quit)
@@ -752,6 +777,8 @@ class StetApp(QObject):
 
     def _register_hotkey(self, force: bool = False):
         """Register global hotkeys using Windows RegisterHotKey API."""
+        if not WINDOWS:
+            return
         now = time.monotonic()
         if not force and now - self._last_register_ts < 0.5:
             log("[Hotkey] register debounced — too recent")
@@ -800,6 +827,20 @@ class StetApp(QObject):
                     QSystemTrayIcon.MessageIcon.Warning,
                     4000,
                 )
+
+    def _unregister_hotkey(self):
+        """Unregister global hotkeys temporarily."""
+        if not WINDOWS:
+            return
+        for hotkey_id in self._hotkey_handles:
+            try:
+                ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+            except Exception as e:
+                log(f"[Hotkey] Unregister failed: {e}")
+        self._hotkey_handles.clear()
+        if hasattr(self, "_hotkey_filter"):
+            self._hotkey_filter.clear_callbacks()
+        log("[Hotkey] Temporarily unregistered all hotkeys")
 
     def _safe_paste(self, retries=5, delay=0.03) -> str:
         for i in range(retries):
@@ -855,7 +896,7 @@ class StetApp(QObject):
                 threading.Thread(target=self.ac_model.load_model, daemon=True).start()
 
         mode = hk_cfg.get("mode", "panel")
-        strength = hk_cfg.get("strength", "smart_fix")
+        strength = hk_cfg.get("strength", "full_correction")
         custom_prompt = hk_cfg.get("custom_prompt", "")
         log(f"[Hotkey] fired mode={mode} strength={strength}")
 
@@ -1045,14 +1086,16 @@ class StetApp(QObject):
 
     def _hotkey_worker(self):
         try:
-            strength = getattr(self, "_pending_panel_strength", "smart_fix")
+            strength = getattr(self, "_pending_panel_strength", "full_correction")
             selected = self._capture_selection()
 
             if selected.strip():
                 text = selected.strip()
-                if len(text.split()) > 1000:
+                word_count = len(text.split())
+                warn_words = self.cfg.get("large_doc_warning_words", 1000)
+                if word_count > warn_words:
+                    log(f"[Hotkey] large selection ({word_count} words) — opening UI with warning")
                     self._large_doc_warning_signal.emit(text)
-                    return
                 self._trigger.emit(text, strength)
             else:
                 now = time.monotonic()
@@ -1234,15 +1277,31 @@ class StetApp(QObject):
     def _on_large_doc_warning(self, text: str):
         """Warn the user when selected text is too large for reliable correction."""
         word_count = len(text.split())
+        log(f"[LargeDoc] warning shown for {word_count}-word selection")
         self.tray.showMessage(
             "Stet — Document too large",
             f"Selected text is ~{word_count} words. Stet works best with smaller "
-            "selections (1–3 paragraphs). Select a shorter passage and try again.",
+            "selections (1–3 paragraphs). Correction will still proceed (chunked) "
+            "but may take longer.",
             QSystemTrayIcon.MessageIcon.Warning,
             5000,
         )
+        # Also surface in a modal dialog parented to the open window so the
+        # warning is visible in the channel the user is focused on (not just tray).
+        if getattr(self, "_window", None) is not None:
+            try:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self._window,
+                    "Stet — Large Selection",
+                    f"Selected text is ~{word_count} words. Stet works best with "
+                    "smaller selections (1–3 paragraphs). Correction will still "
+                    "proceed (chunked) but may take longer.",
+                )
+            except Exception as e:
+                log(f"[LargeDoc] dialog failed: {e}")
 
-    def _show_window(self, text: str, initial_strength: str = "smart_fix"):
+    def _show_window(self, text: str, initial_strength: str = "full_correction"):
         log(f"[Window] _show_window called, text length={len(text)}")
         try:
             if self._window:
@@ -1290,6 +1349,7 @@ class StetApp(QObject):
         dlg = SettingsDialog(
             self.cfg,
             re_register_cb=self._register_hotkey,
+            unregister_cb=self._unregister_hotkey,
             app_update_cb=self._run_settings_update_action,
             app_update_label=self._settings_update_action_text(),
         )
@@ -1339,7 +1399,6 @@ class StetApp(QObject):
             
             # If the backend download finished but model_path is still empty,
             # trigger self._show_first_run() to guide the user to download/choose a model.
-            from stet.llm.utils import _find_shipped_llama_server
             if _find_shipped_llama_server() and not self.cfg.get("model_path", ""):
                 log("[DownloadMonitor] llama-server detected, but model_path is empty. Showing model welcome prompt.")
                 QTimer.singleShot(800, self._show_first_run)
@@ -1359,41 +1418,235 @@ class StetApp(QObject):
             log("[DownloadMonitor] No active download processes. Polling stopped.")
 
     def _show_first_run(self):
-        # Check for llama-server backend first — if missing, prompt to download
-        if not _find_shipped_llama_server():
-            self._show_backend_download_prompt()
+        # Deprecated stub for test compatibility
+        self._show_welcome()
+
+    def _check_welcome_flag(self):
+        import tempfile
+        from pathlib import Path
+        flag = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
+        if flag.exists():
+            try:
+                flag.unlink()
+            except OSError:
+                pass
+            self._show_welcome()
+
+    def _show_welcome(self):
+        if self._first_run_setup_active:
+            return  # Download dialog is open; don't stack welcome on top
+        if self._welcome_window is not None:
+            self._welcome_window.show()
+            self._welcome_window.raise_()
+            self._welcome_window.activateWindow()
             return
 
-        # Bail if the user already chose a model while the timer was pending
-        # (e.g. via settings or tray menu), or if they've dismissed this
-        # welcome before and the flag was set.
-        if self.cfg.get("model_path", ""):
+        self._welcome_window = WelcomeWindow(self.cfg, self.ac_model)
+        self._welcome_window.settings_requested.connect(self._open_settings)
+        self._welcome_window.correction_requested.connect(self._on_welcome_correction)
+        self._welcome_window.closed_signal.connect(self._on_welcome_closed)
+        self._welcome_window.show()
+        self._welcome_window.raise_()
+        self._welcome_window.activateWindow()
+
+    def _on_welcome_closed(self):
+        if self._welcome_cancel_event is not None:
+            self._welcome_cancel_event.set()
+        self._welcome_window = None
+
+    def _on_welcome_correction(self, text: str, strength: str, template_name: str):
+        if not self.ac_model or not self.ac_model.is_loaded():
             return
 
-        box = QMessageBox()
-        box.setWindowTitle("Welcome to Stet")
-        box.setIcon(QMessageBox.Icon.Information)
-        box.setText("Stet needs a language model to work.")
-        dl_name = "download_model.bat" if WINDOWS else "download_model.sh"
-        box.setInformativeText(
-            "You can:\n\n"
-            f"  • Download the recommended model (~1.8 GB) — runs {dl_name} in a terminal\n"
-            "  • Browse to an existing .gguf file you already have\n"
-            "  • Skip for now and configure from Settings later"
-        )
-        dl_btn = box.addButton(
-            "Download recommended", QMessageBox.ButtonRole.AcceptRole
-        )
-        br_btn = box.addButton("Browse existing…", QMessageBox.ButtonRole.ActionRole)
-        box.addButton("Skip", QMessageBox.ButtonRole.RejectRole)
-        box.setDefaultButton(dl_btn)
-        box.exec()
+        if self._welcome_window:
+            self._welcome_window.set_correcting(True)
 
-        clicked = box.clickedButton()
-        if clicked is dl_btn:
-            self._run_download_script()
-        elif clicked is br_btn:
-            self._browse_model()
+        self._welcome_cancel_event = threading.Event()
+
+        template_prompt = None
+        if template_name:
+            templates = self.cfg.get("custom_templates", []) or DEFAULT_TEMPLATES
+            for tmpl in templates:
+                if tmpl.get("name") == template_name:
+                    template_prompt = tmpl.get("prompt")
+                    break
+
+        custom_sys = self.cfg.get("system_prompt", "").strip() or None
+
+        def run_correction():
+            result = None
+            try:
+                result, _ = self.ac_model.correct_text_patch(
+                    text=text,
+                    custom_sys=custom_sys,
+                    strength=strength,
+                    cancel_event=self._welcome_cancel_event,
+                    mode_prompt_override=template_prompt,
+                )
+            except Exception as e:
+                log(f"[Welcome] correction error: {e}")
+            self._welcome_corr_finished.emit(text, result)
+
+        threading.Thread(target=run_correction, daemon=True).start()
+
+    def _on_welcome_correction_finished(self, text: str, result: str | None):
+        if self._welcome_cancel_event and self._welcome_cancel_event.is_set():
+            return
+        if not self._welcome_window:
+            return
+        if result is None:
+            self._welcome_window.set_error()
+        else:
+            self._welcome_window.set_corrected_text(text, result)
+
+    def _check_first_run_downloads(self):
+        """Prompt user on portable mode/first run if backend or model are missing."""
+        from stet.llm.utils import _find_shipped_llama_server
+        
+        # Check backend
+        backend_exists = bool(_find_shipped_llama_server()) or (
+            self.cfg.get("llama_server_path", "") and Path(self.cfg.get("llama_server_path", "")).exists()
+        )
+        # Check model
+        model_path = self.cfg.get("model_path", "")
+        model_exists = bool(model_path) and Path(model_path).exists()
+        
+        if not backend_exists or not model_exists:
+            self._first_run_setup_active = True
+            try:
+                # Prompt user to download
+                from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton
+                from PyQt6.QtCore import Qt
+                from stet.ui.downloader import DownloadProgressDialog
+                from stet.constants import (
+                    LLAMA_BACKEND_URLS,
+                    LLAMA_BACKEND_HASHES,
+                    LLAMA_BACKEND_DIR,
+                    RECOMMENDED_MODEL_URL,
+                    RECOMMENDED_MODEL_FILE,
+                    RECOMMENDED_MODEL_HASH,
+                    SCRIPT_DIR,
+                    SERVER_EXE,
+                )
+                
+                dlg = QDialog()
+                dlg.setWindowTitle("Stet — Initial Setup")
+                dlg.setStyleSheet("""
+                    QDialog { background-color: #121315; }
+                    QLabel { color: #ededee; font-size: 13px; }
+                    QCheckBox { color: #ededee; font-size: 12px; }
+                    QPushButton {
+                        background-color: #1c1d1f; color: #ededee; border: 1px solid #28292c;
+                        padding: 6px 16px; font-size: 12px; min-width: 88px;
+                    }
+                    QPushButton:hover { background-color: #28292c; border-color: #d4a373; }
+                    QPushButton:pressed { background-color: #121315; }
+                """)
+                dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
+                dlg.setFixedSize(400, 220)
+                
+                layout = QVBoxLayout(dlg)
+                layout.setContentsMargins(20, 20, 20, 20)
+                layout.setSpacing(12)
+                
+                if not backend_exists and not model_exists:
+                    msg = "Stet needs the local AI engine (llama.cpp backend) and a language model to correct your text.\nSelect which components to download:"
+                elif not backend_exists:
+                    msg = "Stet needs the local AI engine (llama.cpp backend) to correct your text.\nSelect which components to download:"
+                else:
+                    msg = "Stet needs a language model to correct your text.\nSelect which components to download:"
+
+                lbl = QLabel(msg)
+                lbl.setWordWrap(True)
+                layout.addWidget(lbl)
+                
+                cb_backend = None
+                if not backend_exists:
+                    cb_backend = QCheckBox("Download llama.cpp Backend & CUDA (~652 MB)")
+                    cb_backend.setChecked(True)
+                    layout.addWidget(cb_backend)
+                
+                cb_model = None
+                if not model_exists:
+                    cb_model = QCheckBox("Download recommended AI model (~1.8 GB)")
+                    cb_model.setChecked(True)
+                    layout.addWidget(cb_model)
+                
+                layout.addStretch()
+                
+                btn_lay = QHBoxLayout()
+                btn_lay.addStretch()
+                
+                btn_cancel = QPushButton("Skip Setup")
+                btn_cancel.clicked.connect(dlg.reject)
+                btn_lay.addWidget(btn_cancel)
+                
+                btn_dl = QPushButton("Download")
+                btn_dl.clicked.connect(dlg.accept)
+                btn_dl.setDefault(True)
+                btn_lay.addWidget(btn_dl)
+                
+                layout.addLayout(btn_lay)
+                
+                # Show dialog
+                if dlg.exec() == QDialog.DialogCode.Accepted:
+                    downloads = []
+                    if cb_backend and cb_backend.isChecked():
+                        downloads.append({
+                            "url": LLAMA_BACKEND_URLS["llama"],
+                            "dest": SCRIPT_DIR / "llama_zip.zip",
+                            "hash": LLAMA_BACKEND_HASHES["llama"],
+                            "label": "llama.cpp server binary",
+                            "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
+                        })
+                        downloads.append({
+                            "url": LLAMA_BACKEND_URLS["cuda"],
+                            "dest": SCRIPT_DIR / "cuda_zip.zip",
+                            "hash": LLAMA_BACKEND_HASHES["cuda"],
+                            "label": "CUDA runtime dependencies",
+                            "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
+                        })
+                    if cb_model and cb_model.isChecked():
+                        downloads.append({
+                            "url": RECOMMENDED_MODEL_URL,
+                            "dest": SCRIPT_DIR / RECOMMENDED_MODEL_FILE,
+                            "hash": RECOMMENDED_MODEL_HASH,
+                            "label": "AI language model"
+                        })
+                        
+                    if downloads:
+                        dl_dialog = DownloadProgressDialog(downloads)
+                        if dl_dialog.exec() == QDialog.DialogCode.Accepted:
+                            # Auto-detect and configure
+                            if cb_backend and cb_backend.isChecked():
+                                new_backend_path = SCRIPT_DIR / LLAMA_BACKEND_DIR / SERVER_EXE
+                                if new_backend_path.exists():
+                                    self.cfg.set("llama_server_path", str(new_backend_path))
+                                    log(f"[FirstRun] Configured llama_server_path: {new_backend_path}")
+                            if cb_model and cb_model.isChecked():
+                                new_model_path = SCRIPT_DIR / RECOMMENDED_MODEL_FILE
+                                if new_model_path.exists():
+                                    self.cfg.set("model_path", str(new_model_path))
+                                    if not self.cfg.get("chat_use_separate_model", False):
+                                        self.cfg.set("chat_model_path", str(new_model_path))
+                                    log(f"[FirstRun] Configured model_path: {new_model_path}")
+                            
+                            # Load model now
+                            self._on_settings_saved()
+            finally:
+                self._first_run_setup_active = False
+                self._first_run_setup_done = True
+
+        # Show welcome window now that first-run check is complete
+        # (either everything was already present, or user just finished/skipped setup)
+        if self.cfg.get("show_welcome_on_startup", True):
+            # Re-check if components are now present before showing welcome
+            backend_ok = bool(_find_shipped_llama_server()) or (
+                self.cfg.get("llama_server_path", "") and Path(self.cfg.get("llama_server_path", "")).exists()
+            )
+            model_ok = bool(self.cfg.get("model_path", "")) and Path(self.cfg.get("model_path", "")).exists()
+            if backend_ok and model_ok:
+                self._show_welcome()
 
     def _show_backend_download_prompt(self):
         """Prompt the user to download the llama.cpp backend if not found."""
@@ -1417,14 +1670,13 @@ class StetApp(QObject):
         if box.clickedButton() is dl_btn:
             self._run_download_backend_script()
 
-    def _run_download_backend_script(self):
-        """Launch the bundled download_backend script in a visible terminal."""
-        script = SCRIPT_DIR / ("download_backend.bat" if WINDOWS else "download_backend.sh")
+    def _run_download_script_impl(self, script_name: str, not_found_msg: str):
+        """Launch a bundled download script in a visible terminal."""
+        script = SCRIPT_DIR / (f"{script_name}.bat" if WINDOWS else f"{script_name}.sh")
         if not script.exists():
             self.tray.showMessage(
                 "Stet",
-                f"Backend download script not found at {script.name}. "
-                "Please download llama.cpp manually.",
+                f"{not_found_msg} at {script.name}.",
                 QSystemTrayIcon.MessageIcon.Warning,
                 5000,
             )
@@ -1442,9 +1694,9 @@ class StetApp(QObject):
                 proc = subprocess.Popen(["bash", str(script)], cwd=str(SCRIPT_DIR))
             self._download_processes.append(proc)
             self._download_timer.start(5000)
-            log(f"[Download] Started backend download process {proc.pid}")
+            log(f"[Download] Started {script_name} download process {proc.pid}")
         except Exception as e:
-            log(f"[FirstRun] Failed to launch backend download script: {e}")
+            log(f"[FirstRun] Failed to launch {script_name} script: {e}")
             self.tray.showMessage(
                 "Stet",
                 f"Could not launch {script.name}: {e}",
@@ -1452,43 +1704,19 @@ class StetApp(QObject):
                 5000,
             )
 
+    def _run_download_backend_script(self):
+        """Launch the bundled download_backend script."""
+        self._run_download_script_impl(
+            "download_backend",
+            "Backend download script not found"
+        )
+
     def _run_download_script(self):
-        """Launch the bundled download_model script in a visible terminal so
-        the user can watch progress. Falls back to opening the release folder
-        if the script is missing (e.g. dev launch)."""
-        script = SCRIPT_DIR / ("download_model.bat" if WINDOWS else "download_model.sh")
-        if not script.exists():
-            # Dev mode or corrupted unzip — just reveal the folder so the user
-            # can grab the model manually.
-            self.tray.showMessage(
-                "Stet",
-                f"Download script not found at {script.name}. Please download a GGUF model manually.",
-                QSystemTrayIcon.MessageIcon.Warning,
-                5000,
-            )
-            return
-        try:
-            if WINDOWS:
-                # start "" opens the .bat in its own console window so the user
-                # sees curl progress. /wait makes the outer cmd block until that
-                # console is closed, letting _download_timer detect completion.
-                proc = subprocess.Popen(
-                    ["cmd", "/c", "start", "/wait", "", str(script)],
-                    cwd=str(SCRIPT_DIR),
-                )
-            else:
-                proc = subprocess.Popen(["bash", str(script)], cwd=str(SCRIPT_DIR))
-            self._download_processes.append(proc)
-            self._download_timer.start(5000)
-            log(f"[Download] Started model download process {proc.pid}")
-        except Exception as e:
-            log(f"[FirstRun] Failed to launch download script: {e}")
-            self.tray.showMessage(
-                "Stet",
-                f"Could not launch {script.name}: {e}",
-                QSystemTrayIcon.MessageIcon.Warning,
-                5000,
-            )
+        """Launch the bundled download_model script."""
+        self._run_download_script_impl(
+            "download_model",
+            "Download script not found"
+        )
 
     def _select_model(self, path: str):
         self.cfg.set("model_path", path)
@@ -1543,6 +1771,8 @@ class StetApp(QObject):
             self._act_startup.setChecked(False)
 
     def _toggle_startup(self, checked: bool):
+        if hasattr(self, "cfg"):
+            self.cfg.set("startup_on_login", checked)
         # 1. Clean up legacy scheduled task
         self._cleanup_legacy_startup_task()
 

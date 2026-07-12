@@ -15,9 +15,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from stet.constants import DEFAULT_CONFIG, LOG_FILE, WINDOWS
 from stet.core.config import ConfigManager
 from stet.core.text_utils import (
-    _HALLUCINATION_THRESHOLD_AGGRESSIVE,
     _HALLUCINATION_THRESHOLD_CONSERVATIVE,
-    _HALLUCINATION_THRESHOLD_SMARTFIX,
     _apply_post_fixes,
     _chunk_text_by_sentences,
     _extract_content_from_response,
@@ -30,6 +28,7 @@ from stet.core.text_utils import (
     _normalize_chunk_newlines,
     _post_splice_sanity,
     _wrap_correction_prompt,
+    recover_sentinels,
 )
 from stet.core.utils import friendly_name, log
 from stet.llm.utils import (
@@ -41,20 +40,14 @@ from stet.llm.utils import (
 from stet.llm.worker import StreamWorker
 
 _HALLUCINATION_THRESHOLDS_BY_STRENGTH = {
-    "conservative": _HALLUCINATION_THRESHOLD_CONSERVATIVE,
     "spelling_only": _HALLUCINATION_THRESHOLD_CONSERVATIVE,
-    "smart_fix": _HALLUCINATION_THRESHOLD_SMARTFIX,
-    "full_correction": 0.6,
-    "aggressive": _HALLUCINATION_THRESHOLD_AGGRESSIVE,
-    "rewrite_polish": 0.99,
+    "full_correction": 1.0,
+    "rewrite_polish": 1.0,
 }
 
 _STRENGTH_TO_MODE_INDEX = {
-    "conservative": 0,
     "spelling_only": 0,
-    "smart_fix": 1,
     "full_correction": 1,
-    "aggressive": 2,
     "rewrite_polish": 2,
 }
 
@@ -221,6 +214,15 @@ class ModelManager(QObject):
         self._last_load_failed_not_found: bool = False
 
     # ── internal helpers ──────────────────────────────────────────────────
+    def _get_param(self, key: str, default=None):
+        """Fetch config parameter, automatically resolving prefix (like 'chat_') based on self.model_path_key."""
+        prefix = "chat_" if self.model_path_key == "chat_model_path" else ""
+        if prefix and not key.startswith("chat_"):
+            prefixed_key = f"{prefix}{key}"
+            if prefixed_key in DEFAULT_CONFIG:
+                return self.cfg.get(prefixed_key, default)
+        return self.cfg.get(key, default)
+
     def mark_used(self):
         self.last_used = datetime.now()
 
@@ -237,7 +239,7 @@ class ModelManager(QObject):
             from requests.adapters import HTTPAdapter
 
             session = requests.Session()
-            parallel_slots = self.cfg.get("parallel", 4)
+            parallel_slots = self._get_param("parallel", 4)
             adapter = HTTPAdapter(
                 pool_connections=parallel_slots,
                 pool_maxsize=parallel_slots * 2,
@@ -344,7 +346,7 @@ class ModelManager(QObject):
         can't prevent model load from completing.
         """
         try:
-            parallel_slots = self.cfg.get("parallel", 4)
+            parallel_slots = self._get_param("parallel", 4)
             strength = self.cfg.get("streaming_strength", "full_correction")
             for hotkey in self.cfg.get("hotkeys", []):
                 if isinstance(hotkey, dict) and hotkey.get("strength"):
@@ -485,7 +487,7 @@ class ModelManager(QObject):
 
         gpu_detected = has_nvidia()
         log(f"[{self.label}] GPU detection: has_nvidia()={gpu_detected}")
-        gpu_layers = 0 if force_cpu else self.cfg.get("gpu_layers", 99)
+        gpu_layers = 0 if force_cpu else self._get_param("gpu_layers", 99)
         if force_cpu:
             log(f"[{self.label}] force_cpu=True — overriding gpu_layers to 0")
         elif not gpu_detected and gpu_layers > 0:
@@ -493,16 +495,16 @@ class ModelManager(QObject):
                 f"[{self.label}] nvidia-smi not found but gpu_layers={gpu_layers} from config — attempting GPU (error recovery will retry CPU on failure)"
             )
         log(f"[{self.label}] Using gpu_layers={gpu_layers}")
-        ctx = self.cfg.get("context_size", 12800)
+        ctx = self._get_param("context_size", 12800)
         host = self.cfg.get("server_host", "127.0.0.1")
         port = self.cfg.get("server_port", 8080) + self.port_offset
-        threads = self.cfg.get("threads", -1)
-        batch_size = self.cfg.get("batch_size", 2048)
-        ubatch_size = self.cfg.get("ubatch_size", 512)
-        flash_attn = self.cfg.get("flash_attn", False)
-        mtp_enabled = self.cfg.get("mtp_enabled", False)
-        mtp_max_draft = self.cfg.get("mtp_max_draft", 2)
-        mtp_min_draft = self.cfg.get("mtp_min_draft", 0)
+        threads = self._get_param("threads", -1)
+        batch_size = self._get_param("batch_size", 2048)
+        ubatch_size = self._get_param("ubatch_size", 512)
+        flash_attn = self._get_param("flash_attn", False)
+        mtp_enabled = self._get_param("mtp_enabled", False)
+        mtp_max_draft = self._get_param("mtp_max_draft", 2)
+        mtp_min_draft = self._get_param("mtp_min_draft", 0)
 
         # Pass all sampling defaults on the CLI too. llama-server uses these as
         # fallbacks when a request omits a given field, and some endpoints (e.g.
@@ -520,7 +522,7 @@ class ModelManager(QObject):
             "--threads",
             str(threads),
             "--threads-batch",
-            str(self.cfg.get("threads_batch", -1)),
+            str(self._get_param("threads_batch", -1)),
             "--batch-size",
             str(batch_size),
             "--ubatch-size",
@@ -532,40 +534,40 @@ class ModelManager(QObject):
             "--port",
             str(port),
             "--parallel",
-            str(self.cfg.get("parallel", 4)),
+            str(self._get_param("parallel", 4)),
             "--reasoning",
             "off",
             "--no-warmup",
             "--cache-reuse",
             "64",
             "--temp",
-            str(self.cfg.get("temperature", 0.1)),
+            str(self._get_param("temperature", 0.1)),
             "--top-k",
-            str(self.cfg.get("top_k", 40)),
+            str(self._get_param("top_k", 40)),
             "--top-p",
-            str(self.cfg.get("top_p", 0.95)),
+            str(self._get_param("top_p", 0.95)),
             "--min-p",
-            str(self.cfg.get("min_p", 0.05)),
+            str(self._get_param("min_p", 0.05)),
             "--repeat-penalty",
-            str(self.cfg.get("repeat_penalty", 1.0)),
+            str(self._get_param("repeat_penalty", 1.0)),
         ]
 
-        if self.cfg.get("seed", -1) != -1:
-            cmd.extend(["--seed", str(self.cfg.get("seed", -1))])
+        if self._get_param("seed", -1) != -1:
+            cmd.extend(["--seed", str(self._get_param("seed", -1))])
         
-        rope_base = self.cfg.get("rope_freq_base", 0.0)
+        rope_base = self._get_param("rope_freq_base", 0.0)
         if rope_base > 0.0:
             cmd.extend(["--rope-freq-base", str(rope_base)])
             
-        rope_scale = self.cfg.get("rope_freq_scale", 0.0)
+        rope_scale = self._get_param("rope_freq_scale", 0.0)
         if rope_scale > 0.0:
             cmd.extend(["--rope-freq-scale", str(rope_scale)])
 
-        cache_k = self.cfg.get("kv_cache_type_k", "")
+        cache_k = self._get_param("kv_cache_type_k", "")
         if cache_k:
             cmd.extend(["--cache-type-k", cache_k])
             
-        cache_v = self.cfg.get("kv_cache_type_v", "")
+        cache_v = self._get_param("kv_cache_type_v", "")
         if cache_v:
             cmd.extend(["--cache-type-v", cache_v])
         
@@ -909,7 +911,7 @@ class ModelManager(QObject):
         self,
         text: str,
         custom_sys: str | None = None,
-        strength: str = "smart_fix",
+        strength: str = "full_correction",
         cancel_event: threading.Event | None = None,
         mode_prompt_override: str | None = None,
     ) -> tuple[str | None, int]:
@@ -968,7 +970,7 @@ class ModelManager(QObject):
 
         pre_corrected = _INLINE_HAZARD_RE.sub(mask_repl, pre_corrected)
         
-        is_rewrite_polish = (strength in {"rewrite_polish", "aggressive"})
+        is_rewrite_polish = (strength in {"rewrite_polish"})
         if is_rewrite_polish:
             chunks = []
             parts = re.split(r"(\r?\n)", pre_corrected)
@@ -984,7 +986,7 @@ class ModelManager(QObject):
                 else:
                     chunks.append((chunk, sep))
         else:
-            chunk_size = self.cfg.get("patch_chunk_size", 60)
+            chunk_size = self._get_param("patch_chunk_size", 60)
             chunks = _chunk_text_by_sentences(pre_corrected, chunk_size)
         # if dict_fixes > 0:
         #     log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
@@ -1014,7 +1016,7 @@ class ModelManager(QObject):
         if threshold is None:
             threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(strength, 1.0)
 
-        max_workers = min(len(chunks), self.cfg.get("parallel", 4)) if chunks else 1
+        max_workers = min(len(chunks), self._get_param("parallel", 4)) if chunks else 1
 
         shared_session = self._get_session()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -1083,10 +1085,22 @@ class ModelManager(QObject):
                         if _chunk_sentinels and not all(
                             s in corrected for s in _chunk_sentinels
                         ):
-                            log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost in correction")
-                            corrected_parts[idx] = (chunk_text, sep)
-                            any_preserved = True
-                            continue
+                            # Try restoring mangled sentinels (⟦U1⟧ stripped to
+                            # [U1], "U1", ⟦u1⟧, etc.) before rejecting. A
+                            # successful recovery keeps the chunk usable; an
+                            # unrecoverable or fully-missing sentinel still
+                            # falls through to the rejection branch as before.
+                            _recovered = recover_sentinels(corrected, _chunk_sentinels)
+                            if _recovered != corrected and all(
+                                s in _recovered for s in _chunk_sentinels
+                            ):
+                                log(f"[{self.label}] Patch unit {idx + 1}: recovered mangled sentinel(s)")
+                                corrected = _recovered
+                            else:
+                                log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost in correction")
+                                corrected_parts[idx] = (chunk_text, sep)
+                                any_preserved = True
+                                continue
 
                         # Reject if raw output exceeds the (config-driven) hallucination threshold
                         if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
@@ -1126,14 +1140,13 @@ class ModelManager(QObject):
 
                         if strength in {
                             "rewrite_polish",
-                            "aggressive",
                         } and _loses_meaningful_repetition(
                             chunk_text,
                             corrected,
                         ):
                             log(
                                 f"[{self.label}] Patch unit {idx + 1}: repetition-loss "
-                                "in aggressive mode — log only, accepting rewrite"
+                                "in rewrite_polish mode — log only, accepting rewrite"
                             )
 
                         corrected_parts[idx] = (corrected, sep)
@@ -1204,8 +1217,8 @@ class ModelManager(QObject):
         # (~260 tokens) in, so the budget leaves plenty of room.
         word_count = len(chunk_text.split())
         est_input_tokens = _estimate_tokens(chunk_text)
-        ctx = self.cfg.get("context_size", 12800)
-        slot_limit = (self.actual_ctx_size or ctx) // self.cfg.get("parallel", 4)
+        ctx = self._get_param("context_size", 12800)
+        slot_limit = (self.actual_ctx_size or ctx) // self._get_param("parallel", 4)
         max_tokens = min(int(est_input_tokens * 1.4) + 16, 2048)
         # Prevent slot overflow by capping max_tokens to the remaining slot budget
         if est_input_tokens + max_tokens > slot_limit:
@@ -1214,22 +1227,22 @@ class ModelManager(QObject):
         payload = {
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": 0.0,
-            "top_k": 1,
-            "top_p": 0.95,
-            "min_p": 0.05,
-            "seed": self.cfg.get("seed", -1),
-            "typical_p": self.cfg.get("typical_p", 1.0),
-            "tfs_z": self.cfg.get("tfs_z", 1.0),
-            "mirostat": self.cfg.get("mirostat", 0),
-            "mirostat_tau": self.cfg.get("mirostat_tau", 5.0),
-            "mirostat_eta": self.cfg.get("mirostat_eta", 0.1),
-            "repeat_penalty": 1.0,
-            "frequency_penalty": 0.0,
-            "presence_penalty": 0.0,
+            "temperature": self._get_param("temperature", 0.0),
+            "top_k": self._get_param("top_k", 1),
+            "top_p": self._get_param("top_p", 0.95),
+            "min_p": self._get_param("min_p", 0.05),
+            "seed": self._get_param("seed", -1),
+            "typical_p": self._get_param("typical_p", 1.0),
+            "tfs_z": self._get_param("tfs_z", 1.0),
+            "mirostat": self._get_param("mirostat", 0),
+            "mirostat_tau": self._get_param("mirostat_tau", 5.0),
+            "mirostat_eta": self._get_param("mirostat_eta", 0.1),
+            "repeat_penalty": self._get_param("repeat_penalty", 1.0),
+            "frequency_penalty": self._get_param("frequency_penalty", 0.0),
+            "presence_penalty": self._get_param("presence_penalty", 0.0),
             "stream": False,
             "think": False,
-            "cache_prompt": self.cfg.get("cache_prompt", True),
+            "cache_prompt": self._get_param("cache_prompt", True),
             "stop": ["<<<END>>>"],
         }
 
@@ -1345,21 +1358,21 @@ class ModelManager(QObject):
         payload = {
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": self.cfg.get("temperature", 0.3),
-            "top_k": self.cfg.get("top_k", 40),
-            "top_p": self.cfg.get("top_p", 0.95),
-            "min_p": self.cfg.get("min_p", 0.05),
-            "seed": self.cfg.get("seed", -1),
-            "typical_p": self.cfg.get("typical_p", 1.0),
-            "tfs_z": self.cfg.get("tfs_z", 1.0),
-            "mirostat": self.cfg.get("mirostat", 0),
-            "mirostat_tau": self.cfg.get("mirostat_tau", 5.0),
-            "mirostat_eta": self.cfg.get("mirostat_eta", 0.1),
-            "repeat_penalty": self.cfg.get("repeat_penalty", 1.0),
-            "frequency_penalty": self.cfg.get("frequency_penalty", 0.0),
-            "presence_penalty": self.cfg.get("presence_penalty", 0.0),
-            "think": False,
-            "cache_prompt": self.cfg.get("cache_prompt", True),
+            "temperature": self._get_param("temperature", 0.3),
+            "top_k": self._get_param("top_k", 40),
+            "top_p": self._get_param("top_p", 0.95),
+            "min_p": self._get_param("min_p", 0.05),
+            "seed": self._get_param("seed", -1),
+            "typical_p": self._get_param("typical_p", 1.0),
+            "tfs_z": self._get_param("tfs_z", 1.0),
+            "mirostat": self._get_param("mirostat", 0),
+            "mirostat_tau": self._get_param("mirostat_tau", 5.0),
+            "mirostat_eta": self._get_param("mirostat_eta", 0.1),
+            "repeat_penalty": self._get_param("repeat_penalty", 1.0),
+            "frequency_penalty": self._get_param("frequency_penalty", 0.0),
+            "presence_penalty": self._get_param("presence_penalty", 0.0),
+            "think": self.cfg.get("chat_thinking_enabled", False),
+            "cache_prompt": self._get_param("cache_prompt", True),
         }
         payload.update(overrides)
         if grammar:

@@ -682,13 +682,26 @@ class CompletionPage(QWizardPage):
         options_layout.addWidget(sep)
         options_layout.addSpacing(4)
 
-        self._download_cb = QCheckBox(
-            "&Download the recommended AI model (~1.8 GB)\n"
-            "Required for grammar and spelling correction. "
-            "Opens a download window after Setup closes."
+        self._download_backend_cb = QCheckBox(
+            "&Download llama.cpp Backend & CUDA Runtime (~652 MB)\n"
+            "Required for local model execution."
         )
-        self._download_cb.setChecked(False)
-        options_layout.addWidget(self._download_cb)
+        self._download_backend_cb.setChecked(True)
+        options_layout.addWidget(self._download_backend_cb)
+
+        options_layout.addSpacing(4)
+        sep_dl = QFrame()
+        sep_dl.setFrameShape(QFrame.Shape.HLine)
+        sep_dl.setFrameShadow(QFrame.Shadow.Sunken)
+        options_layout.addWidget(sep_dl)
+        options_layout.addSpacing(4)
+
+        self._download_model_cb = QCheckBox(
+            "&Download the recommended AI model (~1.8 GB)\n"
+            "Required for grammar and spelling correction."
+        )
+        self._download_model_cb.setChecked(True)
+        options_layout.addWidget(self._download_model_cb)
 
         options_layout.addSpacing(4)
         sep2 = QFrame()
@@ -717,8 +730,12 @@ class CompletionPage(QWizardPage):
         return self._startmenu_cb.isChecked()
 
     @property
+    def download_backend(self) -> bool:
+        return self._download_backend_cb.isChecked()
+
+    @property
     def download_model(self) -> bool:
-        return self._download_cb.isChecked()
+        return self._download_model_cb.isChecked()
 
     @property
     def launch_stet(self) -> bool:
@@ -776,9 +793,6 @@ class StetInstaller(QWizard):
             QWizard.WizardButton.CancelButton,
         ])
 
-        # Connect Finish to post-install actions
-        self.finished.connect(self._on_wizard_finished)
-
     def reject(self) -> None:
         """Override Cancel to show confirmation dialog (except on completion page)."""
         if self.currentId() == PAGE_COMPLETION:
@@ -802,13 +816,11 @@ class StetInstaller(QWizard):
                 worker.wait(3000)
             super().reject()
 
-    def _on_wizard_finished(self, result: int) -> None:
-        """Called when the wizard closes via Finish (result=1) or Cancel (result=0)."""
-        if result != QDialog_Accepted:
-            return
-        if self.currentId() != PAGE_COMPLETION:
-            return
-        self._run_post_install_actions()
+    def accept(self) -> None:
+        """Run post-install actions (shortcuts, downloads) before closing the wizard."""
+        if self.currentId() == PAGE_COMPLETION:
+            self._run_post_install_actions()
+        super().accept()
 
     def _write_arp_registry(self, install_dir: Path) -> None:
         """Write Add/Remove Programs registry entry for Stet."""
@@ -879,22 +891,53 @@ class StetInstaller(QWizard):
 
         self._write_arp_registry(install_dir)
 
+        downloads = []
+        if self._completion_page.download_backend:
+            from stet.constants import LLAMA_BACKEND_URLS, LLAMA_BACKEND_HASHES, LLAMA_BACKEND_DIR
+            downloads.append({
+                "url": LLAMA_BACKEND_URLS["llama"],
+                "dest": install_dir / "llama_zip.zip",
+                "hash": LLAMA_BACKEND_HASHES["llama"],
+                "label": "llama.cpp server binary",
+                "extract_dir": install_dir / LLAMA_BACKEND_DIR
+            })
+            downloads.append({
+                "url": LLAMA_BACKEND_URLS["cuda"],
+                "dest": install_dir / "cuda_zip.zip",
+                "hash": LLAMA_BACKEND_HASHES["cuda"],
+                "label": "CUDA runtime dependencies",
+                "extract_dir": install_dir / LLAMA_BACKEND_DIR
+            })
+
         if self._completion_page.download_model:
-            log("Launching download_model.bat in a new window...")
+            from stet.constants import RECOMMENDED_MODEL_URL, RECOMMENDED_MODEL_FILE, RECOMMENDED_MODEL_HASH
+            downloads.append({
+                "url": RECOMMENDED_MODEL_URL,
+                "dest": install_dir / RECOMMENDED_MODEL_FILE,
+                "hash": RECOMMENDED_MODEL_HASH,
+                "label": "AI language model"
+            })
+
+        if downloads:
+            log("Running native download progress dialog...")
             try:
-                subprocess.Popen(
-                    [
-                        "cmd.exe",
-                        "/c",
-                        "start",
-                        "cmd.exe",
-                        "/c",
-                        f'cd /d "{install_dir}" && download_model.bat',
-                    ],
-                    shell=False,
-                )
+                from stet.ui.downloader import DownloadProgressDialog
+                dialog = DownloadProgressDialog(downloads, parent=self)
+                dialog.exec()
+
+                if self._completion_page.download_backend:
+                    # Update config.json with correct server path
+                    config_path = install_dir / "config.json"
+                    if config_path.exists():
+                        import json
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            cfg_data = json.load(f)
+                        from stet.constants import LLAMA_BACKEND_DIR, SERVER_EXE
+                        cfg_data["llama_server_path"] = str(install_dir / LLAMA_BACKEND_DIR / SERVER_EXE)
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump(cfg_data, f, indent=2)
             except Exception as exc:
-                log(f"Model download launch failed: {exc}")
+                log(f"Native download/config update failed: {exc}")
 
         if self._completion_page.launch_stet and target_exe.exists():
             log("Launching Stet...")
