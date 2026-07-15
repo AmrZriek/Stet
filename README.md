@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <strong>Latest release: v1.1.0</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.1.0">Download Installer</a>
+  <strong>Latest release: v1.1.1</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.1.1">Download Installer</a>
 </p>
 
 ---
@@ -80,7 +80,7 @@ graph TD
 ## 📥 Installation
 
 ### Option 1: Standalone Installer (Recommended)
-1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.1.0).
+1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.1.1).
 2. If SmartScreen warns you, click **More info** → **Run anyway** (the installer is not code-signed yet).
 3. The built-in setup wizard will guide you to automatically download the recommended model weights.
 
