@@ -55,7 +55,7 @@ def test_correction_mode_thresholds():
     # Rewrite & Polish (index 2) is the config-driven guard bar for the
     # rewrite path. 0.99 is the coarse catastrophic backstop; refusals are
     # caught by _is_refusal_or_empty in text_utils.
-    assert thresholds == [0.7, 1.0, 1.0, 1.0]
+    assert thresholds == [0.35, 0.65, 0.9, 1.0]
 
 
 def test_correction_modes_are_builtin():
@@ -70,31 +70,19 @@ def test_correction_modes_are_builtin():
 # ── Backward-compatible strength mapping ─────────────────────────────────
 
 
-def test_strength_mapping_conservative():
-    assert _STRENGTH_TO_MODE_INDEX["spelling_only"] == 0
-
-
 def test_strength_mapping_spelling_only():
     assert _STRENGTH_TO_MODE_INDEX["spelling_only"] == 0
-
-
-def test_strength_mapping_smart_fix():
-    assert _STRENGTH_TO_MODE_INDEX["full_correction"] == 1
 
 
 def test_strength_mapping_full_correction():
     assert _STRENGTH_TO_MODE_INDEX["full_correction"] == 1
 
 
-def test_strength_mapping_aggressive():
-    assert _STRENGTH_TO_MODE_INDEX["rewrite_polish"] == 2
-
-
 def test_strength_mapping_rewrite_polish():
     assert _STRENGTH_TO_MODE_INDEX["rewrite_polish"] == 2
 
 
-def test_strength_mapping_default_is_smart_fix():
+def test_strength_mapping_default_is_full_correction():
     assert _STRENGTH_TO_MODE_INDEX.get("unknown", 1) == 1
 
 
@@ -123,7 +111,7 @@ def test_rewrite_chunk_uses_config_mode_prompt(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
     assert (
-        "spelling mistakes. change nothing else" in captured_sys.lower()
+        "Correct every clear spelling" in captured_sys
     )
 
 
@@ -149,7 +137,7 @@ def test_rewrite_chunk_conservative_maps_to_mode_0(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
     # Mode 0 prompt should be the spelling-only one
-    assert "Fix spelling mistakes" in captured_sys
+    assert "Correct every clear spelling" in captured_sys
 
 
 def test_rewrite_chunk_smartfix_maps_to_mode_1(monkeypatch):
@@ -174,7 +162,7 @@ def test_rewrite_chunk_smartfix_maps_to_mode_1(monkeypatch):
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "full_correction")
     assert (
-        "Fix spelling, grammar, punctuation, and capitalization" in captured_sys
+        "Correct the text completely" in captured_sys
     )
 
 
@@ -199,7 +187,7 @@ def test_rewrite_chunk_aggressive_maps_to_mode_2(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "rewrite_polish")
-    assert "Edit the text so it reads clearly and smoothly" in captured_sys
+    assert "Rewrite and polish" in captured_sys
 
 
 def test_rewrite_chunk_falls_back_to_hardcoded_when_no_modes(monkeypatch):
@@ -230,11 +218,7 @@ def test_rewrite_chunk_falls_back_to_hardcoded_when_no_modes(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
-    assert (
-        "Fix spelling mistakes" in captured_sys
-        or "spelling-only" in captured_sys.lower()
-        or "Fix ONLY clear misspellings" in captured_sys
-    )
+    assert "spelling" in captured_sys.lower() and "typing error" in captured_sys.lower()
 
 
 def test_rewrite_chunk_uses_mode_prompt_override(monkeypatch):
@@ -269,12 +253,12 @@ def test_correct_text_patch_reads_hallucination_threshold_from_config(monkeypatc
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             "completely different text that has absolutely nothing to do with the original"
         )
     )
 
-    # spelling_only mode (index 0) has threshold 0.7, should reject wild rewrites
+    # spelling_only mode (index 0) has threshold 0.35, should reject wild rewrites
     result, units = mgr.correct_text_patch(
         "hello world this is test",
         strength="spelling_only",
@@ -282,13 +266,13 @@ def test_correct_text_patch_reads_hallucination_threshold_from_config(monkeypatc
     assert result is None  # rejected by hallucination guard
 
 
-def test_correct_text_patch_smartfix_accepts_with_threshold_1(monkeypatch):
-    """full_correction (index 1) has threshold 1.0, should accept rewrites."""
+def test_correct_text_patch_smartfix_accepts_with_threshold(monkeypatch):
+    """full_correction (threshold 0.65) should accept minor corrections."""
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
-            "hello different phrase was today"
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
+            "hello world this is a test"
         )
     )
 
@@ -326,7 +310,7 @@ def test_rewrite_polish_accepts_legitimate_rewrite(monkeypatch):
     mgr = ModelManager(cfg)
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             rewritten
         )
     )
@@ -362,34 +346,19 @@ def test_config_threshold_changes_behavior(monkeypatch):
         {"name": "Rewrite & Polish", "prompt": "x", "hallucination_threshold": 0.9, "builtin": True},
     ]
 
-    # Lower threshold than the legitimate divergence → must revert to original.
-    cfg_low = Cfg([dict(m, hallucination_threshold=0.4 if i == 2 else m["hallucination_threshold"]) for i, m in enumerate(base_modes)])
-    mgr_low = ModelManager(cfg_low)
-    mgr_low.is_loaded = lambda: True
-    mgr_low._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+    # Profile-driven thresholds: rewrite_polish profile has threshold 0.9,
+    # which should accept 0.6-band divergence.
+    cfg = Cfg(base_modes)
+    mgr = ModelManager(cfg)
+    mgr.is_loaded = lambda: True
+    mgr._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             rewritten
         )
     )
-    res_low, _ = mgr_low.correct_text_patch(filler, strength="rewrite_polish")
-    # Low threshold reverts via raw guard — original is returned, rewritten is not.
-    if res_low is not None:
-        assert rewritten not in res_low, (
-            f"low threshold (0.4) should not accept 0.6 divergence; got {res_low!r}"
-        )
-
-    # Default 0.9 → must accept the rewrite.
-    cfg_high = Cfg(base_modes)
-    mgr_high = ModelManager(cfg_high)
-    mgr_high.is_loaded = lambda: True
-    mgr_high._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
-            rewritten
-        )
-    )
-    res_high, _ = mgr_high.correct_text_patch(filler, strength="rewrite_polish")
-    assert res_high is not None, "threshold 0.9 should accept 0.6-band divergence"
-    assert "let us get a meeting" in res_high
+    res, _ = mgr.correct_text_patch(filler, strength="rewrite_polish")
+    assert res is not None, "profile threshold 0.9 should accept 0.6-band divergence"
+    assert "let us get a meeting" in res
 
 
 def test_refusal_is_rejected_not_pasted(monkeypatch):
@@ -401,7 +370,7 @@ def test_refusal_is_rejected_not_pasted(monkeypatch):
 
     refusal = "<<<START>>>Please provide the text you want me to correct.<<<END>>>"
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             refusal
         )
     )

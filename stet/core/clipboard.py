@@ -283,8 +283,8 @@ def _read_selection_uia() -> str | None:
         return None
 
     co_init = False
-    # COINIT_APARTMENTTHREADED = 2
-    hr_init = ctypes.windll.ole32.CoInitializeEx(None, 2)
+    # COINIT_MULTITHREADED = 0
+    hr_init = ctypes.windll.ole32.CoInitializeEx(None, 0)
     if hr_init == 0 or hr_init == 1:
         co_init = True
 

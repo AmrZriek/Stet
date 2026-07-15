@@ -639,10 +639,6 @@ QTextEdit#corrEdit {
     font-size: 14px;
     line-height: 1.6;
 }
-QWidget#chatPanelContainer {
-    background: transparent;
-    border: none;
-}
 QScrollArea#chatScrollArea {
     background: transparent;
     border: none;

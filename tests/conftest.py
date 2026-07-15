@@ -18,14 +18,15 @@ if str(ROOT) not in sys.path:
 
 
 STRENGTH_KEYWORDS = {
-    "spelling_only": ["spelling mistakes", "spelling-only", "Spelling Only"],
-    "rewrite_polish": ["clearly and smoothly", "expert editor", "Improve clarity"],
+    "spelling_only": ["Correct every clear spelling", "spelling or typing error", "Spelling Only"],
+    "full_correction": ["Correct the text completely", "full correction", "Full Correction"],
+    "rewrite_polish": ["Rewrite and polish", "rewrite and polish", "Rewrite & Polish"],
 }
 
 MOCK_STRENGTH_RESPONSES = {
-    "spelling_only": "<<<START>>>Teh project recieved the update.<<<END>>>",
-    "full_correction": "<<<START>>>The project received the update.<<<END>>>",
-    "rewrite_polish": "<<<START>>>Project update received successfully.<<<END>>>",
+    "spelling_only": "Teh project recieved the update.",
+    "full_correction": "The project received the update.",
+    "rewrite_polish": "Project update received successfully.",
 }
 
 
@@ -33,10 +34,10 @@ def _detect_strength_from_messages(messages: list) -> str:
     """Detect correction strength from the system message in a chat payload."""
     for msg in messages:
         if msg.get("role") == "system":
-            content = msg.get("content", "")
+            content = msg.get("content", "").lower()
             for strength, keywords in STRENGTH_KEYWORDS.items():
                 for kw in keywords:
-                    if kw in content:
+                    if kw.lower() in content:
                         return strength
             return "full_correction"
     return "full_correction"
@@ -77,7 +78,7 @@ def mock_llm_post(monkeypatch):
             messages = json_data.get("messages", [])
             strength = _detect_strength_from_messages(messages)
             content = MOCK_STRENGTH_RESPONSES.get(
-                strength, "<<<START>>>Mocked correction<<<END>>>"
+                strength, "Mocked correction"
             )
             return MockResponse({"choices": [{"message": {"content": content}}]})
         return original_post(self, url, *args, **kwargs)

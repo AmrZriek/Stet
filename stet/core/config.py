@@ -35,11 +35,11 @@ class ConfigManager:
             except Exception as e:
                 log(f"Config load error: {e}")
 
-        # Migrate Spelling Only threshold from legacy values (0.4, 0.55) to 0.7
+        # Migrate Spelling Only threshold from legacy values (0.4, 0.55) to 0.35
         modes = cfg.get("correction_modes", [])
         if modes and len(modes) > 0 and isinstance(modes[0], dict):
             if modes[0].get("hallucination_threshold") in (0.4, 0.55):
-                modes[0]["hallucination_threshold"] = 0.7
+                modes[0]["hallucination_threshold"] = 0.35
                 self._needs_save = True
 
         # Migrate legacy model keys if chat_model_path is not in saved configuration
@@ -182,7 +182,18 @@ class ConfigManager:
         if len(modes) > 2 and modes[2].get("prompt") == _OLD_REWRITE_POLISH_MODE_PROMPT:
             modes[2]["prompt"] = DEFAULT_CONFIG["correction_modes"][2]["prompt"]
             self._needs_save = True
-
+        # Update all three built-in prompts if the old strict Spelling Only one is detected
+        _OLD_SPELLING_ONLY_PROMPT_PREFIX = "Fix spelling mistakes. Change nothing else."
+        _OLD_SPELLING_ONLY_PROMPT_PREFIX_2 = "You are a precise spellchecker."
+        if len(modes) > 0 and (
+            modes[0].get("prompt", "").startswith(_OLD_SPELLING_ONLY_PROMPT_PREFIX)
+            or modes[0].get("prompt", "").startswith(_OLD_SPELLING_ONLY_PROMPT_PREFIX_2)
+        ):
+            for i, m in enumerate(modes[:3]):
+                if i < len(DEFAULT_CONFIG["correction_modes"]):
+                    m["prompt"] = DEFAULT_CONFIG["correction_modes"][i]["prompt"]
+            self._needs_save = True
+            
         # Ensure all custom mode entries (index 3+) have a "name" field.
         # Needed for configs created before the multi-custom-mode feature.
         for i, m in enumerate(modes[3:], start=3):

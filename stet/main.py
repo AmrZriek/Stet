@@ -72,14 +72,16 @@ def main():
         # Unblock all files in the application directory on Windows to prevent SmartScreen/Mark of the Web
         # blocks on updater executables or download helper scripts.
         try:
-            _boot_log(f"[BOOT] Unblocking files in directory {_SCRIPT_DIR}...")
-            for root, _, files in os.walk(str(_SCRIPT_DIR)):
-                for file in files:
-                    full_path = os.path.join(root, file)
-                    try:
-                        os.remove(f"{full_path}:Zone.Identifier")
-                    except OSError:
-                        pass
+            _boot_log(f"[BOOT] Starting background unblock of files in directory {_SCRIPT_DIR}...")
+            def _unblock_worker():
+                for root, _, files in os.walk(str(_SCRIPT_DIR)):
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        try:
+                            os.remove(f"{full_path}:Zone.Identifier")
+                        except OSError:
+                            pass
+            threading.Thread(target=_unblock_worker, daemon=True).start()
         except Exception as _e:
             _boot_log(f"[BOOT] Failed to unblock files: {_e}")
 

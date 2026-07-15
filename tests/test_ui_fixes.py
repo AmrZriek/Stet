@@ -222,9 +222,9 @@ def test_settings_save_does_not_write_removed_global_profile_controls(qapp):
 
 
 def test_settings_scroll_areas_keep_visible_right_gutter(qapp):
-    """Each settings page should keep content padding while shifting the scrollbar farther outward."""
+    """Settings pages have adequate right gutter and allow dynamic scaling."""
     from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QScrollArea
+    from PyQt6.QtWidgets import QComboBox, QPushButton, QScrollArea
     from stet.ui.settings import SettingsDialog
 
     cfg = _make_cfg({})
@@ -237,9 +237,24 @@ def test_settings_scroll_areas_keep_visible_right_gutter(qapp):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn,
             Qt.ScrollBarPolicy.ScrollBarAsNeeded,
         )
+        # Inner form must have right margin for visual gutter
         assert scroll_area.widget().layout().contentsMargins().right() >= 20
         assert scroll_area.viewportMargins().right() == 0
+        # Inner widget must allow shrinking to any viewport width
+        assert scroll_area.widget().minimumWidth() == 0
     assert dlg.stack.parentWidget().layout().contentsMargins().right() == 0
+    # QComboBox must not auto-size to content (prevents overflow with long paths)
+    about_page = dlg.stack.widget(0)
+    for combo in about_page.findChildren(QComboBox):
+        assert combo.sizeAdjustPolicy() == (
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+    # About page buttons should not have rigid minimumWidth that prevents scaling
+    for btn in about_page.findChildren(QPushButton):
+        assert btn.minimumWidth() <= 100, (
+            f"Button '{btn.text()}' has minimumWidth {btn.minimumWidth()} "
+            "which may prevent dynamic scaling"
+        )
     dlg.close()
 
 
@@ -299,7 +314,7 @@ def test_conversation_mode_preserves_previous_chat_turns(qtbot, monkeypatch):
     win._on_chat_token("Second response")
     win._on_chat_done("Second response")
 
-    transcript = win._chat_transcript_text()
+    transcript = win._chat_transcript_html()
     preview = win.corr_edit.toPlainText()
     assert "Make it clearer" in transcript
     assert "First response" in transcript
@@ -333,7 +348,7 @@ def test_conversation_done_uses_stream_buffer_when_done_payload_empty(qtbot, mon
     win._on_chat_token("Buffered answer")
     win._on_chat_done("")
 
-    transcript = win._chat_transcript_text()
+    transcript = win._chat_transcript_html()
     assert "Rewrite this" in transcript
     assert "Buffered answer" in transcript
     assert win.corrected == "Buffered answer"
@@ -363,7 +378,7 @@ def test_single_chat_mode_replaces_view_with_final_diff(qtbot, monkeypatch):
     win._on_chat_done("Final rewrite")
 
     rendered = win.corr_edit.toPlainText()
-    transcript = win._chat_transcript_text()
+    transcript = win._chat_transcript_html()
     assert "Final rewrite" in rendered
     assert "Rewrite this" not in rendered
     assert "Rewrite this" in transcript
@@ -414,7 +429,7 @@ def test_template_apply_clears_chat_ui(qtbot, monkeypatch):
     win._add_chat_bubble("user", "Old Chat History")
     win._apply_template("Make it polite")
     
-    transcript = win._chat_transcript_text()
+    transcript = win._chat_transcript_html()
     preview = win.corr_edit.toPlainText()
     assert "Old Chat History" not in transcript, "Chat transcript should be cleared before template chat is added"
     assert "Old Chat History" not in preview, "Correction preview should not hold chat history"
@@ -469,7 +484,7 @@ def test_template_chat_uses_original_text_not_current_correction(qtbot, monkeypa
     first_user_message = win.chat_history[1]["content"]
     assert "Original selected text." in first_user_message
     assert "Previously edited text." not in first_user_message
-    assert "Old Chat History" not in win._chat_transcript_text()
+    assert "Old Chat History" not in win._chat_transcript_html()
     assert "Make it polite" in win.corr_edit.toPlainText()
     win.close()
 

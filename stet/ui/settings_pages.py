@@ -50,6 +50,7 @@ def make_scrollable_page(title_str, page, add_to_stack=True):
     scroll.setFrameShape(QFrame.Shape.NoFrame)
 
     inner = QWidget()
+    inner.setMinimumWidth(0)
     form = QVBoxLayout(inner)
     form.setAlignment(Qt.AlignmentFlag.AlignTop)
     form.setContentsMargins(0, 0, 32, 0)
@@ -118,6 +119,10 @@ class ServerPage(QWidget):
         form.addLayout(self.dialog._field_group("Model Weights (.gguf)", mod_w))
 
         self.dialog.recent_combo = QComboBox()
+        self.dialog.recent_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.dialog.recent_combo.setMinimumContentsLength(10)
         self.dialog.recent_combo.currentTextChanged.connect(
             lambda t: self.dialog.model_edit.setText(t) if t else None
         )
@@ -148,7 +153,6 @@ class ServerPage(QWidget):
 
         self.dialog.update_btn = QPushButton(self.dialog._app_update_label)
         self.dialog.update_btn.setObjectName("ghost")
-        self.dialog.update_btn.setMinimumWidth(180)
         self.dialog.update_btn.clicked.connect(self.dialog._run_app_update_action)
 
         update_row = QHBoxLayout()
@@ -177,7 +181,6 @@ class ServerPage(QWidget):
 
         btn_donate = QPushButton("Support Stet")
         btn_donate.setObjectName("donateBtn")
-        btn_donate.setMinimumWidth(180)
         import webbrowser
         btn_donate.clicked.connect(lambda: webbrowser.open("https://ko-fi.com/amrzriek"))
 

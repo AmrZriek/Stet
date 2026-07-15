@@ -74,6 +74,9 @@ class FlowLayout(QLayout):
     def minimumSize(self):
         size = QSize()
         for item in self._items:
+            wid = item.widget()
+            if wid and not wid.isVisible():
+                continue
             size = size.expandedTo(item.minimumSize())
         m = self.contentsMargins()
         size += QSize(m.left() + m.right(), m.top() + m.bottom())

@@ -243,6 +243,16 @@ def test_gpu_fallback_detection_logging(monkeypatch, tmp_path):
 
     monkeypatch.setattr(builtins, "open", mock_open)
 
+    # Mock fallback auto-detection so the .exe guard (line 471) doesn't
+    # cause a spurious failure when no real binary is present (e.g. CI).
+    # The guard correctly rejects __file__ because it ends in .py, then
+    # falls back to _find_shipped_llama_server — this mock ensures the
+    # fallback returns a usable path in all environments.
+    monkeypatch.setattr(
+        "stet.llm.model_manager._find_shipped_llama_server",
+        lambda: __file__,
+    )
+
     # Use existing files for path checks
     cfg.set("model_path", __file__)
     cfg.set("llama_server_path", __file__)

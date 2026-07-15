@@ -7,19 +7,15 @@ _SENTENCE_REWRITE_PROMPT = DEFAULT_CONFIG["correction_modes"][1]["prompt"]
 _SENTENCE_REWRITE_PROMPT_AGGRESSIVE = DEFAULT_CONFIG["correction_modes"][2]["prompt"]
 
 
-def test_conservative_prompt_has_fewshot():
-    # Does the conservative prompt contain any <<<START>>> examples?
-    assert "<<<START>>>" in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE
-    assert "EXAMPLE" in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE
+def test_conservative_prompt_has_core_instruction():
+    # The conservative prompt should describe the spelling-only task clearly
+    assert "spelling" in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE.lower()
+    assert "typing error" in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE.lower()
 
 
-def test_conservative_prompt_abstract_terms_count():
+def test_conservative_prompt_preservation_rule():
     assert (
-        "Fix spelling mistakes. Change nothing else."
-        in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE
-    )
-    assert (
-        "Copy punctuation, capitalization, grammar, word order, line breaks, and spacing exactly as given."
+        "Preserve every other character exactly"
         in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE
     )
 
@@ -28,8 +24,7 @@ def test_streaming_conservative_rules_differ_from_patch():
     import inspect
 
     source = inspect.getsource(CorrectionWindow._start_streaming_correction)
-    assert "<<<TEXT>>>" in source
-    assert "<<<START>>>" in _SENTENCE_REWRITE_PROMPT_CONSERVATIVE
+    assert "CONTENT_BEGIN" in source
 
 
 def test_prompt_word_count_budget():
@@ -37,15 +32,14 @@ def test_prompt_word_count_budget():
     assert words < 350
 
 
-def test_smartfix_and_aggressive_prompts_are_marker_safe():
+def test_smartfix_and_aggressive_prompts_are_instruction_safe():
     for prompt in (_SENTENCE_REWRITE_PROMPT, _SENTENCE_REWRITE_PROMPT_AGGRESSIVE):
-        assert "<<<START>>>" in prompt
-        assert "<<<END>>>" in prompt
-        assert "output" in prompt.lower()
+        # Prompts should clearly state the correction task
+        assert "correct" in prompt.lower() or "rewrite" in prompt.lower()
 
 
-def test_smartfix_prompt_adds_missing_terminal_punctuation():
-    assert "Add missing terminal punctuation" in _SENTENCE_REWRITE_PROMPT
+def test_smartfix_prompt_preserves_author():
+    assert "author" in _SENTENCE_REWRITE_PROMPT.lower()
 
 
 def test_prompts_treat_repetition_as_user_content():
@@ -53,17 +47,14 @@ def test_prompts_treat_repetition_as_user_content():
         _SENTENCE_REWRITE_PROMPT_CONSERVATIVE,
         _SENTENCE_REWRITE_PROMPT,
     ):
-        assert "repeated words" in prompt.lower()
-        assert "repeated sentences" in prompt.lower()
+        # New prompts use "repetition" as a preservation concept
+        assert "repetition" in prompt.lower() or "repeated" in prompt.lower()
 
 
 def test_aggressive_prompt_allows_clarity_edits_without_value_changes():
-    assert "reads clearly and smoothly" in _SENTENCE_REWRITE_PROMPT_AGGRESSIVE
-    assert (
-        "Keep every fact, claim, name, and number exactly as given. Invent nothing."
-        in _SENTENCE_REWRITE_PROMPT_AGGRESSIVE
-    )
-    assert "OUTPUT" in _SENTENCE_REWRITE_PROMPT_AGGRESSIVE
+    assert "Rewrite and polish" in _SENTENCE_REWRITE_PROMPT_AGGRESSIVE
+    assert "factual claims" in _SENTENCE_REWRITE_PROMPT_AGGRESSIVE.lower()
+    assert "Do not invent" in _SENTENCE_REWRITE_PROMPT_AGGRESSIVE
 
 
 def test_apply_hunk_guard():
@@ -72,6 +63,14 @@ def test_apply_hunk_guard():
     # Mode 0: Spelling only. Small edits accepted, large edits/deletes/inserts rejected.
     # Typos (edit distance <= 2)
     assert apply_hunk_guard("received", "recieved", 0) == "recieved"
+    # Proper noun / brand casing changes accepted
+    assert apply_hunk_guard("iphone", "iPhone", 0) == "iPhone"
+    assert apply_hunk_guard("antigravbity", "Antigravity", 0) == "Antigravity"
+    # Contractions accepted
+    assert apply_hunk_guard("cant", "can't", 0) == "can't"
+    # General punctuation changes / removals rejected
+    assert apply_hunk_guard("UAE.", "UAE", 0) == "UAE."
+    assert apply_hunk_guard("yesterday.", "yesterday", 0) == "yesterday."
     # Large replacements rejected (keeps original)
     assert apply_hunk_guard("hello", "goodbye", 0) == "hello"
     # Deletes rejected (keeps original)
@@ -94,6 +93,28 @@ def test_apply_hunk_guard():
     assert apply_hunk_guard("hello world", "hi world", 2) == "hi world"
     # Extreme rewrite rejected
     assert apply_hunk_guard("hello world", "completely different text here", 2) == "hello world"
+
+
+def test_apply_hunk_guard_rejects_sentinel_deletion():
+    """Hunk guard must never accept a delete op that removes a sentinel
+    (__STET_PROTECTED_1__, __STET_PROTECTED_2__, etc.) — these are masked
+    URLs/paths that must survive.
+    Mode 1 (Full Correction) uses token-level hunk guard where sentinel
+    protection applies. Mode 2 (Rewrite) uses character-level ratio guard
+    and takes a different code path.
+    """
+    from stet.core.text_utils import apply_hunk_guard
+
+    # Mode 1 (Full Correction): single-word delete is normally accepted,
+    # but a sentinel-containing hunk must be rejected.
+    sentinel_text = "visit __STET_PROTECTED_1__ today"
+    assert apply_hunk_guard(sentinel_text, "visit today", 1) == sentinel_text
+
+    # Non-sentinel single-word delete in mode 1 should still be accepted.
+    assert apply_hunk_guard("hello world", "hello", 1) == "hello"
+
+    # Sentinel in a replace op should also be preserved (mode 1).
+    assert apply_hunk_guard("see __STET_PROTECTED_1__ now", "see now", 1) == "see __STET_PROTECTED_1__ now"
 
 
 def test_gemma_model_messages_format(monkeypatch):
@@ -136,15 +157,14 @@ def test_gemma_model_messages_format(monkeypatch):
             pass
 
     monkeypatch.setattr("requests.Session", MockSession)
-    mgr._rewrite_sentence_chunk("hello world", None, 1, 1, "smart_fix")
+    mgr._rewrite_sentence_chunk("hello world", None, 1, 1, "full_correction")
 
     assert captured_payload is not None
     messages = captured_payload["messages"]
     # For Gemma, it should merge system and user prompt into a single user message
-    assert len(messages) == 2
+    # No assistant prefill — just the user message
+    assert len(messages) == 1
     assert messages[0]["role"] == "user"
-    assert messages[1]["role"] == "assistant"
-    assert messages[1]["content"] == "<<<START>>>\n"
-    assert "Fix spelling, grammar, punctuation, and capitalization" in messages[0]["content"]
+    assert "Correct the text completely" in messages[0]["content"]
     assert "hello world" in messages[0]["content"]
 

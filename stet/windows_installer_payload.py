@@ -161,61 +161,6 @@ def create_shortcut(
     )
 
 
-def _browse_for_folder(default_path: str) -> str | None:
-    """Show a native Windows folder browser dialog (SHBrowseForFolderW).
-
-    Returns the selected path as a string, or None if cancelled.
-    """
-    try:
-        ole32 = ctypes.windll.ole32
-        ole32.CoInitialize(None)
-        shell32 = ctypes.windll.shell32
-
-        # SHBrowseForFolderW returns a pointer (PIDLIST_ABSOLUTE).
-        # Without setting restype, ctypes defaults to c_int which truncates
-        # 64-bit pointers, causing SHGetPathFromIDListW to receive a bad
-        # address and fail — triggering the Qt fallback dialog.
-        shell32.SHBrowseForFolderW.restype = ctypes.c_void_p
-
-        class BROWSEINFOW(ctypes.Structure):
-            _fields_ = [
-                ("hwndOwner", ctypes.wintypes.HWND),
-                ("pidlRoot", ctypes.c_void_p),
-                ("pszDisplayName", ctypes.c_wchar_p),
-                ("lpszTitle", ctypes.c_wchar_p),
-                ("ulFlags", ctypes.c_uint),
-                ("lpfn", ctypes.c_void_p),
-                ("lParam", ctypes.c_long),
-                ("iImage", ctypes.c_int),
-            ]
-
-        display_name = ctypes.create_unicode_buffer(260)
-        bi = BROWSEINFOW()
-        bi.hwndOwner = None
-        bi.pidlRoot = None
-        bi.pszDisplayName = ctypes.cast(display_name, ctypes.c_wchar_p)
-        bi.lpszTitle = (
-            "Choose the folder where Stet will be installed.\n\n"
-            "A 'Stet' subfolder will be created inside the folder you select."
-        )
-        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI
-        bi.lpfn = None
-        bi.lParam = 0
-        bi.iImage = 0
-
-        pidl = shell32.SHBrowseForFolderW(ctypes.byref(bi))
-        if not pidl:
-            return None
-
-        path_buf = ctypes.create_unicode_buffer(260)
-        if shell32.SHGetPathFromIDListW(pidl, path_buf):
-            ole32.CoTaskMemFree(pidl)
-            return str(Path(path_buf.value) / "Stet")
-        else:
-            ole32.CoTaskMemFree(pidl)
-            return None
-    except Exception:
-        return None
 
 
 # ── Background installation worker ────────────────────────────────────────────
@@ -947,9 +892,6 @@ class StetInstaller(QWizard):
                 log(f"Launch failed: {exc}")
 
 
-# ── Dialog accepted constant (avoid importing QDialog) ────────────────────────
-
-QDialog_Accepted = 1
 
 
 # ── Styling / icon helpers ─────────────────────────────────────────────────────

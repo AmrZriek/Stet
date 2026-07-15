@@ -38,7 +38,7 @@ class StreamWorker(QThread):
                         break
                     if not raw:
                         continue
-                    line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                    line = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
                     if not line.startswith("data: "):
                         continue
                     data = line[6:]

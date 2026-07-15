@@ -44,20 +44,6 @@ class TestStrengthFromLabel:
         assert CorrectionWindow._strength_from_label(label) == expected
 
 
-class TestStrengthIndex:
-    """CorrectionWindow._strength_index maps strength to combo box index."""
-
-    @pytest.mark.parametrize(
-        "strength, index",
-        [
-            ("spelling_only", 0),
-            ("full_correction", 1),
-            ("rewrite_polish", 2),
-        ],
-    )
-    def test_index(self, strength, index):
-        assert CorrectionWindow._strength_index(strength) == index
-
 
 def test_send_button_enabled_state(qtbot, monkeypatch):
     from stet.ui.main_window import CorrectionWindow

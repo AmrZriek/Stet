@@ -60,17 +60,20 @@ def test_tray_unload_model(mock_app):
 
 def test_dynamic_menu_status_ac(mock_app):
     """_on_ac_status updates self._llm_menu_action text and status label."""
+    mock_app.cfg.set("model_path", "C:/path/to/my-awesome-model.gguf")
     mock_app._on_ac_status("Ready")
+    # Menu title shows only the short status; header keeps the model name.
     mock_app._llm_menu_action.setText.assert_called_with("Model: Ready")
-    mock_app._status_lbl.setText.assert_called_with("● AC: Ready")
+    mock_app._status_lbl.setText.assert_called_with("● AC: Ready — my-awesome-model")
 
 
 def test_dynamic_menu_status_chat_separate(mock_app):
     """_on_chat_status sets icon color and updates chat status label if separate model is used."""
     mock_app.cfg.set("chat_use_separate_model", True)
+    mock_app.cfg.set("chat_model_path", "C:/path/to/my-chat-model.gguf")
     mock_app._on_chat_status("Ready")
     mock_app._set_tray_icon.assert_called_with("#a78bfa")
-    mock_app._chat_status_lbl.setText.assert_called_with("● Chat: Ready")
+    mock_app._chat_status_lbl.setText.assert_called_with("● Chat: Ready — my-chat-model")
 
 
 def test_dynamic_menu_status_chat_same(mock_app):

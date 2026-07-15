@@ -16,8 +16,12 @@ from stet.constants import DEFAULT_CONFIG, LOG_FILE, WINDOWS
 from stet.core.config import ConfigManager
 from stet.core.text_utils import (
     _HALLUCINATION_THRESHOLD_CONSERVATIVE,
+    _INLINE_HAZARD_RE,
+    PROFILES,
+    CorrectionProfile,
     _apply_post_fixes,
     _chunk_text_by_sentences,
+    _dict_prepass,
     _extract_content_from_response,
     _extract_rewritten_sentence,
     _hallucination_ratio,
@@ -51,16 +55,7 @@ _STRENGTH_TO_MODE_INDEX = {
     "rewrite_polish": 2,
 }
 
-_INLINE_HAZARD_RE = re.compile(
-    r'\b(?:https?://|www\.)\S+\b'  # URLs
-    r'|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'  # Emails
-    r'|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute backslash paths
-    r'|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute slash paths
-    r'|(?<=[\s"\'(])/[/\w.-]+/[/\w.-]+\b'  # Unix absolute paths
-    r'|(?<=[\s"\'(])\.\.?/[/\w.-]+/[/\w.-]+\b'  # Unix relative paths
-    r'|(?<=[\s"\'(])\.\.?\\[\\\w.-]+\\[\\\w.-]+\b'  # Windows relative backslash paths
-)
-_INLINE_SENTINEL_RE = re.compile(r"⟦U\d+⟧")
+_INLINE_SENTINEL_RE = re.compile(r"__STET_PROTECTED_\d+__")
 
 
 def _resolve_mode_index(strength: str, modes: list) -> int:
@@ -288,7 +283,10 @@ class ModelManager(QObject):
         modes = self.cfg.get("correction_modes", [])
         mode_index = _resolve_mode_index(strength, modes)
         if mode_prompt_override:
-            system = _wrap_correction_prompt(mode_prompt_override, mode_index)
+            # Template prompts are self-contained — skip the structural wrapper.
+            system = _wrap_correction_prompt(
+                mode_prompt_override, mode_index, prompt_is_complete=True,
+            )
         elif modes and mode_index < len(modes):
             system = _wrap_correction_prompt(modes[mode_index]["prompt"], mode_index)
         else:
@@ -312,24 +310,26 @@ class ModelManager(QObject):
 
         Warmup and real correction must share this path so llama-server prompt
         cache checkpoints match the first real request, including Gemma's
-        user-folded system prompt and assistant prefill.
+        user-folded system prompt.
+
+        Uses input-only delimiters (CONTENT_BEGIN / CONTENT_END).  The model's
+        response IS the corrected text — no output markers or assistant prefill
+        required.
         """
         system = self._correction_system_prompt(
             custom_sys,
             strength,
             mode_prompt_override,
         )
-        wrapped = f"<<<START>>>\n{chunk_text}\n<<<END>>>"
+        wrapped = f"CONTENT_BEGIN\n{chunk_text}\nCONTENT_END"
         model_name = Path(self.cfg.get(self.model_path_key, "")).name.lower()
         if "gemma" in model_name:
             return [
                 {"role": "user", "content": f"{system}\n\n{wrapped}"},
-                {"role": "assistant", "content": "<<<START>>>\n"},
             ]
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": wrapped},
-            {"role": "assistant", "content": "<<<START>>>\n"},
         ]
 
     def _warmup_prompt_cache(self) -> None:
@@ -657,7 +657,8 @@ class ModelManager(QObject):
             load_deadline = load_started_at + 180.0
             next_status_at = load_started_at + 15.0
             while time.monotonic() < load_deadline:
-                if self.server_process.poll() is not None:
+                _proc = self.server_process
+                if _proc is not None and _proc.poll() is not None:
                     # Dump server log into app_debug.log for easier diagnosis
                     try:
                         tail = LOG_FILE.read_text(encoding="utf-8", errors="replace")[
@@ -942,58 +943,46 @@ class ModelManager(QObject):
         has_windows_newlines = "\r\n" in text
         text = _normalize_newlines(text, use_windows_newlines=False)
 
-        # ── Phase 0: deterministic dict pre-pass (disabled) ────────────────
-        # Disabled: the LLM already corrects all typos in a single pass, making
-        # the ~4300-entry static typo dictionary redundant. The pre-pass also
-        # lacked a reliable [OK] confirmation mechanism, so it could never
-        # short-circuit the LLM call — every correction went to the model
-        # regardless. Keeping the code available but inactive for reference.
-        # pre_corrected, dict_fixes = _dict_prepass(text)
-        pre_corrected, dict_fixes = text, 0
+        # ── Pipeline profile ─────────────────────────────────────────────
+        # Templates (mode_prompt_override) use the permissive transform
+        # profile; built-in strengths use their named profile.
+        profile_name = "template_transform" if mode_prompt_override else strength
+        profile = PROFILES.get(profile_name, PROFILES["full_correction"])
+
+        # ── Phase 0: deterministic dict pre-pass ─────────────────────────
+        # For spelling-only, apply the ~4300-entry typo dictionary before
+        # the LLM so that common typos are guaranteed fixed even when the
+        # model is too small to catch them all.  The LLM still runs
+        # afterwards to catch unknown typos the dictionary missed.
+        if strength == "spelling_only":
+            pre_corrected, dict_fixes = _dict_prepass(text)
+            if dict_fixes > 0:
+                log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
+        else:
+            pre_corrected, dict_fixes = text, 0
         total_words = len(pre_corrected.split())
 
 
 
         # ── Phase 1: split into sentence units and rewrite in parallel ────
-        # 200-word cap produces paragraph-scale units. With --parallel 4 slots,
-        # up to 4 units run concurrently. Larger chunks reduce the number of
-        # redundant system-prompt evaluations (each chunk re-sends the full
-        # ~400-token prompt). Separator preserves inter-unit whitespace/newlines
-        # so reassembly is lossless.
-        
+        # Profile-driven chunking: each mode/template gets its own chunk size.
+        # With --parallel 4 slots, up to 4 units run concurrently.  Separator
+        # preserves inter-unit whitespace/newlines so reassembly is lossless.
+
         # Inline masking for URLs, emails, and file paths.
         masked_entities = []
         def mask_repl(match):
             idx = len(masked_entities) + 1
             masked_entities.append(match.group(0))
-            return f"⟦U{idx}⟧"
+            return f"__STET_PROTECTED_{idx}__"
 
         pre_corrected = _INLINE_HAZARD_RE.sub(mask_repl, pre_corrected)
-        
-        is_rewrite_polish = (strength in {"rewrite_polish"})
-        if is_rewrite_polish:
-            chunks = []
-            parts = re.split(r"(\r?\n)", pre_corrected)
-            for i in range(0, len(parts), 2):
-                chunk = parts[i]
-                sep = parts[i+1] if i+1 < len(parts) else ""
-                if len(chunk.split()) > 150:
-                    sub_chunks = _chunk_text_by_sentences(chunk, 150)
-                    if sub_chunks:
-                        last_c, _ = sub_chunks[-1]
-                        sub_chunks[-1] = (last_c, sep)
-                        chunks.extend(sub_chunks)
-                else:
-                    chunks.append((chunk, sep))
-        else:
-            chunk_size = self._get_param("patch_chunk_size", 60)
-            chunks = _chunk_text_by_sentences(pre_corrected, chunk_size)
-        # if dict_fixes > 0:
-        #     log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
+
+        chunks = _chunk_text_by_sentences(pre_corrected, profile.chunk_words)
         if len(chunks) > 1:
             log(
                 f"[{self.label}] Patch: {len(chunks)} sentence units "
-                f"({total_words} words)"
+                f"({total_words} words) profile={profile_name}"
             )
 
         corrected_parts: list[tuple[str, str]] = [("", "")] * len(chunks)
@@ -1001,164 +990,156 @@ class ModelManager(QObject):
         any_preserved = False
 
         from stet.core.text_utils import looks_like_prose
-        
-        modes = self.cfg.get("correction_modes", [])
-        mode_index = _resolve_mode_index(strength, modes)
 
-        # Config-driven threshold (single source of truth) for the
-        # rewrite-mode guards (raw + hunk). Falls back to the legacy dict so
-        # older configs still work.
-        threshold = (
-            modes[mode_index].get("hallucination_threshold")
-            if mode_index < len(modes) and isinstance(modes[mode_index], dict)
-            else None
-        )
-        if threshold is None:
-            threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(strength, 1.0)
+        # Profile-driven threshold — the profile is the single source of truth
+        # for how much divergence each mode permits.
+        threshold = profile.hallucination_threshold
 
         max_workers = min(len(chunks), self._get_param("parallel", 4)) if chunks else 1
 
         shared_session = self._get_session()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {}
-                for idx, (chunk_text, sep) in enumerate(chunks):
-                    editable_text = _INLINE_SENTINEL_RE.sub(" ", chunk_text)
-                    if (
-                        not chunk_text.strip()
-                        or not editable_text.strip()
-                        or not looks_like_prose(editable_text)
-                        or not looks_like_prose(chunk_text)
-                    ):
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        try:
+            futures = {}
+            for idx, (chunk_text, sep) in enumerate(chunks):
+                editable_text = _INLINE_SENTINEL_RE.sub(" ", chunk_text)
+                if (
+                    not chunk_text.strip()
+                    or not editable_text.strip()
+                    or not looks_like_prose(editable_text)
+                    or not looks_like_prose(chunk_text)
+                ):
+                    corrected_parts[idx] = (chunk_text, sep)
+                    any_preserved = True
+                    continue
+
+                futures[executor.submit(
+                    self._rewrite_sentence_chunk,
+                    chunk_text,
+                    custom_sys,
+                    idx + 1,
+                    len(chunks),
+                    strength,
+                    cancel_event,
+                    mode_prompt_override,
+                    shared_session,
+                    profile,
+                )] = (idx, chunk_text, sep)
+
+            remaining = list(futures.keys())
+            while remaining:
+                if cancel_event is not None and cancel_event.is_set():
+                    log(f"[{self.label}] Patch: cancelled mid-correction")
+                    return None, 0
+
+                done, _pending = concurrent.futures.wait(
+                    remaining,
+                    timeout=0.2,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+
+                for future in done:
+                    remaining.remove(future)
+                    idx, chunk_text, sep = futures[future]
+                    try:
+                        corrected = future.result()
+                    except Exception as e:
+                        log(f"[{self.label}] Patch: unit {idx + 1} exception: {e}")
+                        corrected = None
+
+                    if corrected is None:
+                        # Unit failed — keep original text for this unit.
                         corrected_parts[idx] = (chunk_text, sep)
-                        any_preserved = True
+                        if _INLINE_SENTINEL_RE.search(chunk_text):
+                            any_preserved = True
                         continue
 
-                    futures[executor.submit(
-                        self._rewrite_sentence_chunk,
-                        chunk_text,
-                        custom_sys,
-                        idx + 1,
-                        len(chunks),
-                        strength,
-                        cancel_event,
-                        mode_prompt_override,
-                        shared_session,
-                    )] = (idx, chunk_text, sep)
-
-                remaining = list(futures.keys())
-                while remaining:
-                    if cancel_event is not None and cancel_event.is_set():
-                        log(f"[{self.label}] Patch: cancelled mid-correction")
-                        return None, 0
-
-                    done, _pending = concurrent.futures.wait(
-                        remaining,
-                        timeout=0.2,
-                        return_when=concurrent.futures.FIRST_COMPLETED,
+                    corrected = _normalize_newlines(
+                        corrected, use_windows_newlines=False
                     )
 
-                    for future in done:
-                        remaining.remove(future)
-                        idx, chunk_text, sep = futures[future]
-                        try:
-                            corrected = future.result()
-                        except Exception as e:
-                            log(f"[{self.label}] Patch: unit {idx + 1} exception: {e}")
-                            corrected = None
-
-                        if corrected is None:
-                            # Unit failed — keep original text for this unit.
-                            corrected_parts[idx] = (chunk_text, sep)
-                            if _INLINE_SENTINEL_RE.search(chunk_text):
-                                any_preserved = True
-                            continue
-
-                        corrected = _normalize_newlines(
-                            corrected, use_windows_newlines=False
-                        )
-
-                        # Sentinel survival: every ⟦Ui⟧ in the original chunk
-                        # must survive verbatim in the corrected output. If a
-                        # small model drops or mangles a sentinel the chunk is
-                        # unusable because hazard unmasking will fail.
-                        _chunk_sentinels = _INLINE_SENTINEL_RE.findall(chunk_text)
-                        if _chunk_sentinels and not all(
-                            s in corrected for s in _chunk_sentinels
-                        ):
-                            # Try restoring mangled sentinels (⟦U1⟧ stripped to
-                            # [U1], "U1", ⟦u1⟧, etc.) before rejecting. A
-                            # successful recovery keeps the chunk usable; an
-                            # unrecoverable or fully-missing sentinel still
-                            # falls through to the rejection branch as before.
+                    # Sentinel survival: every __STET_PROTECTED_N__ in the
+                    # original chunk must survive in the same order with the
+                    # same count.  A model that duplicates, reorders, or drops
+                    # a sentinel would corrupt hazard unmasking.
+                    _chunk_sentinels = _INLINE_SENTINEL_RE.findall(chunk_text)
+                    if _chunk_sentinels:
+                        _found = _INLINE_SENTINEL_RE.findall(corrected)
+                        if _found != _chunk_sentinels:
+                            # Try restoring mangled sentinels before rejecting.
                             _recovered = recover_sentinels(corrected, _chunk_sentinels)
-                            if _recovered != corrected and all(
-                                s in _recovered for s in _chunk_sentinels
-                            ):
+                            _found_after = _INLINE_SENTINEL_RE.findall(_recovered)
+                            if _found_after == _chunk_sentinels:
                                 log(f"[{self.label}] Patch unit {idx + 1}: recovered mangled sentinel(s)")
                                 corrected = _recovered
                             else:
-                                log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost in correction")
+                                log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost or reordered")
                                 corrected_parts[idx] = (chunk_text, sep)
                                 any_preserved = True
                                 continue
 
-                        # Reject if raw output exceeds the (config-driven) hallucination threshold
-                        if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
-                            log(f"[{self.label}] Patch unit {idx + 1} rejected: raw hallucination ratio exceeds threshold")
-                            corrected = None
-                            corrected_parts[idx] = (chunk_text, sep)
-                            continue
+                    # Reject if raw output exceeds the (config-driven) hallucination threshold
+                    if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
+                        log(f"[{self.label}] Patch unit {idx + 1} rejected: raw hallucination ratio exceeds threshold")
+                        corrected = None
+                        corrected_parts[idx] = (chunk_text, sep)
+                        continue
 
-                        # Reject if the model refused or returned an empty edit
-                        # (marker-wrapped "Please provide text" type output). The
-                        # divergence guard cannot separate refusals from legit
-                        # rewrites — distributions overlap (refusal 0.58–0.87 vs
-                        # legit max ~0.687) — so use a dedicated detector.
-                        if _is_refusal_or_empty(corrected, chunk_text):
-                            log(f"[{self.label}] Patch unit {idx + 1} rejected: refusal/empty output from model")
-                            corrected_parts[idx] = (chunk_text, sep)
-                            continue
+                    # Reject if the model refused or returned an empty edit
+                    # (marker-wrapped "Please provide text" type output). The
+                    # divergence guard cannot separate refusals from legit
+                    # rewrites — distributions overlap (refusal 0.58–0.87 vs
+                    # legit max ~0.687) — so use a dedicated detector.
+                    if _is_refusal_or_empty(corrected, chunk_text):
+                        log(f"[{self.label}] Patch unit {idx + 1} rejected: refusal/empty output from model")
+                        corrected_parts[idx] = (chunk_text, sep)
+                        continue
 
-                        # Phase 2: hunk-level hallucination guard
+                    # Phase 2: hunk-level hallucination guard
+                    # Profile-driven: None disables the guard (for rewrite/template modes).
+                    if profile.hunk_guard_mode is not None:
                         from stet.core.text_utils import apply_hunk_guard
+                        guarded_corrected = apply_hunk_guard(chunk_text, corrected, profile.hunk_guard_mode, threshold=threshold)
+                    else:
+                        guarded_corrected = corrected
+                    if guarded_corrected != corrected:
+                        log(
+                            f"[{self.label}] Patch unit {idx + 1}: hunk-level "
+                            "hallucination guard reverted parts of the correction"
+                        )
+                    corrected = guarded_corrected
 
-                        guarded_corrected = apply_hunk_guard(chunk_text, corrected, mode_index, threshold=threshold)
-                        if guarded_corrected != corrected:
-                            log(
-                                f"[{self.label}] Patch unit {idx + 1}: hunk-level "
-                                "hallucination guard reverted parts of the correction"
-                            )
-                        corrected = guarded_corrected
+                    if not _post_splice_sanity(chunk_text, corrected, min_ratio=profile.min_word_ratio, max_ratio=profile.max_word_ratio):
+                        log(
+                            f"[{self.label}] Patch unit {idx + 1} rejected: "
+                            "post-splice sanity check failed"
+                        )
+                        corrected_parts[idx] = (chunk_text, sep)
+                        continue
 
-                        if not _post_splice_sanity(chunk_text, corrected):
-                            log(
-                                f"[{self.label}] Patch unit {idx + 1} rejected: "
-                                "post-splice sanity check failed"
-                            )
-                            corrected_parts[idx] = (chunk_text, sep)
-                            continue
+                    if strength in {
+                        "rewrite_polish",
+                    } and _loses_meaningful_repetition(
+                        chunk_text,
+                        corrected,
+                    ):
+                        log(
+                            f"[{self.label}] Patch unit {idx + 1}: repetition-loss "
+                            "in rewrite_polish mode — log only, accepting rewrite"
+                        )
 
-                        if strength in {
-                            "rewrite_polish",
-                        } and _loses_meaningful_repetition(
-                            chunk_text,
-                            corrected,
-                        ):
-                            log(
-                                f"[{self.label}] Patch unit {idx + 1}: repetition-loss "
-                                "in rewrite_polish mode — log only, accepting rewrite"
-                            )
+                    corrected_parts[idx] = (corrected, sep)
+                    any_success = True
 
-                        corrected_parts[idx] = (corrected, sep)
-                        any_success = True
-
+        finally:
+            executor.shutdown(wait=False)
         # NOTE: shared_session is the persistent session — intentionally not
         # closed here. close_session() handles lifecycle on shutdown.
 
         reassembled = "".join(part + sep for part, sep in corrected_parts)
         
         for i, entity in enumerate(masked_entities):
-            reassembled = reassembled.replace(f"⟦U{i+1}⟧", entity)
+            reassembled = reassembled.replace(f"__STET_PROTECTED_{i+1}__", entity)
 
         # If dict pre-pass changed nothing AND no unit ever succeeded, report
         # total failure so the caller falls back to streaming. Otherwise we
@@ -1194,6 +1175,7 @@ class ModelManager(QObject):
         cancel_event: threading.Event | None = None,
         mode_prompt_override: str | None = None,
         session: requests.Session | None = None,
+        profile: CorrectionProfile | None = None,
     ) -> str | None:
         """Rewrite one sentence unit end-to-end. Returns corrected text or None on failure.
 
@@ -1227,10 +1209,27 @@ class ModelManager(QObject):
         payload = {
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": self._get_param("temperature", 0.0),
-            "top_k": self._get_param("top_k", 1),
-            "top_p": self._get_param("top_p", 0.95),
-            "min_p": self._get_param("min_p", 0.05),
+            # Correction-specific sampling (deterministic).  _get_param prefixes
+            # keys with "chat_" when self.model_path_key == "chat_model_path",
+            # but the Chat instance's DEFAULT_CONFIG lacks chat_correction_*,
+            # so fallback to the base keys is transparent.  If chat_correction_*
+            # keys are ever added to the config, this will pick them up.
+            "temperature": self._get_param(
+                "correction_temperature",
+                self._get_param("temperature", 0.0),
+            ),
+            "top_k": self._get_param(
+                "correction_top_k",
+                self._get_param("top_k", 1),
+            ),
+            "top_p": self._get_param(
+                "correction_top_p",
+                self._get_param("top_p", 0.95),
+            ),
+            "min_p": self._get_param(
+                "correction_min_p",
+                self._get_param("min_p", 0.0),
+            ),
             "seed": self._get_param("seed", -1),
             "typical_p": self._get_param("typical_p", 1.0),
             "tfs_z": self._get_param("tfs_z", 1.0),
@@ -1243,7 +1242,7 @@ class ModelManager(QObject):
             "stream": False,
             "think": False,
             "cache_prompt": self._get_param("cache_prompt", True),
-            "stop": ["<<<END>>>"],
+            "stop": [],
         }
 
         if session is None:
@@ -1288,7 +1287,7 @@ class ModelManager(QObject):
         # session is always caller-owned (persistent) — never closed here.
         # Lifecycle is managed by close_session() at shutdown.
 
-        if finish_reason == "length" and "<<<END>>>" not in raw:
+        if finish_reason == "length":
             retry_tokens = min(int(max_tokens * 1.5), slot_limit - est_input_tokens - 64)
             if retry_tokens > max_tokens:
                 log(f"[{self.label}] rewrite unit {unit_idx} truncated — retrying with max_tokens={retry_tokens}")
@@ -1307,7 +1306,7 @@ class ModelManager(QObject):
                 except Exception as e:
                     log(f"[{self.label}] retry failed unit {unit_idx}: {e}")
                     return None
-            if finish_reason == "length" and "<<<END>>>" not in raw:
+            if finish_reason == "length":
                 log(f"[{self.label}] rewrite unit {unit_idx} still truncated after retry")
                 return None
 
@@ -1327,7 +1326,12 @@ class ModelManager(QObject):
 
         # Guard against LLM-introduced extra newlines (common with small models
         # that insert blank lines between lines that were single-spaced).
-        corrected = _normalize_chunk_newlines(chunk_text, corrected)
+        # Template/transform profiles need to keep generated newlines so that
+        # Notes Assistant bullets, headers, etc. survive post-processing.
+        allow_nl = profile.allow_new_newlines if profile else (mode_prompt_override is not None)
+        corrected = _normalize_chunk_newlines(
+            chunk_text, corrected, allow_newlines=allow_nl,
+        )
 
         # ── Per-chunk terminal-punctuation guard ──────────────────────
         # Only for single-chunk inputs: if the LLM drops trailing .!?,

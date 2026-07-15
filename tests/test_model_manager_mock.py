@@ -441,12 +441,12 @@ class TestWarmupPromptCache:
             sys_msg = payload["messages"][0]
             assert sys_msg["role"] == "system"
             assert len(sys_msg["content"]) > 50, "System prompt should be the real correction prompt"
-            # User message should contain the START/END markers
+            # User message should contain the input delimiters
             user_msg = payload["messages"][1]
             assert user_msg["role"] == "user"
-            assert "<<<START>>>" in user_msg["content"]
-            assert payload["messages"][2]["role"] == "assistant"
-            assert payload["messages"][2]["content"] == "<<<START>>>\n"
+            assert "CONTENT_BEGIN" in user_msg["content"]
+            # No assistant prefill — messages are [system, user] only
+            assert len(payload["messages"]) == 2
 
     def test_gemma_warmup_uses_real_correction_message_shape(self, monkeypatch):
         """Gemma warmup must match real correction prompts for cache hits."""
@@ -475,12 +475,11 @@ class TestWarmupPromptCache:
 
         assert len(captured_calls) == 1
         messages = captured_calls[0]["messages"]
-        assert len(messages) == 2
+        # Gemma: single user message with system folded in, no assistant prefill
+        assert len(messages) == 1
         assert messages[0]["role"] == "user"
-        assert "Fix spelling, grammar, punctuation, and capitalization" in messages[0]["content"]
-        assert "<<<START>>>\nwarmup\n<<<END>>>" in messages[0]["content"]
-        assert messages[1]["role"] == "assistant"
-        assert messages[1]["content"] == "<<<START>>>\n"
+        assert "Correct the text completely" in messages[0]["content"]
+        assert "CONTENT_BEGIN\nwarmup\nCONTENT_END" in messages[0]["content"]
 
     def test_swallows_exceptions(self, manager, monkeypatch):
         """A failed warmup must not raise — load must still complete."""
@@ -544,7 +543,7 @@ class TestPersistentSession:
         # Must return something different from the input so any_success=True.
         manager._rewrite_sentence_chunk = (
             lambda chunk_text, custom_sys, idx, total, strength,
-            cancel_event=None, mode_prompt_override=None, session=None: (
+            cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
                 "Hello world this is test."
             )
         )
@@ -569,7 +568,7 @@ class TestPersistentSession:
 
         manager._rewrite_sentence_chunk = (
             lambda chunk_text, custom_sys, idx, total, strength,
-            cancel_event=None, mode_prompt_override=None, session=None: (
+            cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
                 "Hello world this is test."
             )
         )
@@ -732,7 +731,7 @@ class TestTerminalPunctuationGuard:
         assert res == "Hello world"  # period stays dropped
 
     def test_rewrite_polish_paragraph_chunking_exceeding_max_words(self, manager):
-        """If a paragraph exceeds 150 words in rewrite_polish mode, it gets split at sentence boundaries."""
+        """If a paragraph exceeds 250 words in rewrite_polish mode, it gets split at sentence boundaries."""
         proc = MagicMock()
         proc.poll.return_value = None
         manager.server_process = proc
@@ -744,9 +743,10 @@ class TestTerminalPunctuationGuard:
 
         manager._rewrite_sentence_chunk = mock_rewrite
 
-        # 16 sentences, each 10 words, total 160 words without newlines.
+        # 30 sentences, each 10 words, total 300 words without newlines.
+        # Rewrite profile chunk_words=250, so this should split.
         sentence = "This is a sentence of ten words for testing this. "
-        long_paragraph = sentence * 16
+        long_paragraph = sentence * 30
 
         result, units = manager.correct_text_patch(long_paragraph, strength="rewrite_polish")
         assert units > 1
@@ -781,8 +781,9 @@ class TestModelManagerPrefixAndPayload:
 
     def test_rewrite_sentence_chunk_uses_config_parameters(self, cfg, monkeypatch):
         import requests
-        cfg.set("temperature", 0.25)
-        cfg.set("top_k", 5)
+        # Correction-specific params take precedence over general params
+        cfg.set("correction_temperature", 0.25)
+        cfg.set("correction_top_k", 5)
         cfg.set("repeat_penalty", 1.2)
 
         ac_manager = ModelManager(cfg, model_path_key="model_path")
@@ -791,7 +792,7 @@ class TestModelManagerPrefixAndPayload:
         def fake_post(self, url, json, *args, **kwargs):
             captured_payload["payload"] = json
             return MockResponse(
-                {"choices": [{"message": {"content": "<<<START>>>ok<<<END>>>"}}]}
+                {"choices": [{"message": {"content": "ok"}}]}
             )
 
         monkeypatch.setattr(requests.Session, "post", fake_post)

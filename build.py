@@ -418,7 +418,7 @@ def _updater_pyinstaller_cmd(version: str, artifacts_dir: Path) -> list:
 
 def _installer_pyinstaller_cmd(version: str, artifacts_dir: Path, portable_zip: Path) -> list:
     sep = os.pathsep
-    extra = [f"--add-data={portable_zip}{sep}."]
+    extra = [f"--add-data={portable_zip}{sep}.", "--hidden-import=stet.ui.downloader"]
     for asset in ("logo.ico", "logo.png"):
         src = ROOT / asset
         if src.exists():
@@ -524,7 +524,7 @@ RUN_SH = "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")\"\n./Stet\n"
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
 
-_LLAMA_BACKEND_VERSION = "b9940"
+_LLAMA_BACKEND_VERSION = "b10016"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{_LLAMA_BACKEND_VERSION}"
 
 DOWNLOAD_BACKEND_BAT = rf"""@echo off
@@ -533,7 +533,7 @@ cd /d "%~dp0"
 
 set LLAMA_URL={_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip
 set CUDA_URL={_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip
-set LLAMA_HASH=1EB3AFEC18662B69A8E6716978E61263C8B9F4829A6E929B8FCDCC142BE51893
+set LLAMA_HASH=AC780BF9A82AB9487946F458EFF6B7A57568FA831C6E9268DA32A1DB986BF75D
 set CUDA_HASH=8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6
 set DEST=llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64
 
@@ -618,7 +618,7 @@ cd "$(dirname "$0")"
 
 LLAMA_URL="{_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip"
 CUDA_URL="{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip"
-LLAMA_HASH="1eb3afec18662b69a8e6716978e61263c8b9f4829a6e929b8fcdcc142be51893"
+LLAMA_HASH="ac780bf9a82ab9487946f458eff6b7a57568fa831c6e9268da32a1db986bf75d"
 CUDA_HASH="8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
 DEST="llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 

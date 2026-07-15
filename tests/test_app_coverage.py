@@ -1223,17 +1223,18 @@ class TestStetAppCaptureSelection:
         monkeypatch.setattr("stet.core.app._is_terminal_or_ide", MagicMock(return_value=True))
 
         # old_clip at save time = "same text",
-        # poll returns "same text" (unchanged) → change detection fails,
-        # fallback non-empty check succeeds with same value
+        # poll returns "same text" (unchanged) → CB-4 clipboard guard
+        # detects clip == old_clip and returns empty (no change detected)
         app._safe_paste = MagicMock(return_value="same text")
         app._safe_copy = MagicMock()
         monkeypatch.setattr("time.sleep", lambda t: None)
 
         res = app._capture_selection()
 
-        assert res == "same text"
+        assert res == ""
         mock_send_shift_chord.assert_called_once()
-        app._safe_copy.assert_not_called()
+        # CB-4 guard detects no change; old_clip is restored via _safe_copy
+        app._safe_copy.assert_called_once_with("same text")
 
     @patch("stet.core.app.QSystemTrayIcon")
     @patch("stet.core.app._send_ctrl_shift_chord", create=True)

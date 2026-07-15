@@ -46,8 +46,6 @@ VENV_PY = (
     ROOT / "venv" / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 )
 REQ_FILE = ROOT / "requirements.txt"
-MAIN_SCRIPT = ROOT / "stet.py"
-
 # Backwards-compat alias: legacy callers (and tests) reference GITHUB_API.
 GITHUB_API = GITHUB_RELEASES_API
 
@@ -482,16 +480,6 @@ def update_app(
             print("  Restarting Stet...")
             subprocess.Popen([str(exe)], cwd=str(root), shell=False)
 
-
-def _progress(block, block_size, total):
-    downloaded = block * block_size
-    pct = min(100, downloaded * 100 // total) if total > 0 else 0
-    bar = "#" * (pct // 4)
-    print(
-        f"\r  [{bar:<25}] {pct:3d}%  {downloaded / 1_048_576:.1f} MB",
-        end="",
-        flush=True,
-    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

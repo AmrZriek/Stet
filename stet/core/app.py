@@ -114,8 +114,9 @@ def _startup_command() -> str:
     return _quote_cmd([_source_startup_python(), "-m", "stet.main"])
 
 
-import ctypes
-import ctypes.wintypes
+if WINDOWS:
+    import ctypes
+    import ctypes.wintypes
 
 from PyQt6.QtCore import QAbstractNativeEventFilter
 
@@ -443,6 +444,7 @@ class StetApp(QObject):
             self._retry_count = 0
             self._max_retries = 3
             self.ac_model.status_changed.connect(self._schedule_model_retry_if_needed)
+            self.ac_model.model_loaded.connect(self._on_model_loaded)
             threading.Thread(
                 target=lambda: self.ac_model.load_model(retry_missing_path=True),
                 daemon=True,
@@ -545,6 +547,9 @@ class StetApp(QObject):
             self._retry_scheduled = False
             self._retry_count = 0
             log("[APP] Deferred model retry skipped — model already loaded")
+
+    def _on_model_loaded(self):
+        self._retry_count = 0
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(make_tray_icon("#475569"), self)
@@ -725,7 +730,7 @@ class StetApp(QObject):
         ac_name = friendly_name(self.cfg.get("model_path", ""))
         if self.ac_model.is_loaded():
             self._status_lbl.setText(f"● AC: Ready — {ac_name}")
-            self._llm_menu_action.setText(f"Model: Ready — {ac_name}")
+            self._llm_menu_action.setText("Model: Ready")
         else:
             self._status_lbl.setText("● AC: Offline")
             self._llm_menu_action.setText("Model: Offline")
@@ -744,14 +749,22 @@ class StetApp(QObject):
         lbl_msg = msg
         if lbl_msg.startswith("●"):
             lbl_msg = lbl_msg.lstrip("●").strip()
-        
+
+        # Menu title shows only the short status; the header keeps the model name.
+        menu_lbl_msg = "Ready" if lbl_msg.lower().startswith("ready") else lbl_msg
+
+        if lbl_msg == "Ready":
+            ac_name = friendly_name(self.cfg.get("model_path", ""))
+            if ac_name:
+                lbl_msg = f"Ready — {ac_name}"
+
         if hasattr(self, "_status_lbl"):
             self._status_lbl.setText(f"● AC: {lbl_msg}")
         elif hasattr(self, "_status_action"):
             self._status_action.setText(f"Autocorrect: {lbl_msg}")
-        
+
         if hasattr(self, "_llm_menu_action"):
-            self._llm_menu_action.setText(f"Model: {lbl_msg}")
+            self._llm_menu_action.setText(f"Model: {menu_lbl_msg}")
 
     def _on_chat_status(self, msg: str):
         color = (
@@ -768,6 +781,11 @@ class StetApp(QObject):
         lbl_msg = msg
         if lbl_msg.startswith("●"):
             lbl_msg = lbl_msg.lstrip("●").strip()
+            
+        if lbl_msg == "Ready":
+            chat_name = friendly_name(self.cfg.get("chat_model_path", ""))
+            if chat_name:
+                lbl_msg = f"Ready — {chat_name}"
             
         if self.cfg.get("chat_use_separate_model", False):
             self._chat_status_lbl.show()
@@ -842,27 +860,11 @@ class StetApp(QObject):
             self._hotkey_filter.clear_callbacks()
         log("[Hotkey] Temporarily unregistered all hotkeys")
 
-    def _safe_paste(self, retries=5, delay=0.03) -> str:
-        for i in range(retries):
-            try:
-                return _clipboard_read_text()
-            except Exception as e:
-                if i == retries - 1:
-                    log(f"[Clipboard] paste failed: {e}")
-                    return ""
-                time.sleep(delay)
-        return ""
+    def _safe_paste(self) -> str:
+        return _clipboard_read_text()
 
-    def _safe_copy(self, text: str, retries=5, delay=0.03):
-        for i in range(retries):
-            try:
-                _clipboard_write_text(text)
-                return
-            except Exception as e:
-                if i == retries - 1:
-                    log(f"[Clipboard] copy failed: {e}")
-                    return
-                time.sleep(delay)
+    def _safe_copy(self, text: str):
+        _clipboard_write_text(text)
 
     def _is_window_alive(self) -> bool:
         """Check if _window is alive without risking RuntimeError on deleted C++."""
@@ -1035,10 +1037,12 @@ class StetApp(QObject):
 
             # If the selected text happened to match the old clipboard
             # content, the change-detection loop won't catch it. Try the
-            # standard non-empty check as a last resort.
+            # standard non-empty check as a last resort. But only return
+            # it if it differs from the old clipboard — a match means
+            # no selection was actually made (Ctrl+C did nothing).
             clip = self._safe_paste()
-            if clip:
-                log(f"[Capture] terminal fallback (same as old clip): {clip[:80]!r}")
+            if clip and clip != self._old_clip:
+                log(f"[Capture] terminal fallback (new clip): {clip[:80]!r}")
                 return clip
 
             log("[Capture] no selection detected (terminal)")
@@ -1343,7 +1347,11 @@ class StetApp(QObject):
         time.sleep(0.1)
         if self._old_clip and self._old_clip != text:
             clip_to_restore = self._old_clip
-            QTimer.singleShot(500, lambda: self._safe_copy(clip_to_restore))
+            def _restore_if_unchanged():
+                current = _clipboard_read_text()
+                if current == text:
+                    _clipboard_write_text(clip_to_restore)
+            QTimer.singleShot(500, _restore_if_unchanged)
 
     def _open_settings(self):
         dlg = SettingsDialog(
@@ -1461,6 +1469,8 @@ class StetApp(QObject):
         if self._welcome_window:
             self._welcome_window.set_correcting(True)
 
+        if self._welcome_cancel_event is not None:
+            self._welcome_cancel_event.set()
         self._welcome_cancel_event = threading.Event()
 
         template_prompt = None

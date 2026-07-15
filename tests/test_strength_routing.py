@@ -45,7 +45,7 @@ def test_rewrite_chunk_selects_conservative_prompt(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "spelling_only")
-    assert "Fix spelling mistakes" in captured_sys
+    assert "Correct every clear spelling" in captured_sys
 
 
 def test_rewrite_chunk_selects_smartfix_prompt(monkeypatch):
@@ -64,9 +64,8 @@ def test_rewrite_chunk_selects_smartfix_prompt(monkeypatch):
     monkeypatch.setattr("requests.Session", MockSession)
     mgr._chat_url = lambda: "http://fake"
     mgr._rewrite_sentence_chunk("test", None, 1, 1, "full_correction")
-    assert "Fix spelling mistakes" not in captured_sys
     assert (
-        "Fix spelling, grammar, punctuation, and capitalization" in captured_sys
+        "Correct the text completely" in captured_sys
     )
 
 
@@ -90,8 +89,8 @@ def test_rewrite_chunk_selects_aggressive_prompt(monkeypatch):
 
     assert result == "Improved test"
     system_prompt = captured_payload["messages"][0]["content"]
-    assert "clearly and smoothly" in system_prompt
-    assert "Improve clarity" in system_prompt
+    assert "flow" in system_prompt
+    assert "clarity" in system_prompt
     assert captured_payload["think"] is False
 
 
@@ -109,6 +108,7 @@ def test_correct_text_patch_passes_strength_to_chunks(monkeypatch):
         cancel_event=None,
         mode_prompt_override=None,
         session=None,
+        profile=None,
     ):
         nonlocal captured_strength
         captured_strength = strength
@@ -125,7 +125,7 @@ def test_correct_text_patch_smartfix_accepts_rewrite_with_guard_disabled(monkeyp
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             "hello different this is test"
         )
     )
@@ -147,7 +147,7 @@ def test_correct_text_patch_aggressive_accepts_rewrite_with_guard_disabled(monke
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             "hello new world this is test"
         )
     )
@@ -168,7 +168,7 @@ def test_correct_text_patch_conservative_rejects_wild_rewrite(monkeypatch):
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             "completely different text that has absolutely nothing to do with the original"
         )
     )

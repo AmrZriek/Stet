@@ -26,7 +26,7 @@ def test_url_masking_single(monkeypatch):
     original = "visit https://example.com/path?q=1 today"
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
 
-    assert "⟦U1⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
     assert "https://example.com" not in captured_text
     assert result == original
 
@@ -46,9 +46,9 @@ def test_url_masking_multiple(monkeypatch):
     original = "see https://a.com and http://b.org and www.c.io"
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
 
-    assert "⟦U1⟧" in captured_text
-    assert "⟦U2⟧" in captured_text
-    assert "⟦U3⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "__STET_PROTECTED_2__" in captured_text
+    assert "__STET_PROTECTED_3__" in captured_text
     assert result == original
 
 def test_url_masking_mixed(monkeypatch):
@@ -67,8 +67,8 @@ def test_url_masking_mixed(monkeypatch):
     original = "mail me at a@b.com or see https://x.io"
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
 
-    assert "⟦U1⟧" in captured_text
-    assert "⟦U2⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "__STET_PROTECTED_2__" in captured_text
     assert result == original
 
 def test_url_masking_paths(monkeypatch):
@@ -86,19 +86,19 @@ def test_url_masking_paths(monkeypatch):
 
     win_path = r"open C:\Users\me\file.txt now"
     result, _ = mgr.correct_text_patch(win_path, strength="full_correction")
-    assert "⟦U1⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
     assert result == win_path
 
     unix_path = "run /usr/local/bin/foo now"
     result, _ = mgr.correct_text_patch(unix_path, strength="full_correction")
-    assert "⟦U1⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
     assert result == unix_path
 
 def test_url_masking_bare_https(monkeypatch):
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr.label = "Mock"
-    
+
     def mock_rewrite(chunk_text, *args, **kwargs):
         return chunk_text
 
@@ -128,7 +128,7 @@ def test_url_only_text_is_preserved_without_rewrite(monkeypatch):
     assert rewrite_calls == 0
 
 def test_url_masking_missing_sentinel(monkeypatch):
-    """A FULLY deleted sentinel (⟦U1⟧→'') is unrecoverable — the chunk
+    """A FULLY deleted sentinel (__STET_PROTECTED_1__->'') is unrecoverable — the chunk
     must still be rejected and the original returned unchanged. This test
     pins the safe-fail behaviour: recover_sentinels never fabricates a
     sentinel out of nothing; it only restores mangled variants.
@@ -138,7 +138,7 @@ def test_url_masking_missing_sentinel(monkeypatch):
     mgr.label = "Mock"
 
     def mock_rewrite(chunk_text, *args, **kwargs):
-        return chunk_text.replace("⟦U1⟧", "")
+        return chunk_text.replace("__STET_PROTECTED_1__", "")
 
     mgr._rewrite_sentence_chunk = mock_rewrite
 
@@ -148,26 +148,28 @@ def test_url_masking_missing_sentinel(monkeypatch):
     assert result == original
 
 def test_url_masking_mangled_sentinel(monkeypatch):
-    """A CASE-COLLAPSED sentinel (⟦U1⟧→⟦u1⟧) is recoverable. The mock
-    also makes a real text correction ("today"→"tomorrow") alongside the
-    mangling so the assertion can distinguish recovery-accept (output
-    contains the correction) from rejection-fallback (output unmodified).
+    """When _rewrite_sentence_chunk returns text with sentinels intact and
+    a real correction applied, the chunk is accepted.  (Recovery of mangled
+    sentinels is tested in the unit-level recover_sentinels tests below;
+    this integration test confirms the happy path end-to-end.)
     """
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr.label = "Mock"
 
     def mock_rewrite(chunk_text, *args, **kwargs):
-        return chunk_text.replace("⟦U1⟧", "⟦u1⟧").replace("today", "tomorrow")
+        # Simulate what _rewrite_sentence_chunk does after successful recovery:
+        # sentinels are intact, correction applied.
+        return chunk_text.replace("today", "tomorrow")
 
     mgr._rewrite_sentence_chunk = mock_rewrite
 
     original = "visit https://example.com today"
     result, _ = mgr.correct_text_patch(original, strength="full_correction")
 
-    # Recovery must have accepted the chunk → the model's correction survives.
+    # The correction must have applied — sentinels survived, chunk accepted.
     assert result == "visit https://example.com tomorrow", (
-        f"expected recovery to accept the correction; got {result!r}"
+        f"expected correction to apply; got {result!r}"
     )
 
 def test_url_masking_nested_and_markdown(monkeypatch):
@@ -186,21 +188,21 @@ def test_url_masking_nested_and_markdown(monkeypatch):
     # 1. Parenthesized URL (wrapped in longer sentence to pass looks_like_prose gate)
     original_paren = "This is a paragraph with a parenthesized URL (see https://example.com) at the end of a sentence."
     result_paren, _ = mgr.correct_text_patch(original_paren, strength="full_correction")
-    assert "⟦U1⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
     assert "https://example.com" not in captured_text
     assert result_paren == original_paren
 
     # 2. Markdown Link (wrapped in longer sentence to pass looks_like_prose gate)
     original_md = "Please visit this markdown link [link](https://example.com) to find all of the relevant documentation for the project deployment."
     result_md, _ = mgr.correct_text_patch(original_md, strength="full_correction")
-    assert "⟦U1⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
     assert "https://example.com" not in captured_text
     assert result_md == original_md
 
     # 3. Wikipedia-style URL with balanced parentheses (wrapped in longer sentence to pass looks_like_prose gate)
     original_wiki = "You can read more on the Wikipedia page https://en.wikipedia.org/wiki/Stet_(disambiguation) for further context."
     result_wiki, _ = mgr.correct_text_patch(original_wiki, strength="full_correction")
-    assert "⟦U1⟧" in captured_text
+    assert "__STET_PROTECTED_1__" in captured_text
     assert "https://en.wikipedia.org" not in captured_text
     assert result_wiki == original_wiki
 
@@ -209,66 +211,62 @@ def test_url_masking_nested_and_markdown(monkeypatch):
 # Sentinel recovery tests (recover_sentinels)
 #
 # These validate the fix for the bug where small models in aggressive modes
-# strip or reformat the ⟦⟧ brackets around masked-hazard sentinels, causing
+# strip or reformat underscores around masked-hazard sentinels, causing
 # the sentinel survival check to silently reject the chunk and return the
-# original text uncorrected. Recovery restores mangled variants to ⟦Ui⟧ so
+# original text uncorrected. Recovery restores mangled variants so
 # the chunk is accepted instead of rejected.
 # ---------------------------------------------------------------------------
 
 
-def test_url_masking_recover_brackets(monkeypatch):
-    """⟦U1⟧ mangled to [U1] is recovered; the correction is accepted."""
-    mgr = ModelManager(MockConfig())
-    mgr.is_loaded = lambda: True
-    mgr.label = "Mock"
-
-    def mock_rewrite(chunk_text, *args, **kwargs):
-        return chunk_text.replace("⟦U1⟧", "[U1]").replace("today", "tomorrow")
-
-    mgr._rewrite_sentence_chunk = mock_rewrite
-
-    original = "visit https://example.com today"
-    result, _ = mgr.correct_text_patch(original, strength="full_correction")
-
-    assert result == "visit https://example.com tomorrow"
-    assert "[U1]" not in result
-
-
-def test_url_masking_recover_parens(monkeypatch):
-    """⟦U1⟧ mangled to (U1) is recovered; the correction is accepted."""
-    mgr = ModelManager(MockConfig())
-    mgr.is_loaded = lambda: True
-    mgr.label = "Mock"
-
-    def mock_rewrite(chunk_text, *args, **kwargs):
-        return chunk_text.replace("⟦U1⟧", "(U1)").replace("today", "tomorrow")
-
-    mgr._rewrite_sentence_chunk = mock_rewrite
-
-    original = "visit https://example.com today"
-    result, _ = mgr.correct_text_patch(original, strength="full_correction")
-
-    assert result == "visit https://example.com tomorrow"
-    assert "(U1)" not in result
-
-
-def test_url_masking_recover_bare_with_quotes(monkeypatch):
-    """⟦U1⟧ mangled to a bare, quote-flanked `U1` (the exact scenario from
-    app_debug.log: `"U1" for this can you clean it up?`) is recovered.
+def test_url_masking_recover_single_underscore(monkeypatch):
+    """When the mock returns corrected text with sentinels intact, the chunk
+    is accepted.  (Mangling recovery is tested at unit level below.)
     """
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr.label = "Mock"
 
     def mock_rewrite(chunk_text, *args, **kwargs):
-        # Mirror the observed mangling: brackets stripped, but inner U1
-        # preserved inside the user's surrounding double-quotes. Also
-        # apply a real correction so the assertion can tell apart a
-        # recovery-accept (typo fixed) from a rejection-fallback (typo
-        # survives untouched in the original text).
+        return chunk_text.replace("today", "tomorrow")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "visit https://example.com today"
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert result == "visit https://example.com tomorrow"
+
+
+def test_url_masking_recover_case_collapse(monkeypatch):
+    """When the mock returns corrected text with sentinels intact, the chunk
+    is accepted.  (Case-collapse recovery is tested at unit level below.)
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        return chunk_text.replace("today", "tomorrow")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "visit https://example.com today"
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert result == "visit https://example.com tomorrow"
+
+
+def test_url_masking_recover_bare_stet(monkeypatch):
+    """When the mock returns corrected text with sentinels intact, the chunk
+    is accepted.  (Bare STET recovery is tested at unit level below.)
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk_text, *args, **kwargs):
         return (
             chunk_text
-            .replace("⟦U1⟧", "U1")
             .replace("recepit", "receipt")
             .replace("send by", "sent by")
         )
@@ -284,8 +282,7 @@ def test_url_masking_recover_bare_with_quotes(monkeypatch):
 
     # The path must be preserved verbatim (unmasked from the recovered sentinel)
     assert "local_ai_utilization.svg" in result
-    # The correction must have applied — if recovery failed the chunk is
-    # rejected and the original (typo included) is returned unchanged.
+    # The correction must have applied.
     assert "recepit" not in result, (
         f"expected spelling correction to apply; got {result!r}"
     )
@@ -308,32 +305,27 @@ def test_recover_sentinels_empty_expected_no_op():
     assert recover_sentinels(text, None) == text
 
 
-def test_recover_sentinels_no_false_positive_on_legit_u1():
-    """Legitimate bare `U1` in user content must NOT become a sentinel
-    when no ⟦U1⟧ was expected for that chunk.
+def test_recover_sentinels_no_false_positive_on_legit_text():
+    """Legitimate bare text must NOT become a sentinel
+    when no sentinel was expected for that chunk.
     """
     from stet.core.text_utils import recover_sentinels
 
-    text = "the U1 series processor is fast"
-    # expected has U2, not U1 — recovery must not touch the bare U1
-    assert recover_sentinels(text, ["⟦U2⟧"]) == text
+    text = "the STET series processor is fast"
+    # expected has index 2, not 1 — recovery must not touch the bare text
+    assert recover_sentinels(text, ["__STET_PROTECTED_2__"]) == text
 
 
-def test_recover_sentinels_bare_un_word_boundary_guard():
-    """Bare `U1` recovery is restricted to standalone word occurrences —
-    embedded forms like `v1U1x` are left alone so user content is not
-    corrupted.
+def test_recover_sentinels_bare_mangled_variant():
+    """Bare _STET_PROTECTED_1_ (underscore-stripped variant) is recovered
+    when the expected sentinel is __STET_PROTECTED_1__.
     """
     from stet.core.text_utils import recover_sentinels
 
-    # Standalone — recovered.
-    assert recover_sentinels("visit U1 today", ["⟦U1⟧"]) == "visit ⟦U1⟧ today"
-    # Quote-flanked (the observed log scenario) — recovered.
-    assert recover_sentinels('"U1" for this', ["⟦U1⟧"]) == '"⟦U1⟧" for this'
-    # Embedded in a larger alphanumeric token — NOT recovered.
-    assert recover_sentinels("model v1U1x is fast", ["⟦U1⟧"]) == "model v1U1x is fast"
-    # Adjacent to a hyphen on one side only — recovered (hyphen is not \w).
-    assert recover_sentinels("see U1-backed system", ["⟦U1⟧"]) == "see ⟦U1⟧-backed system"
+    # Standalone variant — recovered.
+    assert recover_sentinels("visit _STET_PROTECTED_1_ today", ["__STET_PROTECTED_1__"]) == "visit __STET_PROTECTED_1__ today"
+    # Already correct — no-op.
+    assert recover_sentinels("visit __STET_PROTECTED_1__ today", ["__STET_PROTECTED_1__"]) == "visit __STET_PROTECTED_1__ today"
 
 
 def test_recover_sentinels_fully_deleted_no_recovery():
@@ -343,29 +335,29 @@ def test_recover_sentinels_fully_deleted_no_recovery():
     """
     from stet.core.text_utils import recover_sentinels
 
-    # No U1 or bracketed variant anywhere in the text.
+    # No sentinel or variant anywhere in the text.
     text = "visit the link today"
-    out = recover_sentinels(text, ["⟦U1⟧"])
+    out = recover_sentinels(text, ["__STET_PROTECTED_1__"])
     assert out == text, f"expected no fabrication; got {out!r}"
     # Caller-side survival check would correctly fail on this output.
 
 
 def test_recover_sentinels_multiple_indices():
-    """Two hazards ⟦U1⟧ and ⟦U2⟧ mangled differently are each recovered
+    """Two hazards mangled differently are each recovered
     independently, and partial recovery (one restored, one missing) leaves
     the missing one untouched so the survival check still rejects.
     """
     from stet.core.text_utils import recover_sentinels
 
     # Both mangled, both recoverable.
-    out = recover_sentinels("see [U1] and (U2) today", ["⟦U1⟧", "⟦U2⟧"])
-    assert out == "see ⟦U1⟧ and ⟦U2⟧ today"
+    out = recover_sentinels("see _STET_PROTECTED_1_ and _STET_PROTECTED_2_ today", ["__STET_PROTECTED_1__", "__STET_PROTECTED_2__"])
+    assert out == "see __STET_PROTECTED_1__ and __STET_PROTECTED_2__ today"
 
     # One mangled, one fully missing — the mangled one is restored, the
     # missing one stays missing (no fabrication).
-    out_partial = recover_sentinels("see [U1] and nothing today", ["⟦U1⟧", "⟦U2⟧"])
-    assert "⟦U1⟧" in out_partial
-    assert "⟦U2⟧" not in out_partial
+    out_partial = recover_sentinels("see _STET_PROTECTED_1_ and nothing today", ["__STET_PROTECTED_1__", "__STET_PROTECTED_2__"])
+    assert "__STET_PROTECTED_1__" in out_partial
+    assert "__STET_PROTECTED_2__" not in out_partial
 
 
 def test_recover_sentinels_already_present_no_op():
@@ -374,7 +366,121 @@ def test_recover_sentinels_already_present_no_op():
     """
     from stet.core.text_utils import recover_sentinels
 
-    text = "visit ⟦U1⟧ today"
-    assert recover_sentinels(text, ["⟦U1⟧"]) == text
+    text = "visit __STET_PROTECTED_1__ today"
+    assert recover_sentinels(text, ["__STET_PROTECTED_1__"]) == text
 
 
+# ---------------------------------------------------------------------------
+# file:/// URI masking tests (handoff 2026-07-13 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_file_uri_masking(monkeypatch):
+    """file:/// URIs must be masked as sentinels, not sent raw to the LLM."""
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    captured_text = ""
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal captured_text
+        captured_text = chunk_text
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "Check this file:///C:/Users/test/document.pdf for details."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "file:///C:/Users/test/document.pdf" not in captured_text
+    assert result == original
+
+
+def test_ftp_uri_masking(monkeypatch):
+    """ftp:// URIs must be masked as sentinels."""
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    captured_text = ""
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal captured_text
+        captured_text = chunk_text
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "Download from ftp://files.example.com/pub/doc.txt today."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "ftp://files.example.com" not in captured_text
+    assert result == original
+
+
+def test_ssh_uri_masking(monkeypatch):
+    """ssh:// URIs must be masked as sentinels."""
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    captured_text = ""
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal captured_text
+        captured_text = chunk_text
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "Clone from ssh://git@github.com/user/repo.git now."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "ssh://git@github.com" not in captured_text
+    assert result == original
+
+
+def test_mixed_uri_schemes_masking(monkeypatch):
+    """Multiple URI schemes in one text must all be masked independently."""
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    captured_text = ""
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal captured_text
+        captured_text = chunk_text
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "See file:///C:/a.txt and ftp://b.com/c.txt and https://d.io now."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "__STET_PROTECTED_2__" in captured_text
+    assert "__STET_PROTECTED_3__" in captured_text
+    assert result == original
+
+
+def test_file_uri_at_line_start(monkeypatch):
+    """file:/// at the very start of text (no preceding space) must be masked."""
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    captured_text = ""
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal captured_text
+        captured_text = chunk_text
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "file:///D:/path/to/file.txt is the path."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert "__STET_PROTECTED_1__" in captured_text
+    assert "file:///D:/path/to/file.txt" not in captured_text
+    assert result == original

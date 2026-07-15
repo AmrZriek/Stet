@@ -98,4 +98,4 @@ class TestConfigMigration:
 
             cfg = ConfigManager()
             modes = cfg.get("correction_modes")
-            assert modes[0]["hallucination_threshold"] == 0.7
+            assert modes[0]["hallucination_threshold"] == 0.35

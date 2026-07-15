@@ -10,9 +10,6 @@ pyperclip>=1.11.0
 # HTTP client (llama.cpp OpenAI-compatible API + streaming)
 requests>=2.34.2
 
-# Spell-checking (unknown-word detection for pre-filter)
-pyspellchecker>=0.9.0
-
 # ── Build / release only (uncomment when building) ──────────────────────────
 pyinstaller>=6.0
 

@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -70,14 +70,14 @@ GITHUB_RELEASES_API = "https://api.github.com/repos/AmrZriek/Stet/releases/lates
 # ── llama.cpp backend auto-download ──────────────────────────────────────────
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
-LLAMA_BACKEND_VERSION = "b9940"
+LLAMA_BACKEND_VERSION = "b10016"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BACKEND_VERSION}"
 LLAMA_BACKEND_URLS = {
     "llama": f"{_LLAMA_BASE}/llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip",
     "cuda": f"{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip",
 }
 LLAMA_BACKEND_HASHES = {
-    "llama": "1EB3AFEC18662B69A8E6716978E61263C8B9F4829A6E929B8FCDCC142BE51893",
+    "llama": "AC780BF9A82AB9487946F458EFF6B7A57568FA831C6E9268DA32A1DB986BF75D",
     "cuda": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6",
 }
 LLAMA_BACKEND_DIR = f"llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
@@ -118,9 +118,16 @@ DEFAULT_CONFIG: dict = {
     "mtp_max_draft": 2,
     "mtp_min_draft": 0,
     "temperature": 0.0,
-    "top_k": 40,
+    "top_k": 1,
     "top_p": 0.95,
-    "min_p": 0.05,
+    "min_p": 0.0,
+    # Correction-specific overrides for the patch pipeline.
+    # These lock the model to its most-probable token during correction,
+    # preventing spurious capitalization, punctuation, and word changes.
+    "correction_temperature": 0.0,
+    "correction_top_k": 1,
+    "correction_top_p": 0.95,
+    "correction_min_p": 0.0,
     "seed": -1,
     "typical_p": 1.0,
     "tfs_z": 1.0,
@@ -191,60 +198,56 @@ DEFAULT_CONFIG: dict = {
         {
             "name": "Clean Up Dictation",
             "prompt": (
-                "This text was dictated using speech-to-text and contains spoken "
-                "artifacts. Clean it up:\n"
-                "- Remove filler words (um, uh, ah, like, basically, you know, "
-                "I mean, so yeah, kind of, sort of, right, actually, literally, "
-                "honestly, essentially, anyway, well, OK so).\n"
-                "- Remove stuttered or repeated words and false starts.\n"
-                "- Fix run-on sentences — add proper punctuation and split where "
-                "natural pauses should be.\n"
-                "- Fix obvious STT misspellings and missing punctuation.\n"
-                "- Lightly adjust sentence structure ONLY when the original is "
-                "genuinely incoherent. Otherwise keep the author's phrasing.\n"
-                "- Preserve every meaningful idea. Do not summarize or omit.\n"
-                "- Do NOT rewrite from scratch — clean and refine only.\n"
-                "Output ONLY the cleaned text without preamble or explanation."
+                "Turn the dictated content into clean written text.\n\n"
+                "Remove speech fillers, stutters, false starts, accidental "
+                "repetitions, and abandoned phrases. Fix transcription errors, "
+                "spelling, grammar, capitalization, and punctuation. Split run-on "
+                "speech into natural sentences and lightly reorganize wording "
+                "when needed for clarity.\n\n"
+                "Keep every meaningful idea, fact, name, and number. "
+                "Do not summarize, invent details, or change the speaker's "
+                "intended tone."
             ),
         },
         {
             "name": "Professional Tone",
             "prompt": (
-                "Rewrite this text in a clear, professional tone suitable "
-                "for workplace communication:\n"
-                "- Use a neutral professional register — not stiff or overly "
-                "formal.\n"
-                "- Fix all spelling, grammar, and punctuation errors.\n"
-                "- Remove slang, filler, and overly casual language.\n"
-                "- Keep sentences direct and well-structured.\n"
-                "- Preserve the author's intent and all key information.\n"
-                "Output ONLY the rewritten text without preamble or explanation."
+                "Rewrite the content as clear, concise workplace communication.\n\n"
+                "Use a natural professional tone that is confident and direct, "
+                "not stiff or overly formal. Improve organization, sentence flow, "
+                "word choice, grammar, and punctuation. Remove filler, slang "
+                "that is unsuitable for work, and unnecessary repetition.\n\n"
+                "Preserve the intended message, facts, names, numbers, requests, "
+                "and commitments. Do not add claims, greetings, or sign-offs "
+                "that were not present."
             ),
         },
         {
             "name": "Academic & Scholarly",
             "prompt": (
-                "Rewrite this text in an objective, formal, and academic tone suitable "
-                "for research papers, essays, or scholarly publications:\n"
-                "- Use precise, scholarly vocabulary and formal sentence structures.\n"
-                "- Remove first-person pronouns (I, we, my) where possible, adopting "
-                "an objective, third-person perspective.\n"
-                "- Eliminate colloquialisms, contractions, slang, and conversational phrasing.\n"
-                "- Ensure arguments flow logically and transitions are smooth.\n"
-                "- Preserve the exact meaning, factual claims, and technical concepts "
-                "of the original text.\n"
-                "Output ONLY the academic version without preamble or explanation."
+                "Rewrite the content in precise, formal academic prose.\n\n"
+                "Improve logical flow, terminology, sentence structure, "
+                "transitions, grammar, and punctuation. Replace conversational "
+                "phrasing and unsupported emphasis with objective wording. "
+                "Reduce first-person phrasing when doing so does not change "
+                "the meaning.\n\n"
+                "Preserve every factual claim, qualification, citation, "
+                "technical term, name, and number. Do not invent evidence, "
+                "citations, conclusions, or technical details."
             ),
         },
         {
             "name": "Notes Assistant",
             "prompt": (
-                "Format and structure the text cleanly as readable notes:\n"
-                "1. If input is already a list/notes layout, keep it but fix typos, grammar, and alignment.\n"
-                "2. If input is prose/dictation, convert it into structured bulleted notes.\n"
-                "3. Use headers (#, ##) for sections, bullet points (-) for items, and bolding (**) for key terms.\n"
-                "4. Keep all facts, names, code, and technical terms exactly as given. Do not summarize or omit.\n"
-                "5. Output ONLY the notes. No preamble, no explanation."
+                "Convert the content into clear Markdown notes.\n\n"
+                "Use short section headings only when they help. Put each "
+                "main idea on its own \"- \" bullet line. Use indented bullets "
+                "for supporting details. Use bold text sparingly for important "
+                "terms. If the content is already notes, improve its "
+                "organization and consistency.\n\n"
+                "Preserve all facts, names, numbers, code, links, paths, "
+                "and technical details. Do not invent information. "
+                "Do not write prose before or after the notes."
             ),
         },
     ],
@@ -255,25 +258,53 @@ DEFAULT_CONFIG: dict = {
     "correction_modes": [
         {
             "name": "Spelling Only",
-            "prompt": "Fix spelling mistakes. Change nothing else.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix only misspelled words: \"libary\" -> \"library\", \"teh\" -> \"the\".\n2. Copy punctuation, capitalization, grammar, word order, line breaks, and spacing exactly as given.\n3. If nothing is misspelled, copy the text exactly as given.\n4. Repeated words and repeated sentences stay exactly as given.\n5. Copy numbers, names, ALL-CAPS words, code, URLs, and symbols exactly as given. Never fix them.\n6. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>She borowed teh red kayak yesterday.<<<END>>>\nOutput: <<<START>>>She borrowed the red kayak yesterday.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>the quartz lamp works fine fine.<<<END>>>\nOutput: <<<START>>>the quartz lamp works fine fine.<<<END>>>",
-            "hallucination_threshold": 0.7,
+            "prompt": (
+                "Correct every clear spelling or typing error.\n\n"
+                "A valid edit replaces one mistaken word with its obvious intended word. "
+                "This includes accidental forms such as \"teh\", \"blockkers\", \"postphone\", "
+                "and contextually unmistakable typing errors such as \"advise\" when \"advice\" "
+                "was clearly intended.\n\n"
+                "Preserve every other character exactly, including capitalization, punctuation, "
+                "grammar, wording, word order, repetition, spacing, and line breaks. "
+                "Do not modernize, regionalize, or improve the writing.\n\n"
+                "If no clear spelling or typing error exists, return the content unchanged."
+            ),
+            "hallucination_threshold": 0.35,
             "builtin": True,
         },
         {
             "name": "Full Correction",
-            "prompt": "Fix spelling, grammar, punctuation, and capitalization. Keep the author's words.\n\nOUTPUT: the corrected text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix typos, spelling, grammar, punctuation, and capitalization.\n2. Add missing terminal punctuation (periods or question marks) at the end of sentences that lack it.\n3. Never remove existing terminal punctuation (. ? !) from the end of a sentence — only add missing punctuation or fix incorrect punctuation.\n4. Keep the author's wording, tone, and meaning. Do not rewrite for style.\n5. If the text is already correct, copy it exactly as given.\n6. Keep line breaks and spacing exactly as given.\n7. Keep ALL-CAPS words, acronyms (NASA, USA), Title Case, repeated words, and repeated sentences exactly as given.\n8. Copy numbers, names, code, URLs, and symbols exactly as given. Never fix them.\n9. Add nothing else. Remove nothing. Reorder nothing beyond the minimum a fix requires.\n10. Fix ALL instances of a repeated error, not just the first one.\n11. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>him and me was late becuase the traffic.<<<END>>>\nOutput: <<<START>>>He and I were late because of the traffic.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>\nOutput: <<<START>>>The CFO approved the Q3 budget.<<<END>>>",
-            "hallucination_threshold": 1.0,
+            "prompt": (
+                "Correct the text completely without stylistically rewriting it.\n\n"
+                "Fix every spelling, grammar, capitalization, punctuation, agreement, "
+                "and clearly incorrect word-use error. Make the smallest edits needed "
+                "for correct, natural text.\n\n"
+                "Preserve the author's meaning, tone, level of formality, sentence order, "
+                "repetition, and overall phrasing. Do not add new ideas, remove ideas, "
+                "summarize, or make optional style changes.\n\n"
+                "If the text is already correct, return it unchanged."
+            ),
+            "hallucination_threshold": 0.65,
             "builtin": True,
         },
         {
             "name": "Rewrite & Polish",
-            "prompt": "Edit the text so it reads clearly and smoothly. Keep the author's voice.\n\nOUTPUT: the edited text between <<<START>>> and <<<END>>>. No other words. No explanations.\n\nRULES:\n1. Fix all spelling, grammar, punctuation, and capitalization.\n2. Preserve existing terminal punctuation (. ? !) at the end of sentences. Do not drop sentence-ending punctuation.\n3. Improve clarity, flow, and word choice. Cut filler words (um, uh, like, basically, you know, I mean, so yeah, kind of, sort of).\n4. Keep the author's tone: casual stays casual, formal stays formal. Keep slang, contractions, humor, and emphasis.\n5. Keep every fact, claim, name, and number exactly as given. Invent nothing.\n6. Add no greetings, sign-offs, examples, or commentary.\n7. Keep line breaks and paragraph structure as given.\n8. Copy code, URLs, and symbols exactly as given.\n9. NEVER change the case of well-known protocol prefixes (https, http, www) — they are case-sensitive in URLs.\n\nEXAMPLE\nInput: <<<START>>>basically the velvet sofa thing is, it kinda just dont fit in the hallway at all tbh.<<<END>>>\nOutput: <<<START>>>tbh the velvet sofa just doesn't fit in the hallway.<<<END>>>\n\nEXAMPLE\nInput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>\nOutput: <<<START>>>Our pilot program reduced onboarding time by 40%.<<<END>>>",
-            "hallucination_threshold": 1.0,
+            "prompt": (
+                "Rewrite and polish the text into its strongest clear, natural version.\n\n"
+                "Fix all errors. Improve sentence flow, word choice, word placement, "
+                "transitions, clarity, rhythm, and concision. Remove filler, redundancy, "
+                "repeated ideas, and unnecessary sentences. You may combine, split, reorder, "
+                "shorten, or rewrite sentences whenever that improves the result.\n\n"
+                "Preserve the author's intended meaning, factual claims, names, numbers, "
+                "tone, and level of formality. Do not invent information or make the text "
+                "sound generically formal unless the original calls for it."
+            ),
+            "hallucination_threshold": 0.90,
             "builtin": True,
         },
         {
             "name": "Custom Patch",
-            "prompt": "You are a text-correction engine. You receive one sentence (or short passage) between <<<START>>> and <<<END>>> markers.\n\n- Fix typos, spelling, grammar, punctuation, and capitalization.\n- Improve clarity, conciseness, and overall quality.\n- Preserve the author's core intent and meaning.",
+            "prompt": "You are a text-correction engine. The user will send text to correct.\n\n- Fix typos, spelling, grammar, punctuation, and capitalization.\n- Improve clarity, conciseness, and overall quality.\n- Preserve the author's core intent and meaning.",
             "hallucination_threshold": 1.0,
             "builtin": False,
             "enabled": False,
@@ -285,60 +316,56 @@ DEFAULT_TEMPLATES: list[dict[str, str]] = [
     {
         "name": "Clean Up Dictation",
         "prompt": (
-            "This text was dictated using speech-to-text and contains spoken "
-            "artifacts. Clean it up:\n"
-            "- Remove filler words (um, uh, ah, like, basically, you know, "
-            "I mean, so yeah, kind of, sort of, right, actually, literally, "
-            "honestly, essentially, anyway, well, OK so).\n"
-            "- Remove stuttered or repeated words and false starts.\n"
-            "- Fix run-on sentences — add proper punctuation and split where "
-            "natural pauses should be.\n"
-            "- Fix obvious STT misspellings and missing punctuation.\n"
-            "- Lightly adjust sentence structure ONLY when the original is "
-            "genuinely incoherent. Otherwise keep the author's phrasing.\n"
-            "- Preserve every meaningful idea. Do not summarize or omit.\n"
-            "- Do NOT rewrite from scratch — clean and refine only.\n"
-            "Output ONLY the cleaned text without preamble or explanation."
+            "Turn the dictated content into clean written text.\n\n"
+            "Remove speech fillers, stutters, false starts, accidental "
+            "repetitions, and abandoned phrases. Fix transcription errors, "
+            "spelling, grammar, capitalization, and punctuation. Split run-on "
+            "speech into natural sentences and lightly reorganize wording "
+            "when needed for clarity.\n\n"
+            "Keep every meaningful idea, fact, name, and number. "
+            "Do not summarize, invent details, or change the speaker's "
+            "intended tone."
         ),
     },
     {
         "name": "Professional Tone",
         "prompt": (
-            "Rewrite this text in a clear, professional tone suitable "
-            "for workplace communication:\n"
-            "- Use a neutral professional register — not stiff or overly "
-            "formal.\n"
-            "- Fix all spelling, grammar, and punctuation errors.\n"
-            "- Remove slang, filler, and overly casual language.\n"
-            "- Keep sentences direct and well-structured.\n"
-            "- Preserve the author's intent and all key information.\n"
-            "Output ONLY the rewritten text without preamble or explanation."
+            "Rewrite the content as clear, concise workplace communication.\n\n"
+            "Use a natural professional tone that is confident and direct, "
+            "not stiff or overly formal. Improve organization, sentence flow, "
+            "word choice, grammar, and punctuation. Remove filler, slang "
+            "that is unsuitable for work, and unnecessary repetition.\n\n"
+            "Preserve the intended message, facts, names, numbers, requests, "
+            "and commitments. Do not add claims, greetings, or sign-offs "
+            "that were not present."
         ),
     },
     {
         "name": "Academic & Scholarly",
         "prompt": (
-            "Rewrite this text in an objective, formal, and academic tone suitable "
-            "for research papers, essays, or scholarly publications:\n"
-            "- Use precise, scholarly vocabulary and formal sentence structures.\n"
-            "- Remove first-person pronouns (I, we, my) where possible, adopting "
-            "an objective, third-person perspective.\n"
-            "- Eliminate colloquialisms, contractions, slang, and conversational phrasing.\n"
-            "- Ensure arguments flow logically and transitions are smooth.\n"
-            "- Preserve the exact meaning, factual claims, and technical concepts "
-            "of the original text.\n"
-            "Output ONLY the academic version without preamble or explanation."
+            "Rewrite the content in precise, formal academic prose.\n\n"
+            "Improve logical flow, terminology, sentence structure, "
+            "transitions, grammar, and punctuation. Replace conversational "
+            "phrasing and unsupported emphasis with objective wording. "
+            "Reduce first-person phrasing when doing so does not change "
+            "the meaning.\n\n"
+            "Preserve every factual claim, qualification, citation, "
+            "technical term, name, and number. Do not invent evidence, "
+            "citations, conclusions, or technical details."
         ),
     },
     {
         "name": "Notes Assistant",
         "prompt": (
-            "Format and structure the text cleanly as readable notes:\n"
-            "1. If input is already a list/notes layout, keep it but fix typos, grammar, and alignment.\n"
-            "2. If input is prose/dictation, convert it into structured bulleted notes.\n"
-            "3. Use headers (#, ##) for sections, bullet points (-) for items, and bolding (**) for key terms.\n"
-            "4. Keep all facts, names, code, and technical terms exactly as given. Do not summarize or omit.\n"
-            "5. Output ONLY the notes. No preamble, no explanation."
+            "Convert the content into clear Markdown notes.\n\n"
+            "Use short section headings only when they help. Put each "
+            "main idea on its own \"- \" bullet line. Use indented bullets "
+            "for supporting details. Use bold text sparingly for important "
+            "terms. If the content is already notes, improve its "
+            "organization and consistency.\n\n"
+            "Preserve all facts, names, numbers, code, links, paths, "
+            "and technical details. Do not invent information. "
+            "Do not write prose before or after the notes."
         ),
     },
 ]

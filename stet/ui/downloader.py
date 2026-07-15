@@ -153,6 +153,12 @@ class DownloadWorker(QThread):
                         extract_path.mkdir(parents=True, exist_ok=True)
                         with zipfile.ZipFile(dest, "r") as zip_ref:
                             zip_ref.extractall(extract_path)
+                        # Remove the leftover zip file after successful extraction
+                        try:
+                            if dest.exists():
+                                dest.unlink()
+                        except Exception:
+                            pass
 
                 finally:
                     # Clean up temporary download file if it still exists
@@ -193,8 +199,8 @@ class DownloadProgressDialog(QDialog):
         if fusion:
             self.setStyle(fusion)
 
-        # Set fixed size and center on screen
-        self.setFixedSize(460, 240)
+        # Set minimum width and center on screen
+        self.setMinimumWidth(460)
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         sr = screen.availableGeometry() if screen else None
         if sr:
@@ -441,7 +447,8 @@ class DownloadProgressDialog(QDialog):
         self._cleanup_partial_files()
 
         if self._is_cancelled:
-            self.reject()
+            if self.isVisible():
+                super().reject()
             return
 
         if success:

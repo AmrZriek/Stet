@@ -49,7 +49,7 @@ def test_aggressive_patch_accepts_model_judgment_on_repeated_word(monkeypatch):
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             "This is very important."
         )
     )
@@ -67,7 +67,7 @@ def test_aggressive_patch_accepts_model_judgment_on_repeated_sentence(monkeypatc
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None: (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
             "Stop."
         )
     )

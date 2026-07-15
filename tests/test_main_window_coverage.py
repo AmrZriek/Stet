@@ -3,7 +3,7 @@
 Targets: _render_diff, _send_chat, _on_chat_token, _on_chat_done,
 _on_chat_error, _accept, _copy, _reset, eventFilter, _on_strength_changed,
 _on_model_status, closeEvent, _toggle_shortcuts_overlay, _normalize_strength,
-_strength_from_label, _strength_index, _on_escape, _accept_if_ready,
+_strength_from_label, _on_escape, _accept_if_ready,
 _apply_template, _refresh_templates, _build_ui, _position_window,
 keyPressEvent, mouse events, _clear_chat_transcript.
 """
@@ -155,14 +155,6 @@ class TestStrengthFromLabel:
             CorrectionWindow._strength_from_label("Something Else") == "Something Else"
         )
 
-
-class TestStrengthIndex:
-    def test_indices(self):
-        assert CorrectionWindow._strength_index("spelling_only") == 0
-        assert CorrectionWindow._strength_index("full_correction") == 1
-        assert CorrectionWindow._strength_index("rewrite_polish") == 2
-        assert CorrectionWindow._strength_index("custom_patch") == 3
-        assert CorrectionWindow._strength_index("unknown") == 1
 
 
 # ── _render_diff tests ────────────────────────────────────────────────────
@@ -485,16 +477,6 @@ class TestCloseEvent:
         assert cw._stream_worker is None
         assert cw._correction_stream_worker is None
 
-    def test_stops_chat_worker(self, qtbot, cfg):
-        cw = _make_cw(cfg, qtbot)
-        mock_w = MagicMock()
-        mock_w.isRunning.return_value = True
-        cw._chat_worker = mock_w
-        event = QCloseEvent()
-        cw.closeEvent(event)
-        mock_w.stop.assert_called()
-        assert cw._chat_worker is None
-
     def test_sets_cancelled(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw._stream_worker = MagicMock()
@@ -720,16 +702,10 @@ class TestReplaceChatStreamRegion:
         cw._active_ai_bubble.setText.assert_called()
 
 
-# ── _chat_transcript_text / _chat_transcript_html ─────────────────────────
+# ── _chat_transcript_html ─────────────────────────────────────────────────
 
 
 class TestChatTranscriptMethods:
-    def test_transcript_text(self, qtbot, cfg):
-        cw = _make_cw(cfg, qtbot)
-        cw._add_chat_bubble("user", "Hello")
-        text = cw._chat_transcript_text()
-        assert "Hello" in text
-
     def test_transcript_html(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw._add_chat_bubble("user", "Hello")
@@ -807,20 +783,7 @@ class TestAcceptIfReady:
             mock_accept.assert_not_called()
 
 
-# ── _normalize_strength / _strength_index / _strength_from_label ──────────
-
-
-class TestStrengthNormalization:
-    def test_roundtrip(self):
-        for val in (
-            "spelling_only",
-            "full_correction",
-            "rewrite_polish",
-            "custom_patch",
-        ):
-            idx = CorrectionWindow._strength_index(val)
-            assert isinstance(idx, int)
-
+# ── _normalize_strength / _strength_from_label ─────────────────────────────
 
 # ── _do_correction ────────────────────────────────────────────────────────
 
