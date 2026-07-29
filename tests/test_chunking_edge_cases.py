@@ -90,3 +90,4 @@ def test_chunking_carriage_returns():
     
     reassembled = "".join(chunk + sep for chunk, sep in chunks)
     assert reassembled == "Line 1.\n\nLine 2.\nLine 3."
+

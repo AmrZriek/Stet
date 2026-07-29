@@ -11,8 +11,8 @@ param(
 Set-Location -LiteralPath $ProjectRoot
 
 $versions = @(
-    @{Label="b9940"; Dir="llama-b9940-bin-win-cuda-12.4-x64"},
-    @{Label="b10016"; Dir="llama-b10016-bin-win-cuda-12.4-x64"}
+    @{Label="b10016"; Dir="llama-b10016-bin-win-cuda-12.4-x64"},
+    @{Label="b10107"; Dir="llama-b10107-bin-win-cuda-12.4-x64"}
 )
 
 $results = @{}
@@ -189,14 +189,16 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host " COMPARISON" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-if ($results.Count -eq 2 -and $results['b9940'].AvgTPS -and $results['b10016'].AvgTPS) {
-    $old = $results['b9940']
-    $new = $results['b10016']
+$lblOld = $versions[0].Label
+$lblNew = $versions[1].Label
+if ($results.Count -eq 2 -and $results[$lblOld].AvgTPS -and $results[$lblNew].AvgTPS) {
+    $old = $results[$lblOld]
+    $new = $results[$lblNew]
     $ratio = [math]::Round($new.AvgTPS / $old.AvgTPS, 4)
     $pct = [math]::Round(($ratio - 1.0) * 100, 2)
 
-    Write-Host "b9940  (old): $($old.AvgTPS) tok/s (runs=$($old.Runs))" -ForegroundColor White
-    Write-Host "b10016 (new): $($new.AvgTPS) tok/s (runs=$($new.Runs))" -ForegroundColor White
+    Write-Host "$lblOld (old): $($old.AvgTPS) tok/s (runs=$($old.Runs))" -ForegroundColor White
+    Write-Host "$lblNew (new): $($new.AvgTPS) tok/s (runs=$($new.Runs))" -ForegroundColor White
     Write-Host "Ratio (new/old): $ratio" -ForegroundColor Cyan
 
     if ($pct -ge -5 -and $pct -le 10) {

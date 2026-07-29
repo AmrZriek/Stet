@@ -68,9 +68,11 @@ def test_startup_checkboxes_default(temp_config_setup, qtbot):
     assert not w._startup_cb.isChecked()
     assert w._show_on_launch_cb.isChecked()
 
-    # Toggle and verify config updates
-    w._startup_cb.setChecked(True)
-    assert cfg.get("startup_on_login") is True
+    # Toggle startup checkbox and verify it emits startup_toggled signal
+    # (instead of setting config directly — config is set by StetApp._toggle_startup)
+    with qtbot.waitSignal(w.startup_toggled, timeout=1000) as blocker:
+        w._startup_cb.setChecked(True)
+    assert blocker.args == [True]
 
     w._show_on_launch_cb.setChecked(False)
     assert cfg.get("show_welcome_on_startup") is False
@@ -122,6 +124,7 @@ def test_signals(temp_config_setup, qtbot):
 def test_closed_signal(temp_config_setup, qtbot):
     cfg = ConfigManager()
     w = WelcomeWindow(cfg=cfg)
+    w._app_is_quitting = True
     qtbot.addWidget(w)
 
     with qtbot.waitSignal(w.closed_signal, timeout=1000):

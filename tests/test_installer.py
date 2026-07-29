@@ -11,15 +11,18 @@ Tests cover:
 from __future__ import annotations
 
 import sys
-import stet.windows_installer_payload
-sys.modules["windows_installer_payload"] = stet.windows_installer_payload
-
 import os
 import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+if sys.platform != "win32":
+    pytest.skip("Windows-only installer", allow_module_level=True)
+
+import stet.windows_installer_payload
+sys.modules["windows_installer_payload"] = stet.windows_installer_payload
 
 @pytest.fixture(autouse=True)
 def mock_downloader_dialog():
@@ -339,8 +342,8 @@ class TestLicensePage:
 
 
 class TestDestinationPage:
-    def test_default_path_is_localappdata_stet(self, qapp):
-        """Destination page defaults to %LOCALAPPDATA%\\Stet."""
+    def test_default_path_is_program_files_stet(self, qapp):
+        r"""Destination page defaults to %ProgramFiles%\Stet."""
         from windows_installer_payload import DestinationPage, DEFAULT_INSTALL_DIR
         page = DestinationPage()
         assert page._path_edit.text() == DEFAULT_INSTALL_DIR
@@ -470,13 +473,12 @@ class TestCompletionPage:
         page = CompletionPage()
         page._desktop_cb.setChecked(False)
         page._startmenu_cb.setChecked(False)
-        page._download_backend_cb.setChecked(False)
         page._download_model_cb.setChecked(False)
         page._launch_cb.setChecked(False)
 
         assert page.create_desktop_shortcut is False
         assert page.create_startmenu_shortcut is False
-        assert page.download_backend is False
+        assert page.download_backend is True
         assert page.download_model is False
         assert page.launch_stet is False
 
@@ -526,7 +528,6 @@ class TestPostInstallActions:
 
         wizard = StetInstaller(installer_zip)
         wizard.setField("installDir", str(tmp_path))
-        wizard._completion_page._download_backend_cb.setChecked(True)
         wizard._completion_page._download_model_cb.setChecked(True)
         wizard._completion_page._launch_cb.setChecked(False)
 
@@ -550,11 +551,11 @@ class TestPostInstallActions:
         wizard.setField("installDir", str(tmp_path))
         wizard._completion_page._desktop_cb.setChecked(False)
         wizard._completion_page._startmenu_cb.setChecked(False)
-        wizard._completion_page._download_backend_cb.setChecked(False)
         wizard._completion_page._download_model_cb.setChecked(False)
         wizard._completion_page._launch_cb.setChecked(True)
 
-        with patch("windows_installer_payload.subprocess.Popen") as mock_popen:
+        with patch("windows_installer_payload.subprocess.Popen") as mock_popen, \
+             patch("stet.ui.downloader.DownloadProgressDialog"):
             wizard._run_post_install_actions()
 
         mock_popen.assert_called_once()
@@ -572,11 +573,11 @@ class TestPostInstallActions:
         wizard.setField("installDir", str(tmp_path))
         wizard._completion_page._desktop_cb.setChecked(False)
         wizard._completion_page._startmenu_cb.setChecked(False)
-        wizard._completion_page._download_backend_cb.setChecked(False)
         wizard._completion_page._download_model_cb.setChecked(False)
         wizard._completion_page._launch_cb.setChecked(False)
 
-        with patch("windows_installer_payload.subprocess.Popen") as mock_popen:
+        with patch("windows_installer_payload.subprocess.Popen") as mock_popen, \
+             patch("stet.ui.downloader.DownloadProgressDialog"):
             wizard._run_post_install_actions()
 
         mock_popen.assert_not_called()
@@ -663,10 +664,43 @@ class TestARPRegistry:
         wizard.setField("installDir", str(tmp_path))
         wizard._completion_page._desktop_cb.setChecked(False)
         wizard._completion_page._startmenu_cb.setChecked(False)
-        wizard._completion_page._download_backend_cb.setChecked(False)
         wizard._completion_page._download_model_cb.setChecked(False)
         wizard._completion_page._launch_cb.setChecked(False)
 
-        with patch.object(wizard, "_write_arp_registry") as mock_arp:
+        with patch.object(wizard, "_write_arp_registry") as mock_arp, \
+             patch("stet.ui.downloader.DownloadProgressDialog"):
             wizard._run_post_install_actions()
             mock_arp.assert_called_once_with(tmp_path)
+
+
+class TestZipDiscoveryAndContainment:
+    """Tests for _find_zip_path and _safe_extract edge cases."""
+
+    def test_find_zip_path_meipass(self, tmp_path, monkeypatch):
+        from windows_installer_payload import _find_zip_path, ZIP_NAME
+
+        meipass_dir = tmp_path / "meipass"
+        meipass_dir.mkdir()
+        fake_zip = meipass_dir / ZIP_NAME
+        fake_zip.touch()
+
+        monkeypatch.setattr(sys, "_MEIPASS", str(meipass_dir), raising=False)
+        found = _find_zip_path()
+        assert found == fake_zip
+
+    def test_safe_extract_allows_target_equals_dest(self, tmp_path):
+        from windows_installer_payload import _safe_extract
+
+        dest = tmp_path / "extract_dest"
+        dest.mkdir()
+
+        # Create zip containing entry "." or ""
+        zip_path = tmp_path / "test_containment.zip"
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("test.txt", "hello")
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            _safe_extract(zf, dest)
+
+        assert (dest / "test.txt").read_text() == "hello"
+

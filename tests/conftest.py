@@ -6,11 +6,20 @@ without a real model.
 """
 
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import requests
+
+# The macOS Cocoa platform plug-in can terminate a headless pytest process
+# when a unit test shows a transient window.  UI behavior is still exercised
+# through Qt, just with the deterministic offscreen platform instead.
+if sys.platform == "darwin":
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -112,6 +121,20 @@ def suppress_first_run_and_update(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def suppress_background_welcome_poll(request, monkeypatch):
+    """Prevent unrelated StetApp test instances from opening welcome UI later.
+
+    The production app polls for an external welcome flag every two seconds.
+    A unit-test instance can outlive its test through Qt ownership, so its
+    timer otherwise opens a real AppKit window during a later test.  The
+    dedicated welcome-window module exercises the poll explicitly.
+    """
+    if request.module.__name__.endswith("test_welcome_window"):
+        return
+    monkeypatch.setattr("stet.core.app.StetApp._check_welcome_flag", lambda self: None)
+
+
+@pytest.fixture(autouse=True)
 def isolate_debug_log(tmp_path, monkeypatch):
     """Redirect debug log to a temp file so tests never pollute app_debug.log."""
     monkeypatch.setattr("stet.core.utils.DEBUG_LOG", tmp_path / "test_debug.log")
@@ -119,19 +142,45 @@ def isolate_debug_log(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolate_config(request, tmp_path, monkeypatch):
-    """Redirect config file to a temp file so tests never pollute config.json."""
+    """Redirect config file & APP_DATA_DIR to a temp file so tests never pollute root."""
     if "test_frozen_compat" in request.module.__name__:
         return
     temp_config = tmp_path / "config.json"
+    temp_app_data = tmp_path / "app_data"
+    temp_app_data.mkdir(parents=True, exist_ok=True)
+
     monkeypatch.setattr("stet.constants.CONFIG_FILE", temp_config)
     monkeypatch.setattr("stet.core.config.CONFIG_FILE", temp_config)
-
+    monkeypatch.setattr("stet.constants.APP_DATA_DIR", temp_app_data)
+    monkeypatch.setattr("stet.core.history.APP_DATA_DIR", temp_app_data)
+    monkeypatch.setattr("stet.core.config.MODELS_DIR", tmp_path / "Models")
 
 
 @pytest.fixture(autouse=True)
 def mock_osd_show(monkeypatch):
     """Stub show_animated on SilentCorrectionOSD to prevent PyQt6 aborts in headless tests."""
     monkeypatch.setattr("stet.ui.osd.SilentCorrectionOSD.show_animated", lambda *args, **kwargs: None)
+
+
+@pytest.fixture(autouse=True)
+def mock_macos_system_tray(monkeypatch):
+    """Keep unit tests from invoking macOS notification-center services.
+
+    Qt's real QSystemTrayIcon reaches Notification Center even when no user
+    session is available (as in the test runner).  That can terminate Python
+    without a pytest failure report.  Production builds still use the genuine
+    system menu-bar icon; this is test-only isolation.
+    """
+    if sys.platform != "darwin":
+        return
+    from PyQt6.QtWidgets import QSystemTrayIcon as RealSystemTrayIcon
+    import stet.core.app as app_module
+
+    tray_class = MagicMock()
+    tray_class.MessageIcon = RealSystemTrayIcon.MessageIcon
+    tray_class.ActivationReason = RealSystemTrayIcon.ActivationReason
+    tray_class.isSystemTrayAvailable.return_value = False
+    monkeypatch.setattr(app_module, "QSystemTrayIcon", tray_class)
 
 
 @pytest.fixture(autouse=True)
@@ -147,11 +196,56 @@ def mock_llm_get(monkeypatch):
     monkeypatch.setattr(requests, "get", mock_get)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def artifact_hygiene(tmp_path_factory):
+    """Single wiped scratch dir per run; repo root stays clean.
+
+    tests/.artifacts/ is the ONLY shared scratch location tests may use.
+    It is deleted and recreated at session start so stale files from a
+    previous run can never be mistaken for fresh output. Also removes the
+    legacy root litter dirs (artifacts/, out/, .pytest_cache/, .ruff_cache/)
+    and data files (history.jsonl, server_log.txt) produced by older tests.
+    """
+    scratch = ROOT / "tests" / ".artifacts"
+    for legacy in (
+        ROOT / "artifacts",
+        ROOT / "out",
+        ROOT / ".pytest_cache",
+        ROOT / ".ruff_cache",
+        ROOT / "history.jsonl",
+        ROOT / "server_log.txt",
+        scratch,
+    ):
+        if legacy.exists():
+            try:
+                if legacy.is_dir():
+                    shutil.rmtree(legacy, ignore_errors=True)
+                else:
+                    legacy.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    scratch.mkdir(parents=True, exist_ok=True)
+    yield scratch
+
+    # Clean up stray root files created during run
+    for legacy in (ROOT / ".pytest_cache", ROOT / ".ruff_cache", ROOT / "artifacts", ROOT / "out"):
+        if legacy.exists():
+            try:
+                shutil.rmtree(legacy, ignore_errors=True)
+            except OSError:
+                pass
+    for stray_file in (ROOT / "history.jsonl", ROOT / "server_log.txt"):
+        if stray_file.exists():
+            try:
+                stray_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 # TODO: Windows mock GC access violation in tests (Medium)
 # Root Cause: PyQt6 C++ destructor ordering during Python GC when StetApp instances are garbage-collected.
 # MagicMock objects that mock Qt widgets (e.g., QSystemTrayIcon, QTimer, signal connections) can be destroyed
 # in an order that triggers Qt's C++ destructor chain to access already-freed memory.
 # Proposed Fix: Add addFinalizer/addCleanup in test fixtures to explicitly call app.deleteLater() + QApplication.processEvents()
 # before GC runs to ensure clean C++ widget teardown before Python objects are garbage-collected.
-
-

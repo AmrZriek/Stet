@@ -32,6 +32,20 @@ from stet.llm.model_manager import ModelManager
 def mock_register_hotkey(monkeypatch):
     """Prevent real system-wide hotkey registration and native event filter crashes."""
     import ctypes
+    import stet.core.app as app_module
+
+    if sys.platform != "win32":
+        # Win32-only tests are explicitly skipped on non-Windows; this fake
+        # surface keeps portable setup code importable without native APIs.
+        user32 = MagicMock()
+        kernel32 = MagicMock()
+        monkeypatch.setattr(
+            ctypes,
+            "windll",
+            type("Windll", (), {"user32": user32, "kernel32": kernel32})(),
+            raising=False,
+        )
+        monkeypatch.setattr(app_module, "ctypes", ctypes, raising=False)
 
     monkeypatch.setattr(
         ctypes.windll.user32, "RegisterHotKey", MagicMock(return_value=1)
@@ -297,6 +311,7 @@ class TestWinHotkeyFilter:
         assert result == (False, 0)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 native window APIs")
 class TestIsTerminalOrIde:
     def test_none_returns_false(self):
         from stet.core.app import _is_terminal_or_ide
@@ -662,6 +677,7 @@ class TestStetAppWindowDestroyed:
         assert app._window is None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 clipboard path")
 class TestStetAppPasteText:
     @patch("stet.core.app.QSystemTrayIcon")
     @patch("stet.core.app._send_ctrl_chord")
@@ -804,6 +820,7 @@ class TestStetAppOnUpdateAvailable:
         app.tray.showMessage.assert_called()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows updater path")
 class TestStetAppUpdaterCommand:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_updater_command_source(self, mock_tray_cls, qtbot, monkeypatch):
@@ -837,6 +854,7 @@ class TestStetAppUpdaterCommand:
             app._updater_command()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows updater path")
 class TestStetAppStartAppUpdate:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_decline_update(self, mock_tray_cls, qtbot, monkeypatch):
@@ -906,6 +924,7 @@ class TestStetAppShowFirstRun:
             mock_mb.assert_not_called()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows download script")
 class TestStetAppRunDownloadScript:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_script_missing_shows_message(
@@ -946,6 +965,7 @@ class TestStetAppRunDownloadScript:
         app.tray.showMessage.assert_called()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows registry startup")
 class TestStetAppStartupToggle:
     @patch("stet.core.app.subprocess.run")
     @patch("stet.core.app.QSystemTrayIcon")
@@ -1036,14 +1056,14 @@ class TestStetAppIsModelReady:
     def test_not_loaded(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
-        app.ac_model.is_loaded = MagicMock(return_value=False)
+        app.ac_model.is_ready = MagicMock(return_value=False)
         assert app._is_model_ready() is False
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_loaded_health_ok(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
-        app.ac_model.is_loaded = MagicMock(return_value=True)
+        app.ac_model.is_ready = MagicMock(return_value=True)
         app.ac_model._health_url = MagicMock(
             return_value="http://localhost:8080/health"
         )
@@ -1056,7 +1076,7 @@ class TestStetAppIsModelReady:
     def test_loaded_health_fail(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
-        app.ac_model.is_loaded = MagicMock(return_value=True)
+        app.ac_model.is_ready = MagicMock(return_value=True)
         app.ac_model._health_url = MagicMock(
             return_value="http://localhost:8080/health"
         )
@@ -1132,6 +1152,7 @@ class TestStetAppSafeClipboard:
         app._safe_copy.assert_called_with("text")
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows UI Automation selection")
 class TestStetAppCaptureSelection:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_capture_selection_uia_success(
@@ -1366,6 +1387,7 @@ class TestStetAppTrayActivated:
         app._open_settings.assert_called_once()
 
     @patch("stet.core.app.QSystemTrayIcon")
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows tray menu path")
     def test_single_click_does_nothing(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
@@ -1433,6 +1455,9 @@ class TestStetAppHandleHotkeyFired:
     def test_silent_mode_starts_thread(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
+        # The production macOS path constructs a native OSD window; this test
+        # only verifies dispatch into the worker thread.
+        app._silent_osd_signal.disconnect()
         with patch("threading.Thread") as mock_thread:
             mock_thread.return_value = MagicMock()
             hk_cfg = {
@@ -1465,6 +1490,10 @@ class TestStetAppHandleHotkeyFired:
         app._capture_selection = lambda: large_text
         app._safe_copy = MagicMock()
         app._old_clip = ""
+
+        # This test is about the warning signal only.  Do not let the panel
+        # trigger create a real correction window and its worker thread.
+        app._trigger.disconnect()
 
         received = []
         app._large_doc_warning_signal.connect(lambda t: received.append(t))
@@ -1501,6 +1530,7 @@ class TestStetAppInitSignals:
         app.tray.showMessage.assert_called()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 hotkey registration")
 class TestStetAppRegisterHotkey:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_register_hotkey_success(self, mock_tray_cls, qtbot, monkeypatch):

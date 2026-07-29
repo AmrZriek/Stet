@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -84,41 +85,45 @@ def test_find_cuda_dir(tmp_path):
             assert detected is not None
 
 
-def test_pyinstaller_cmd_construction():
+def test_pyinstaller_cmd_construction(tmp_path):
     """Verify generated PyInstaller commands include metadata flags on Windows."""
+    art = tmp_path / "artifacts"
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._pyinstaller_cmd("3.2.0", Path("artifacts"))
+        cmd = build._pyinstaller_cmd("3.2.0", art)
         assert "--noconsole" in cmd
         assert "--name=Stet" in cmd
         assert str(build.MAIN_SCRIPT) in cmd
 
     with patch("build.PLATFORM", "macOS"):
-        cmd = build._pyinstaller_cmd("3.2.0", Path("artifacts"))
+        cmd = build._pyinstaller_cmd("3.2.0", art)
         assert "--windowed" in cmd
 
 
-def test_updater_pyinstaller_cmd_construction():
+def test_updater_pyinstaller_cmd_construction(tmp_path):
     """Verify updater compilation commands are correct."""
+    art = tmp_path / "artifacts"
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._updater_pyinstaller_cmd("3.2.0", Path("artifacts"))
+        cmd = build._updater_pyinstaller_cmd("3.2.0", art)
         assert "--console" in cmd
         assert "--name=StetUpdater" in cmd
         assert str(build.UPDATER_SCRIPT) in cmd
 
 
-def test_uninstaller_pyinstaller_cmd_construction():
+def test_uninstaller_pyinstaller_cmd_construction(tmp_path):
     """Verify uninstaller compilation commands are correct."""
+    art = tmp_path / "artifacts"
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._uninstaller_pyinstaller_cmd("1.0.0", Path("artifacts"))
+        cmd = build._uninstaller_pyinstaller_cmd("1.0.0", art)
         assert "--noconsole" in cmd
         assert "--name=StetUninstall" in cmd
         assert str(build.UNINSTALLER_SCRIPT) in cmd
 
 
-def test_base_pyinstaller_cmd_shared_flags():
+def test_base_pyinstaller_cmd_shared_flags(tmp_path):
     """_base_pyinstaller_cmd includes all shared PyInstaller flags."""
+    out = tmp_path / "out"
     with patch("build.PLATFORM", "Windows"):
-        cmd = build._base_pyinstaller_cmd("TestApp", Path("out"))
+        cmd = build._base_pyinstaller_cmd("TestApp", out)
         assert "-y" in cmd
         assert "--clean" in cmd
 
@@ -131,4 +136,55 @@ def test_total_steps_includes_uninstaller():
         builder = build.PlatformBuilder("1.0.0")
         steps = builder._total_steps()
         assert steps >= 7
+
+
+def test_macos_ad_hoc_signing_does_not_enable_hardened_runtime(tmp_path):
+    """Ad-hoc builds have no signing team for hardened library validation."""
+    builder = object.__new__(build.PlatformBuilder)
+    builder.sign_identity = "-"
+    with patch("build.run") as run:
+        builder._sign_macos_path(tmp_path / "Stet", tmp_path / "empty.plist")
+
+    command = run.call_args.args[0]
+    assert "--options" not in command
+    assert command[command.index("--sign") + 1] == "-"
+
+
+def test_macos_developer_id_signing_keeps_hardened_runtime(tmp_path):
+    builder = object.__new__(build.PlatformBuilder)
+    builder.sign_identity = "Developer ID Application: Example"
+    with patch("build.run") as run:
+        builder._sign_macos_path(tmp_path / "Stet", tmp_path / "empty.plist")
+
+    command = run.call_args.args[0]
+    assert command[command.index("--options") + 1] == "runtime"
+    assert "--timestamp" in command
+
+
+def test_macos_backend_target_comes_from_the_metal_runtime(tmp_path):
+    backend = tmp_path / "llama-b10068-bin-macos-arm64"
+    backend.mkdir()
+    server = backend / "llama-server"
+    metal = backend / "libggml-metal.0.17.0.dylib"
+    cpu = backend / "libggml-cpu.0.17.0.dylib"
+    server.touch()
+    metal.touch()
+    cpu.touch()
+
+    def otool(command, **_kwargs):
+        target = Path(command[-1]).name
+        minos = "26.0" if "metal" in target else "14.0"
+        return SimpleNamespace(returncode=0, stdout=f"cmd LC_BUILD_VERSION\n minos {minos}\n")
+
+    with patch("build.subprocess.run", side_effect=otool):
+        assert build._macos_backend_minimum_version(server) == "26.0"
+    assert build._llama_release_from_path(server) == 10068
+
+
+def test_release_config_sampling_defaults():
+    """RELEASE_CONFIG sampling defaults must match locked release requirements."""
+    assert build.RELEASE_CONFIG["temperature"] == 0.0
+    assert build.RELEASE_CONFIG["top_k"] == 1
+    assert build.RELEASE_CONFIG["top_p"] == 0.95
+    assert build.RELEASE_CONFIG["min_p"] == 0.0
 

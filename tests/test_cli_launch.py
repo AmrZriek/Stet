@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from stet.main import _LOG_FILE, _boot_log
+from stet.main import _LOG_FILE, _boot_log, _macos_instance_lock_path
 
 # ── _boot_log() ──────────────────────────────────────────────────────────
 
@@ -98,6 +98,12 @@ class TestSingleInstanceLock:
         assert "sys.excepthook" in src
         assert "threading.excepthook" in src
 
+    def test_macos_lock_path_is_safe_and_uses_the_temp_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+        path = _macos_instance_lock_path("Stet / test: hotkey")
+        assert path.parent == tmp_path
+        assert path.name == "Stet___test__hotkey.lock"
+
 
 # ── Module-level imports ──────────────────────────────────────────────────
 
@@ -127,6 +133,11 @@ class TestModuleLevelImports:
 
 class TestMainFunction:
     """Tests that exercise main() logic paths directly."""
+
+    @pytest.fixture(autouse=True)
+    def _exercise_the_legacy_qsharedmemory_path(self, monkeypatch):
+        """These mocks assert the Windows/Linux branch, even on a Mac test host."""
+        monkeypatch.setattr("stet.main.sys.platform", "win32")
 
     def test_main_installs_excepthooks(self, monkeypatch):
         """main() sets sys.excepthook and threading.excepthook."""

@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.2.0"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -32,8 +32,6 @@ os.environ.setdefault("QT_SCALE_FACTOR_ROUNDING_POLICY", "PassThrough")
 # ── Platform detection ───────────────────────────────────────────────────────
 WINDOWS = sys.platform == "win32"
 MACOS = sys.platform == "darwin"
-if WINDOWS:
-    pass
 
 # ── Portable base directory ──────────────────────────────────────────────────
 # When frozen (PyInstaller) or compiled (Nuitka), exe lives at project root.
@@ -52,16 +50,77 @@ _is_compiled = (
 if _is_compiled:
     exe_path = Path(sys.executable).resolve()
     if MACOS and ".app/Contents/MacOS" in exe_path.as_posix():
-        SCRIPT_DIR = exe_path.parent.parent.parent.parent.resolve()
+        # Keep the app bundle immutable. User state is resolved below through
+        # Foundation's Application Support location, while bundled resources
+        # remain discoverable from Contents/Resources.
+        APP_BUNDLE_DIR = exe_path.parent.parent.parent.resolve()
+        BUNDLED_RESOURCES_DIR = APP_BUNDLE_DIR / "Contents" / "Resources"
+        SCRIPT_DIR = APP_BUNDLE_DIR
     else:
+        APP_BUNDLE_DIR = None
+        BUNDLED_RESOURCES_DIR = None
         SCRIPT_DIR = exe_path.parent.resolve()
 else:
+    APP_BUNDLE_DIR = None
+    BUNDLED_RESOURCES_DIR = None
     SCRIPT_DIR = Path(__file__).parent.parent.resolve()
 
-CONFIG_FILE = SCRIPT_DIR / "config.json"
-LLAMA_CPP_DIR = SCRIPT_DIR / "llama_cpp"
-LOG_FILE = SCRIPT_DIR / "server_log.txt"
-DEBUG_LOG = SCRIPT_DIR / "app_debug.log"
+if MACOS and not _is_compiled:
+    # Development runs and live checks are deliberately self-contained. Keep
+    # the model and llama backend visibly at the checkout root instead of in
+    # a hidden runtime directory or an unrelated Application Support install.
+    # A packaged .app remains immutable and follows the branch below.
+    PROJECT_RUNTIME_DIR = SCRIPT_DIR
+    LEGACY_PROJECT_RUNTIME_DIR = SCRIPT_DIR / ".stet-runtime"
+    APP_DATA_DIR = PROJECT_RUNTIME_DIR
+    MODELS_DIR = SCRIPT_DIR / "Models"
+    BACKENDS_DIR = SCRIPT_DIR / "backends"
+    DOWNLOADS_DIR = SCRIPT_DIR / "downloads"
+    CONFIG_FILE = SCRIPT_DIR / "config.json"
+    LOG_FILE = SCRIPT_DIR / "logs" / "server_log.txt"
+    DEBUG_LOG = SCRIPT_DIR / "logs" / "app_debug.log"
+    for _directory in (MODELS_DIR, BACKENDS_DIR, DOWNLOADS_DIR, LOG_FILE.parent):
+        _directory.mkdir(parents=True, exist_ok=True)
+    LLAMA_CPP_DIR = BACKENDS_DIR / "llama_cpp"
+    BUNDLED_BACKEND_DIR = BACKENDS_DIR
+elif MACOS:
+    # A signed packaged application is immutable. Foundation gives it the
+    # proper sandbox-aware user Library locations for user-owned state.
+    from stet.core.macos_paths import ensure_directories, resolve_paths
+
+    _mac_paths = resolve_paths("Stet")
+    if _mac_paths.supported and ensure_directories(_mac_paths):
+        APP_DATA_DIR = _mac_paths.application_support
+        MODELS_DIR = _mac_paths.models
+        BACKENDS_DIR = APP_DATA_DIR / "backends"
+        DOWNLOADS_DIR = _mac_paths.downloads
+        CONFIG_FILE = APP_DATA_DIR / "config.json"
+        LOG_FILE = _mac_paths.logs / "server_log.txt"
+        DEBUG_LOG = _mac_paths.logs / "app_debug.log"
+    else:
+        # This only applies to constrained source/test environments without
+        # Foundation. A normal packaged macOS app always uses Library paths.
+        APP_DATA_DIR = SCRIPT_DIR
+        MODELS_DIR = SCRIPT_DIR / "Models"
+        BACKENDS_DIR = SCRIPT_DIR / "backends"
+        DOWNLOADS_DIR = SCRIPT_DIR / "downloads"
+        CONFIG_FILE = SCRIPT_DIR / "config.json"
+        LOG_FILE = SCRIPT_DIR / "server_log.txt"
+        DEBUG_LOG = SCRIPT_DIR / "app_debug.log"
+    LLAMA_CPP_DIR = BACKENDS_DIR / "llama_cpp"
+    BUNDLED_BACKEND_DIR = (BUNDLED_RESOURCES_DIR or SCRIPT_DIR) / "llama_cpp"
+else:
+    LEGACY_PROJECT_RUNTIME_DIR = None
+    APP_DATA_DIR = SCRIPT_DIR
+    MODELS_DIR = SCRIPT_DIR
+    BACKENDS_DIR = SCRIPT_DIR
+    DOWNLOADS_DIR = SCRIPT_DIR
+    CONFIG_FILE = SCRIPT_DIR / "config.json"
+    LLAMA_CPP_DIR = SCRIPT_DIR / "llama_cpp"
+    BUNDLED_BACKEND_DIR = LLAMA_CPP_DIR
+    LOG_FILE = SCRIPT_DIR / "server_log.txt"
+    DEBUG_LOG = SCRIPT_DIR / "app_debug.log"
+
 
 SERVER_EXE = "llama-server.exe" if WINDOWS else "llama-server"
 
@@ -70,14 +129,14 @@ GITHUB_RELEASES_API = "https://api.github.com/repos/AmrZriek/Stet/releases/lates
 # ── llama.cpp backend auto-download ──────────────────────────────────────────
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
-LLAMA_BACKEND_VERSION = "b10016"
+LLAMA_BACKEND_VERSION = "b10107"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BACKEND_VERSION}"
 LLAMA_BACKEND_URLS = {
     "llama": f"{_LLAMA_BASE}/llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip",
     "cuda": f"{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip",
 }
 LLAMA_BACKEND_HASHES = {
-    "llama": "AC780BF9A82AB9487946F458EFF6B7A57568FA831C6E9268DA32A1DB986BF75D",
+    "llama": "1E43BBEC9691CD0BC636603C366769148FA6265FD261C5F7C67050B450BBC237",
     "cuda": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6",
 }
 LLAMA_BACKEND_DIR = f"llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
@@ -95,6 +154,66 @@ WELCOME_SAMPLE_TEXT = (
 )
 
 
+DEFAULT_TEMPLATES: list[dict[str, str]] = [
+
+    {
+        "name": "Clean Up Dictation",
+        "prompt": (
+            "Turn the dictated content into clean written text.\n\n"
+            "Remove speech fillers, stutters, false starts, accidental "
+            "repetitions, and abandoned phrases. Fix transcription errors, "
+            "spelling, grammar, capitalization, and punctuation. Split run-on "
+            "speech into natural sentences and lightly reorganize wording "
+            "when needed for clarity.\n\n"
+            "Keep every meaningful idea, fact, name, and number. "
+            "Do not summarize, invent details, or change the speaker's "
+            "intended tone."
+        ),
+    },
+    {
+        "name": "Professional Tone",
+        "prompt": (
+            "Rewrite the content as clear, concise workplace communication.\n\n"
+            "Use a natural professional tone that is confident and direct, "
+            "not stiff or overly formal. Improve organization, sentence flow, "
+            "word choice, grammar, and punctuation. Remove filler, slang "
+            "that is unsuitable for work, and unnecessary repetition.\n\n"
+            "Preserve the intended message, facts, names, numbers, requests, "
+            "and commitments. Do not add claims, greetings, or sign-offs "
+            "that were not present."
+        ),
+    },
+    {
+        "name": "Academic & Scholarly",
+        "prompt": (
+            "Rewrite the content in precise, formal academic prose.\n\n"
+            "Improve logical flow, terminology, sentence structure, "
+            "transitions, grammar, and punctuation. Replace conversational "
+            "phrasing and unsupported emphasis with objective wording. "
+            "Reduce first-person phrasing when doing so does not change "
+            "the meaning.\n\n"
+            "Preserve every factual claim, qualification, citation, "
+            "technical term, name, and number. Do not invent evidence, "
+            "citations, conclusions, or technical details."
+        ),
+    },
+    {
+        "name": "Notes Assistant",
+        "prompt": (
+            "Convert the content into clear Markdown notes.\n\n"
+            "Use short section headings only when they help. Put each "
+            "main idea on its own \"- \" bullet line. Use indented bullets "
+            "for supporting details. Use bold text sparingly for important "
+            "terms. If the content is already notes, improve its "
+            "organization and consistency.\n\n"
+            "Preserve all facts, names, numbers, code, links, paths, "
+            "and technical details. Do not invent information. "
+            "Do not write prose before or after the notes."
+        ),
+    },
+]
+
+
 DEFAULT_CONFIG: dict = {
     # Presets
     "show_welcome_on_startup": True,
@@ -103,7 +222,11 @@ DEFAULT_CONFIG: dict = {
 
     # llama.cpp
     "llama_server_path": str(LLAMA_CPP_DIR / SERVER_EXE),
+    # macOS: automatic selection uses Metal on Apple Silicon and CPU on Intel.
+    # Windows/Linux retain their historical native backend behavior.
+    "backend_mode": "auto",
     "model_path": "",
+
     "server_host": "127.0.0.1",
     "server_port": 8080,
     "context_size": 12800,
@@ -189,68 +312,17 @@ DEFAULT_CONFIG: dict = {
     "system_prompt": "",
     # Correction delivery: always "patch" (stream mode removed from settings UI)
     "correction_method": "patch",
+    # Correction history (local-only record for undo and review)
+    "history_enabled": True,
+    "history_limit": 200,
+    # Protected terms: user-defined words/phrases masked from the LLM like URLs
+    "protected_terms": [],
     # Fallback default strength when no per-hotkey strength is set.
     #   "spelling_only" — typos only;  "full_correction" — full grammar/capitalization/punctuation;
     #   "rewrite_polish" — rewrite for clarity, concision, and impact.
     "streaming_strength": "full_correction",
     # Custom templates: list of {"name": str, "prompt": str}
-    "custom_templates": [
-        {
-            "name": "Clean Up Dictation",
-            "prompt": (
-                "Turn the dictated content into clean written text.\n\n"
-                "Remove speech fillers, stutters, false starts, accidental "
-                "repetitions, and abandoned phrases. Fix transcription errors, "
-                "spelling, grammar, capitalization, and punctuation. Split run-on "
-                "speech into natural sentences and lightly reorganize wording "
-                "when needed for clarity.\n\n"
-                "Keep every meaningful idea, fact, name, and number. "
-                "Do not summarize, invent details, or change the speaker's "
-                "intended tone."
-            ),
-        },
-        {
-            "name": "Professional Tone",
-            "prompt": (
-                "Rewrite the content as clear, concise workplace communication.\n\n"
-                "Use a natural professional tone that is confident and direct, "
-                "not stiff or overly formal. Improve organization, sentence flow, "
-                "word choice, grammar, and punctuation. Remove filler, slang "
-                "that is unsuitable for work, and unnecessary repetition.\n\n"
-                "Preserve the intended message, facts, names, numbers, requests, "
-                "and commitments. Do not add claims, greetings, or sign-offs "
-                "that were not present."
-            ),
-        },
-        {
-            "name": "Academic & Scholarly",
-            "prompt": (
-                "Rewrite the content in precise, formal academic prose.\n\n"
-                "Improve logical flow, terminology, sentence structure, "
-                "transitions, grammar, and punctuation. Replace conversational "
-                "phrasing and unsupported emphasis with objective wording. "
-                "Reduce first-person phrasing when doing so does not change "
-                "the meaning.\n\n"
-                "Preserve every factual claim, qualification, citation, "
-                "technical term, name, and number. Do not invent evidence, "
-                "citations, conclusions, or technical details."
-            ),
-        },
-        {
-            "name": "Notes Assistant",
-            "prompt": (
-                "Convert the content into clear Markdown notes.\n\n"
-                "Use short section headings only when they help. Put each "
-                "main idea on its own \"- \" bullet line. Use indented bullets "
-                "for supporting details. Use bold text sparingly for important "
-                "terms. If the content is already notes, improve its "
-                "organization and consistency.\n\n"
-                "Preserve all facts, names, numbers, code, links, paths, "
-                "and technical details. Do not invent information. "
-                "Do not write prose before or after the notes."
-            ),
-        },
-    ],
+    "custom_templates": [t.copy() for t in DEFAULT_TEMPLATES],
     # Chat interaction mode: "single" (each message replaces diff view) or "conversation" (persistent chat history)
     "chat_mode": "conversation",
     # Correction modes: configurable prompt + hallucination threshold per strength.
@@ -269,7 +341,7 @@ DEFAULT_CONFIG: dict = {
                 "Do not modernize, regionalize, or improve the writing.\n\n"
                 "If no clear spelling or typing error exists, return the content unchanged."
             ),
-            "hallucination_threshold": 0.35,
+            "hallucination_threshold": 0.45,
             "builtin": True,
         },
         {
@@ -284,7 +356,7 @@ DEFAULT_CONFIG: dict = {
                 "summarize, or make optional style changes.\n\n"
                 "If the text is already correct, return it unchanged."
             ),
-            "hallucination_threshold": 0.65,
+            "hallucination_threshold": 0.75,
             "builtin": True,
         },
         {
@@ -299,7 +371,7 @@ DEFAULT_CONFIG: dict = {
                 "tone, and level of formality. Do not invent information or make the text "
                 "sound generically formal unless the original calls for it."
             ),
-            "hallucination_threshold": 0.90,
+            "hallucination_threshold": 0.97,
             "builtin": True,
         },
         {
@@ -312,60 +384,20 @@ DEFAULT_CONFIG: dict = {
     ],
 }
 
-DEFAULT_TEMPLATES: list[dict[str, str]] = [
-    {
-        "name": "Clean Up Dictation",
-        "prompt": (
-            "Turn the dictated content into clean written text.\n\n"
-            "Remove speech fillers, stutters, false starts, accidental "
-            "repetitions, and abandoned phrases. Fix transcription errors, "
-            "spelling, grammar, capitalization, and punctuation. Split run-on "
-            "speech into natural sentences and lightly reorganize wording "
-            "when needed for clarity.\n\n"
-            "Keep every meaningful idea, fact, name, and number. "
-            "Do not summarize, invent details, or change the speaker's "
-            "intended tone."
-        ),
-    },
-    {
-        "name": "Professional Tone",
-        "prompt": (
-            "Rewrite the content as clear, concise workplace communication.\n\n"
-            "Use a natural professional tone that is confident and direct, "
-            "not stiff or overly formal. Improve organization, sentence flow, "
-            "word choice, grammar, and punctuation. Remove filler, slang "
-            "that is unsuitable for work, and unnecessary repetition.\n\n"
-            "Preserve the intended message, facts, names, numbers, requests, "
-            "and commitments. Do not add claims, greetings, or sign-offs "
-            "that were not present."
-        ),
-    },
-    {
-        "name": "Academic & Scholarly",
-        "prompt": (
-            "Rewrite the content in precise, formal academic prose.\n\n"
-            "Improve logical flow, terminology, sentence structure, "
-            "transitions, grammar, and punctuation. Replace conversational "
-            "phrasing and unsupported emphasis with objective wording. "
-            "Reduce first-person phrasing when doing so does not change "
-            "the meaning.\n\n"
-            "Preserve every factual claim, qualification, citation, "
-            "technical term, name, and number. Do not invent evidence, "
-            "citations, conclusions, or technical details."
-        ),
-    },
-    {
-        "name": "Notes Assistant",
-        "prompt": (
-            "Convert the content into clear Markdown notes.\n\n"
-            "Use short section headings only when they help. Put each "
-            "main idea on its own \"- \" bullet line. Use indented bullets "
-            "for supporting details. Use bold text sparingly for important "
-            "terms. If the content is already notes, improve its "
-            "organization and consistency.\n\n"
-            "Preserve all facts, names, numbers, code, links, paths, "
-            "and technical details. Do not invent information. "
-            "Do not write prose before or after the notes."
-        ),
-    },
+
+# Bare function keys collide with Mission Control and hardware controls on a
+# Mac.  Fresh macOS installs therefore start with explicit modifier shortcuts;
+# existing user selections are never overwritten except by the config migration.
+LEGACY_MACOS_DEFAULT_HOTKEYS = [
+    {"shortcut": "ctrl+alt+f9", "mode": "panel", "strength": "full_correction"},
+    {"shortcut": "ctrl+alt+f10", "mode": "silent", "strength": "spelling_only"},
+    {"shortcut": "ctrl+alt+shift+f9", "mode": "panel", "strength": "rewrite_polish"},
 ]
+MACOS_DEFAULT_HOTKEYS = [
+    {"shortcut": "cmd+option+f9", "mode": "panel", "strength": "full_correction"},
+    {"shortcut": "cmd+option+f10", "mode": "silent", "strength": "spelling_only"},
+    {"shortcut": "cmd+option+shift+f9", "mode": "panel", "strength": "rewrite_polish"},
+]
+if MACOS:
+    DEFAULT_CONFIG["hotkeys"] = [entry.copy() for entry in MACOS_DEFAULT_HOTKEYS]
+

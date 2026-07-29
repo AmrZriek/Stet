@@ -1,7 +1,11 @@
 import sys
-import time
-import ctypes
 import pytest
+
+if sys.platform != "win32":
+    pytest.skip("Windows-only path", allow_module_level=True)
+
+import ctypes
+import time
 
 from stet.core.clipboard import _clipboard_read_text, _clipboard_write_text
 
@@ -19,10 +23,10 @@ def _is_clipboard_available():
         pass
     return False
 
-pytestmark = [
-    pytest.mark.skipif(sys.platform != "win32", reason="Windows-only path"),
-    pytest.mark.skipif(not _is_clipboard_available(), reason="System clipboard is locked/unavailable (Access Denied)")
-]
+pytestmark = pytest.mark.skipif(
+    not _is_clipboard_available(),
+    reason="System clipboard is locked/unavailable (Access Denied)",
+)
 
 
 def test_clipboard_roundtrip_basic_unicode():
@@ -115,3 +119,60 @@ def test_read_selection_uia_failure():
     with patch("ctypes.windll.ole32", new=mock_ole32):
         res = _read_selection_uia()
         assert res is None
+
+
+def test_read_selection_uia_bounds_length():
+    """Verify _read_selection_uia requests bounded text length (50000) to prevent OOM."""
+    import ctypes
+    from unittest.mock import MagicMock, patch
+
+    from stet.core.clipboard import _read_selection_uia
+
+    mock_ole32 = MagicMock()
+    mock_ole32.CoInitializeEx.return_value = 0  # S_OK
+    mock_ole32.CoCreateInstance.return_value = 0  # S_OK
+
+    mock_oleaut32 = MagicMock()
+    keep_alives = []
+
+    gettext_args = {}
+
+    def mock_call_com_method_with_pointers(interface_ptr, index, prototype, *args):
+        if index == 8:  # GetFocusedElement
+            args[0].contents.value = 12345
+        elif index == 16:  # GetCurrentPattern
+            args[1].contents.value = 23456
+        elif index == 3 and prototype[-1] == ctypes.POINTER(ctypes.c_void_p):  # GetSelection
+            args[0].contents.value = 34567
+        elif index == 3 and prototype[-1] == ctypes.POINTER(ctypes.c_int):  # get_Length
+            args[0].contents.value = 1
+        elif index == 4:  # GetElement
+            args[1].contents.value = 45678
+        elif index == 12:  # GetText
+            gettext_args["max_length"] = args[0]
+            s = "mocked selected text"
+            ka = ctypes.c_wchar_p(s)
+            keep_alives.append(ka)
+            addr = ctypes.cast(ka, ctypes.c_void_p).value
+            ctypes.cast(args[1], ctypes.POINTER(ctypes.c_void_p))[0] = addr
+        return 0
+
+    def mock_cocreateinstance(rclsid, pUnkOuter, dwClsContext, riid, ppv):
+        ppv.contents.value = 11111
+        return 0
+
+    mock_ole32.CoCreateInstance.side_effect = mock_cocreateinstance
+
+    with (
+        patch("ctypes.windll.ole32", new=mock_ole32),
+        patch("ctypes.windll.oleaut32", new=mock_oleaut32),
+        patch(
+            "stet.core.clipboard.call_com_method",
+            new=mock_call_com_method_with_pointers,
+        ),
+        patch("stet.core.clipboard.release_com_ptr"),
+    ):
+        _read_selection_uia()
+        assert "max_length" in gettext_args, "GetText was not called"
+        assert gettext_args["max_length"] == 50000
+

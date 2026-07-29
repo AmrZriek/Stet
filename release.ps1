@@ -23,11 +23,11 @@ if ($gitStatus) {
 }
 
 Write-Host "==> Running tests (Chunk 1)" -ForegroundColor Cyan
-& .\venv\Scripts\python.exe -m pytest tests/ -v --ignore=tests/test_main_window_coverage.py --ignore=tests/test_ui_fixes.py --ignore=tests/test_app_coverage.py
+& .\venv\Scripts\python.exe -m pytest tests/ -v --ignore=tests/test_main_window_coverage.py --ignore=tests/test_ui_fixes.py --ignore=tests/test_app_coverage.py --ignore=tests/test_welcome_window.py
 if ($LASTEXITCODE -ne 0) { throw "Tests failed in Chunk 1 (exit $LASTEXITCODE) - aborting release" }
 
 Write-Host "==> Running tests (Chunk 2)" -ForegroundColor Cyan
-& .\venv\Scripts\python.exe -m pytest tests/test_main_window_coverage.py tests/test_ui_fixes.py tests/test_app_coverage.py -v
+& .\venv\Scripts\python.exe -m pytest tests/test_main_window_coverage.py tests/test_ui_fixes.py tests/test_app_coverage.py tests/test_welcome_window.py -v
 if ($LASTEXITCODE -ne 0) { throw "Tests failed in Chunk 2 (exit $LASTEXITCODE) - aborting release" }
 
 Write-Host "==> Staging files" -ForegroundColor Cyan

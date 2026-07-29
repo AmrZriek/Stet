@@ -1,5 +1,6 @@
 import os
 import glob
+import shutil
 import zipfile
 import subprocess
 import time
@@ -14,7 +15,7 @@ def _safe_extract(zip_ref, dest):
         if stat.S_ISLNK(mode):
             raise RuntimeError(f"Refusing symlink in ZIP: {member.filename}")
         target = (dest / member.filename).resolve()
-        if dest not in target.parents:
+        if dest not in target.parents and target != dest:
             raise RuntimeError(f"Unsafe path in ZIP: {member.filename}")
     zip_ref.extractall(dest)
 
@@ -29,32 +30,37 @@ def test_e2e_launch():
     # Sort by creation time to get the latest
     latest_zip = max(zip_files, key=os.path.getctime)
 
-    test_dir = os.path.join(os.path.dirname(__file__), "temp_e2e_launch")
+    artifacts_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "tests", ".artifacts")
+    )
+    os.makedirs(artifacts_dir, exist_ok=True)
+    test_dir = os.path.join(artifacts_dir, "temp_e2e_launch")
     os.makedirs(test_dir, exist_ok=True)
 
-    print(f"Extracting {latest_zip} to {test_dir}")
-    with zipfile.ZipFile(latest_zip, "r") as zip_ref:
-        _safe_extract(zip_ref, test_dir)
-
-    # The zip usually contains a folder, so let's find the exe inside test_dir
-    exe_path = None
-    for root, dirs, files in os.walk(test_dir):
-        if "Stet.exe" in files:
-            exe_path = os.path.join(root, "Stet.exe")
-            break
-
-    assert exe_path is not None, "Stet.exe not found in the extracted zip"
-
-    print(f"Launching {exe_path}")
-    process = subprocess.Popen(
-        [exe_path],
-        cwd=os.path.dirname(exe_path),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
+    process = None
     try:
+        print(f"Extracting {latest_zip} to {test_dir}")
+        with zipfile.ZipFile(latest_zip, "r") as zip_ref:
+            _safe_extract(zip_ref, test_dir)
+
+        # The zip usually contains a folder, so let's find the exe inside test_dir
+        exe_path = None
+        for root, dirs, files in os.walk(test_dir):
+            if "Stet.exe" in files:
+                exe_path = os.path.join(root, "Stet.exe")
+                break
+
+        assert exe_path is not None, "Stet.exe not found in the extracted zip"
+
+        print(f"Launching {exe_path}")
+        process = subprocess.Popen(
+            [exe_path],
+            cwd=os.path.dirname(exe_path),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
         print("Waiting for 5 seconds...")
         time.sleep(5)
 
@@ -83,10 +89,11 @@ def test_e2e_launch():
             )
 
     finally:
-        if process.poll() is None:
+        if process and process.poll() is None:
             print("Terminating process...")
             process.terminate()
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
+        shutil.rmtree(test_dir, ignore_errors=True)

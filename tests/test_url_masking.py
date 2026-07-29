@@ -484,3 +484,328 @@ def test_file_uri_at_line_start(monkeypatch):
     assert "__STET_PROTECTED_1__" in captured_text
     assert "file:///D:/path/to/file.txt" not in captured_text
     assert result == original
+
+
+# ---------------------------------------------------------------------------
+# CorrectionResult / CorrectionOutcome regression tests
+# ---------------------------------------------------------------------------
+
+
+def test_correction_result_tuple_unpacking(monkeypatch):
+    """CorrectionResult must support legacy tuple unpacking: result, units = ..."""
+    from stet.core.text_utils import CorrectionOutcome, CorrectionResult
+
+    cr = CorrectionResult(text="hello", outcome=CorrectionOutcome.CORRECTED, units_processed=3)
+    result, units = cr
+    assert result == "hello"
+    assert units == 3
+
+
+def test_correction_result_text_or_none(monkeypatch):
+    """text_or_none returns None for failure outcomes, text for success."""
+    from stet.core.text_utils import CorrectionOutcome, CorrectionResult
+
+    cr_ok = CorrectionResult(text="fixed", outcome=CorrectionOutcome.CORRECTED)
+    assert cr_ok.text_or_none == "fixed"
+
+    cr_fail = CorrectionResult(text="orig", outcome=CorrectionOutcome.FAILED_ALL_UNITS)
+    assert cr_fail.text_or_none is None
+
+    cr_cancel = CorrectionResult(text="orig", outcome=CorrectionOutcome.CANCELLED)
+    assert cr_cancel.text_or_none is None
+
+    cr_prot = CorrectionResult(text="orig", outcome=CorrectionOutcome.UNCHANGED_PROTECTED)
+    assert cr_prot.text_or_none == "orig"
+
+
+def test_correction_result_changed_property(monkeypatch):
+    """changed is True only when outcome is CORRECTED and units_corrected > 0."""
+    from stet.core.text_utils import CorrectionOutcome, CorrectionResult
+
+    cr = CorrectionResult(text="fixed", outcome=CorrectionOutcome.CORRECTED, units_corrected=2)
+    assert cr.changed is True
+
+    cr_no_change = CorrectionResult(text="same", outcome=CorrectionOutcome.UNCHANGED_NO_ERRORS)
+    assert cr_no_change.changed is False
+
+
+# ---------------------------------------------------------------------------
+# Span-only recovery tests
+# ---------------------------------------------------------------------------
+
+
+def test_span_recovery_on_mangled_sentinel(monkeypatch):
+    """When the LLM mangles a sentinel beyond recovery, span-only recovery
+    should send only the editable prose to the LLM and preserve the protected
+    atom verbatim.
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    call_count = 0
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        # First call (normal path): return text with fully deleted sentinel
+        # (unrecoverable — recover_sentinels won't fabricate from nothing)
+        if call_count == 1:
+            return chunk_text.replace("__STET_PROTECTED_1__", "")
+        # Second call (span recovery): correct the prose span
+        return chunk_text.replace("teh", "the")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "visit https://example.com teh page"
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    # The URL must be preserved verbatim
+    assert "https://example.com" in result
+    # The typo should be fixed by span recovery
+    assert "teh" not in result or "the" in result
+
+
+def test_span_recovery_preserves_multiple_atoms(monkeypatch):
+    """Span-only recovery preserves multiple protected atoms and corrects
+    the prose between them.
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    call_count = 0
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Normal path: fully delete both sentinels (unrecoverable)
+            return chunk_text.replace("__STET_PROTECTED_1__", "").replace("__STET_PROTECTED_2__", "")
+        # Span recovery: correct the prose
+        return chunk_text.replace("teh", "the")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "see https://a.com and https://b.com teh page"
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert "https://a.com" in result
+    assert "https://b.com" in result
+
+
+def test_unchanged_protected_outcome_on_total_failure(monkeypatch):
+    """When all units fail due to mangled sentinels and span recovery also
+    fails, the outcome should be UNCHANGED_PROTECTED with original text.
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        # Always mangle sentinels
+        return chunk_text.replace("__STET_PROTECTED_1__", "GONE")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "visit https://example.com today"
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    # Text must be unchanged (safe fail)
+    assert result == original
+
+
+def test_protected_atoms_prevent_streaming_fallback(monkeypatch):
+    """POLICY: When protected atoms are present and all units fail, the outcome
+    is UNCHANGED_PROTECTED (not FAILED_ALL_UNITS).  This prevents the streaming
+    fallback from running, which would expose raw sentinels or corrupt protected
+    content.  The UI shows an actionable message instead.
+    """
+    from stet.core.text_utils import CorrectionOutcome
+
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        # Always delete sentinels — unrecoverable, triggers span recovery
+        # which also fails (returns the text with sentinel deleted).
+        return chunk_text.replace("__STET_PROTECTED_1__", "")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "visit https://example.com today"
+    cr = mgr.correct_text_patch(original, strength="full_correction")
+
+    # With protected atoms present, outcome must be UNCHANGED_PROTECTED.
+    # This prevents streaming fallback from running.
+    assert cr.outcome == CorrectionOutcome.UNCHANGED_PROTECTED
+    assert cr.text == original
+    assert cr.protected_atom_count == 1
+    assert cr.text_or_none is not None  # Not a streaming-triggering failure
+
+
+def test_no_atoms_allows_streaming_fallback(monkeypatch):
+    """POLICY: When NO protected atoms are present and all units fail, the
+    outcome is FAILED_ALL_UNITS.  text_or_none returns None, which triggers
+    the streaming fallback in the UI.
+    """
+    from stet.core.text_utils import CorrectionOutcome
+
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        # Hallucination: return wildly different text
+        return "completely different text " * 10
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "see the report for more details"
+    cr = mgr.correct_text_patch(original, strength="full_correction")
+
+    # No protected atoms → FAILED_ALL_UNITS → streaming fallback allowed.
+    assert cr.outcome == CorrectionOutcome.FAILED_ALL_UNITS
+    assert cr.text_or_none is None  # Triggers streaming
+    assert cr.protected_atom_count == 0
+
+
+def test_structured_outcome_fields(monkeypatch):
+    """CorrectionResult has populated outcome, units, atoms, elapsed fields."""
+
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        return chunk_text.replace("teh", "the")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "visit https://example.com teh page"
+    cr = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert hasattr(cr, 'outcome')
+    assert hasattr(cr, 'units_processed')
+    assert hasattr(cr, 'protected_atom_count')
+    assert hasattr(cr, 'elapsed_s')
+    assert hasattr(cr, 'reason')
+    assert cr.protected_atom_count == 1
+    assert cr.elapsed_s >= 0  # 0.0 is valid when mock returns instantly
+    assert cr.units_processed >= 1
+
+
+def test_stream_strict_anchor_validation():
+    """Streaming validator must reject output with duplicated, reordered,
+    or missing sentinels — not just check presence.
+    """
+    from stet.core.text_utils import _INLINE_SENTINEL_RE
+
+    # Expected: [__STET_PROTECTED_1__, __STET_PROTECTED_2__]
+    expected = ["__STET_PROTECTED_1__", "__STET_PROTECTED_2__"]
+
+    # 1. Duplicated sentinel — should fail
+    duped = "see __STET_PROTECTED_1__ and __STET_PROTECTED_1__ today"
+    found = _INLINE_SENTINEL_RE.findall(duped)
+    assert found != expected, "duplicated sentinels must not match expected"
+
+    # 2. Reordered sentinel — should fail
+    reordered = "see __STET_PROTECTED_2__ and __STET_PROTECTED_1__ today"
+    found = _INLINE_SENTINEL_RE.findall(reordered)
+    assert found != expected, "reordered sentinels must not match expected"
+
+    # 3. Missing sentinel — should fail
+    missing = "see __STET_PROTECTED_1__ and nothing today"
+    found = _INLINE_SENTINEL_RE.findall(missing)
+    assert found != expected, "missing sentinel must not match expected"
+
+    # 4. Correct order — should pass
+    correct = "see __STET_PROTECTED_1__ and __STET_PROTECTED_2__ today"
+    found = _INLINE_SENTINEL_RE.findall(correct)
+    assert found == expected, "correct order must match"
+
+
+def test_mangled_alias_recovery_in_stream():
+    """recover_sentinels should restore [REF1] → __STET_PROTECTED_1__ for
+    the streaming path's strict validation.
+    """
+    from stet.core.text_utils import recover_sentinels, _INLINE_SENTINEL_RE
+
+    cleaned = "see [REF1] and [REF2] today"
+    expected = ["__STET_PROTECTED_1__", "__STET_PROTECTED_2__"]
+    recovered = recover_sentinels(cleaned, expected)
+    found = _INLINE_SENTINEL_RE.findall(recovered)
+    assert found == expected, f"expected recovery to restore sentinels, got {found}"
+
+
+def test_markdown_link_not_mangled_by_span_recovery(monkeypatch):
+    """Markdown links like [text](url) must survive span-only recovery with
+    the complete link structure intact.  The URL destination is protected as
+    part of the full Markdown construct, not just as a bare substring.
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    call_count = 0
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Normal path: fully delete the sentinel (unrecoverable)
+            return chunk_text.replace("__STET_PROTECTED_1__", "")
+        # Span recovery: correct the prose typo
+        return chunk_text.replace("clikc", "click")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "Please clikc [here](https://example.com/page) for details."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    # The exact Markdown link must be preserved as a valid construct.
+    # The URL is inside the link, so the complete [text](url) form must survive.
+    assert "[here](https://example.com/page)" in result, (
+        f"Markdown link structure broken; got: {result!r}"
+    )
+    # The typo in the surrounding prose should be fixed.
+    assert "click" in result or "clikc" not in result
+
+
+def test_markdown_link_protected_as_construct(monkeypatch):
+    """When span recovery runs, the Markdown link [text](SENTINEL) is merged
+    into a single protected atom.  The LLM sees only the prose outside the
+    link — never the link label, syntax, URL, or closing paren.
+    """
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    # Track what the LLM sees during span recovery.
+    span_texts_seen = []
+    call_count = 0
+    def mock_rewrite(chunk_text, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # Normal path: mangle sentinel (unrecoverable)
+            return chunk_text.replace("__STET_PROTECTED_1__", "GONE")
+        # Span recovery calls: track what prose spans are sent.
+        span_texts_seen.append(chunk_text)
+        return chunk_text
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "Please click [here](https://example.com/page) for details."
+    result, _ = mgr.correct_text_patch(original, strength="full_correction")
+
+    # The complete Markdown link must be in the result.
+    assert "[here](https://example.com/page)" in result, (
+        f"Markdown link not preserved; got: {result!r}"
+    )
+
+    # The LLM must never see any part of the link construct during recovery.
+    # Only the prose before and after the link should be sent as spans.
+    for span in span_texts_seen:
+        assert "[here]" not in span, f"LLM saw link label in span: {span!r}"
+        assert "](" not in span, f"LLM saw link syntax in span: {span!r}"
+        assert "https://example.com/page" not in span, f"LLM saw URL in span: {span!r}"
+        assert "example.com" not in span, f"LLM saw URL fragment in span: {span!r}"

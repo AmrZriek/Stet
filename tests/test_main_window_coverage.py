@@ -535,13 +535,17 @@ class TestOnEscape:
 
 class TestApplyTemplate:
     def test_resets_and_sends(self, qtbot, cfg):
-        cw = _make_cw(cfg, qtbot)
-        cw._stream_worker = MagicMock()
-        cw._stream_worker.isRunning.return_value = False
-        cw._correction_stream_worker = MagicMock()
-        cw._correction_stream_worker.isRunning.return_value = False
-        with patch.object(cw, "_send_chat") as mock_send:
-            cw._apply_template("Fix grammar")
+        # Construction normally starts a correction thread.  Keep this unit
+        # test focused on template reset semantics rather than racing that
+        # unrelated worker for the cancellation latch.
+        with patch("stet.ui.main_window.threading.Thread"):
+            cw = _make_cw(cfg, qtbot)
+            cw._stream_worker = MagicMock()
+            cw._stream_worker.isRunning.return_value = False
+            cw._correction_stream_worker = MagicMock()
+            cw._correction_stream_worker.isRunning.return_value = False
+            with patch.object(cw, "_send_chat") as mock_send:
+                cw._apply_template("Fix grammar")
         assert cw._correction_cancelled is True
         assert len(cw.chat_history) == 0
         mock_send.assert_called_once()
@@ -844,3 +848,17 @@ class TestRenderChatTranscript:
         cw._render_chat_transcript()
         html = cw.corr_edit.toHtml()
         assert "Test message" in html
+
+
+class TestFontStack:
+    def test_chat_transcript_html_font_stack(self, qtbot, cfg):
+        cw = _make_cw(cfg, qtbot)
+        html = cw._chat_transcript_html("Result text")
+        assert "font-family:'IBM Plex Mono','Consolas',monospace" in html
+
+    def test_render_diff_font_stack(self, qtbot, cfg):
+        cw = _make_cw(cfg, qtbot)
+        cw._render_diff("Corrected text")
+        html = cw.corr_edit.toHtml()
+        # Qt's HTML renderer normalizes font-family quotes/spacing; check for IBM Plex Mono or Consolas
+        assert "IBM Plex Mono" in html or "Consolas" in html or "monospace" in html

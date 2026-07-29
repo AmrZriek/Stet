@@ -29,6 +29,10 @@ import subprocess
 import zipfile
 import argparse
 import json
+import platform as host_platform
+import plistlib
+import re
+import struct
 import time
 from pathlib import Path
 from datetime import datetime
@@ -64,7 +68,31 @@ INSTALLER_SCRIPT = ROOT / "stet" / "windows_installer_payload.py"
 UNINSTALLER_SCRIPT = ROOT / "stet" / "uninstall.py"
 ICON_ICO = ROOT / "logo.ico"
 ICON_PNG = ROOT / "logo.png"
+ICON_ICNS = ROOT / "logo.icns"
 LICENSE_FILE = ROOT / "LICENSE"
+
+# macOS release contract.  These values are intentionally kept here, next to
+# the builder, so the app metadata, signing, archives, and standalone
+# verifier cannot drift apart.
+MACOS_BUNDLE_ID = "com.amrzriek.Stet"
+# Fallback only for a deliberately compatibility-built backend such as b9000.
+# Every real artifact derives its deployment target from the bundled backend's
+# Mach-O metadata.  In particular, the current upstream b10068 Metal library
+# requires macOS 26.0 and must not be advertised as a macOS 14 app.
+MACOS_MINIMUM_SYSTEM_VERSION = "14.0"
+MACOS_APP_NAME = "Stet.app"
+MACOS_ARCHES = {"arm64", "x86_64"}
+MACOS_FORBIDDEN_PAYLOAD_NAMES = {
+    "startup.vbs",
+    "run.bat",
+    "download_model.bat",
+    "download_backend.bat",
+    "unblock_stet.bat",
+    "windows_installer_payload.py",
+    "update.py",
+    "uninstall.py",
+    "llama-server.exe",
+}
 
 # ── Version ───────────────────────────────────────────────────────────────────
 
@@ -82,6 +110,193 @@ def _get_version() -> str:
     fallback = datetime.now().strftime("%Y.%m.%d")
     print(f"[build] WARNING: Could not read APP_VERSION from {constants_file}, using fallback: {fallback}")
     return fallback
+
+
+def _macos_host_arch() -> str:
+    """Return the architecture of the running Python process.
+
+    A native build is required.  In particular, an arm64 Mac running a shell
+    under Rosetta reports x86_64 here and therefore cannot accidentally emit
+    an artifact labelled arm64.
+    """
+    machine = host_platform.machine().lower()
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    if machine in {"x86_64", "amd64", "x64"}:
+        return "x86_64"
+    return machine
+
+
+def _resolve_macos_arch(requested: str) -> str:
+    """Resolve and validate a native macOS target architecture."""
+    if PLATFORM != "macOS":
+        raise RuntimeError("macOS packaging must run on macOS; cross-platform builds are not supported")
+    host_arch = _macos_host_arch()
+    target = host_arch if requested in ("auto", "") else requested
+    if target not in MACOS_ARCHES:
+        raise RuntimeError(f"Unsupported macOS architecture {target!r}; use arm64 or x86_64")
+    if host_arch != target:
+        raise RuntimeError(
+            f"Refusing non-native macOS build: Python is {host_arch}, requested {target}. "
+            "Run the build natively on the target Mac (do not use Rosetta)."
+        )
+    return target
+
+
+def _macos_bundle_version(version: str) -> str:
+    """Convert a release label to CFBundleVersion's numeric form."""
+    import re
+    numbers = [part for part in re.split(r"\D+", version) if part]
+    return ".".join((numbers + ["0", "0", "0"])[:3])
+
+
+def _write_macos_entitlements(artifacts_dir: Path) -> Path:
+    """Write the minimal hardened-runtime entitlements plan.
+
+    Stet is distributed outside the Mac App Store and does not need App
+    Sandbox, JIT, unsigned executable memory, or task inspection.  The empty
+    entitlement dictionary is deliberate; TCC Accessibility/Post Events
+    consent is requested at runtime and is not granted by entitlements.
+    In particular, get-task-allow must never be present in a release build.
+    """
+    path = artifacts_dir / "Stet.entitlements.plist"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as stream:
+        plistlib.dump({}, stream, sort_keys=False)
+    return path
+
+
+def _generate_macos_icns(artifacts_dir: Path) -> Path:
+    """Create a valid ICNS from logo.png using only macOS system tooling.
+
+    PyInstaller delegates PNG-to-ICNS conversion to Pillow, which makes a
+    normal macOS build unexpectedly depend on a development-only package.
+    Instead, ``sips`` creates the PNG representations and this standard
+    library writer packages their PNG bytes in Apple's documented ICNS
+    container.  A checked-in logo.icns still takes precedence when present.
+    """
+    if ICON_ICNS.exists():
+        return ICON_ICNS
+    if not ICON_PNG.exists():
+        raise RuntimeError(f"Missing macOS icon source: {ICON_PNG}")
+    sips = shutil.which("sips")
+    if not sips:
+        raise RuntimeError("macOS system tool 'sips' is required to generate Stet.icns")
+
+    icon_dir = artifacts_dir / "Stet.icon-inputs"
+    if icon_dir.exists():
+        _remove_tree(icon_dir)
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    output = artifacts_dir / "Stet.icns"
+    if output.exists():
+        output.unlink()
+
+    # Modern ICNS chunks embed PNG directly.  Include all standard sizes so
+    # Finder has a crisp representation on both low- and high-density displays.
+    chunks = (
+        ("icp4", 16),
+        ("icp5", 32),
+        ("icp6", 64),
+        ("ic07", 128),
+        ("ic08", 256),
+        ("ic09", 512),
+        ("ic10", 1024),
+    )
+    payload = bytearray()
+    for chunk_type, size in chunks:
+        image = icon_dir / f"{size}.png"
+        run([
+            sips, "-s", "format", "png", "-z", str(size), str(size),
+            str(ICON_PNG), "--out", str(image),
+        ], stdout=subprocess.DEVNULL)
+        data = image.read_bytes()
+        if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise RuntimeError(f"sips did not produce a PNG icon representation: {image}")
+        payload.extend(chunk_type.encode("ascii"))
+        payload.extend(struct.pack(">I", len(data) + 8))
+        payload.extend(data)
+    output.write_bytes(b"icns" + struct.pack(">I", len(payload) + 8) + payload)
+    if output.read_bytes()[:4] != b"icns":
+        raise RuntimeError(f"Failed to create a valid ICNS container at {output}")
+    return output
+
+
+def _write_macos_info_plist(
+    app_bundle: Path,
+    version: str,
+    arch: str,
+    minimum_macos: str,
+    icon_name: str = "Stet.icns",
+) -> Path:
+    """Apply stable, notarization-compatible metadata to a PyInstaller app."""
+    plist_path = app_bundle / "Contents" / "Info.plist"
+    if not plist_path.exists():
+        raise RuntimeError(f"PyInstaller did not create {plist_path}")
+    with plist_path.open("rb") as stream:
+        info = plistlib.load(stream)
+    info.update({
+        "CFBundleDisplayName": "Stet",
+        "CFBundleName": "Stet",
+        "CFBundleIdentifier": MACOS_BUNDLE_ID,
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": _macos_bundle_version(version),
+        "CFBundlePackageType": "APPL",
+        "CFBundleIconFile": icon_name,
+        "LSMinimumSystemVersion": minimum_macos,
+        "LSApplicationCategoryType": "public.app-category.productivity",
+        "NSHighResolutionCapable": True,
+        "NSHumanReadableCopyright": f"Copyright © {datetime.now().year} AmrZriek",
+        # Custom release metadata consumed by the verifier and diagnostics.
+        "StetArchitecture": arch,
+        "StetBackendMode": "cpu" if arch == "x86_64" else "auto",
+    })
+    with plist_path.open("wb") as stream:
+        plistlib.dump(info, stream, sort_keys=False)
+    return plist_path
+
+
+def _macos_minos(path: Path) -> str | None:
+    """Read the deployment target embedded in a Mach-O file, when available."""
+
+    try:
+        result = subprocess.run(
+            ["otool", "-l", str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    match = re.search(r"\bminos\s+([0-9]+(?:\.[0-9]+)*)", result.stdout)
+    return match.group(1) if match else None
+
+
+def _macos_backend_minimum_version(server: Path | None) -> str:
+    """Derive the app target from the actual runtime backend, not a constant."""
+
+    if server is None:
+        return MACOS_MINIMUM_SYSTEM_VERSION
+    # The Metal dylib is the restrictive dependency on Apple Silicon.  For an
+    # Intel CPU build, the CPU backend or server supplies its own target.
+    candidates = [
+        *sorted(server.parent.glob("libggml-metal*.dylib")),
+        *sorted(server.parent.glob("libggml-cpu*.dylib")),
+        server,
+    ]
+    versions = [version for candidate in candidates if (version := _macos_minos(candidate))]
+    if not versions:
+        return MACOS_MINIMUM_SYSTEM_VERSION
+    return max(versions, key=lambda value: tuple(int(part) for part in value.split(".")))
+
+
+def _llama_release_from_path(server: Path) -> int | None:
+    """Extract the official bNNNNN release marker from an archive path."""
+
+    for part in (server.name, *(parent.name for parent in server.parents)):
+        match = re.search(r"(?:^|[-_])b(\d+)(?:[-_]|$)", part, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
 
 
 def _windows_resource_version(version: str) -> str:
@@ -206,6 +421,23 @@ VSVersionInfo(
 def _find_llama_dir() -> Path | None:
     """Locate the llama-server binary directory for bundling."""
     exe = "llama-server.exe" if PLATFORM == "Windows" else "llama-server"
+    # A development checkout is self-contained.  Prefer its local runtime
+    # over a stale config entry or an unrelated globally installed backend.
+    # Current source runs keep the backend visibly at the checkout root.  The
+    # hidden location is read only as a migration fallback for an older local
+    # checkout; it must never win over the current project runtime.
+    for project_backends in (ROOT / "backends", ROOT / ".stet-runtime" / "backends"):
+        if not project_backends.is_dir():
+            continue
+        candidates = [
+            directory for directory in project_backends.iterdir()
+            if directory.is_dir() and (directory / exe).is_file()
+        ]
+        if candidates:
+            return max(
+                candidates,
+                key=lambda directory: _llama_release_from_path(directory / exe) or -1,
+            )
     cfg_file = ROOT / "config.json"
     if cfg_file.exists():
         try:
@@ -243,7 +475,7 @@ def _find_cuda_dir() -> Path | None:
         Path(os.path.expandvars(r"%APPDATA%\Ollama\lib\ollama\cuda_v12")),
     ]
     llama = _find_llama_dir()
-    if llama:
+    if llama and llama.parent.is_dir():
         for d in sorted(llama.parent.iterdir()):
             if d.is_dir() and "cuda" in d.name.lower():
                 search.append(d)
@@ -328,6 +560,8 @@ def _base_pyinstaller_cmd(
     product_name: str = "Stet",
     description: str = "Stet - AI Writing Assistant",
     admin: bool = False,
+    macos_arch: str | None = None,
+    macos_icon: Path | None = None,
     extra_flags: list[str] | None = None,
 ) -> list:
     cmd = [
@@ -364,8 +598,23 @@ def _base_pyinstaller_cmd(
 
     if PLATFORM == "Windows" and ICON_ICO.exists():
         cmd.append(f"--icon={ICON_ICO}")
-    elif PLATFORM == "macOS" and ICON_PNG.exists():
-        cmd.append(f"--icon={ICON_PNG}")
+    elif PLATFORM == "macOS":
+        if not macos_icon:
+            macos_icon = ICON_ICNS if ICON_ICNS.exists() else artifacts_dir / "Stet.icns"
+        cmd.append(f"--icon={macos_icon}")
+
+    if PLATFORM == "macOS":
+        # Keep direct callers (including metadata tests and release tooling)
+        # safe by selecting the native host architecture when omitted.  Do
+        # not silently turn an explicit universal2 request into a thin build.
+        macos_arch = _resolve_macos_arch(macos_arch or "auto")
+        cmd.extend([
+            f"--target-architecture={macos_arch}",
+            f"--osx-bundle-identifier={MACOS_BUNDLE_ID}",
+        ])
+        entitlements = artifacts_dir / "Stet.entitlements.plist"
+        if entitlements.exists():
+            cmd.append(f"--osx-entitlements-file={entitlements}")
 
     # Embed VERSIONINFO, custom Manifest (reduces AV heuristics)
     if PLATFORM == "Windows":
@@ -381,20 +630,42 @@ def _base_pyinstaller_cmd(
     return cmd
 
 
-def _pyinstaller_cmd(version: str, artifacts_dir: Path) -> list:
+def _pyinstaller_cmd(
+    version: str,
+    artifacts_dir: Path,
+    macos_arch: str | None = None,
+    macos_icon: Path | None = None,
+) -> list:
     extra = []
     sep = os.pathsep
-    for asset in ("logo.ico", "logo.png"):
+    assets = ("logo.png",) if PLATFORM == "macOS" else ("logo.ico", "logo.png")
+    for asset in assets:
         src = ROOT / asset
         if src.exists():
             extra.append(f"--add-data={src}{sep}.")
+
+    data_flags = [f"--add-data={ROOT / 'stet'}{sep}stet"]
+    if PLATFORM == "macOS":
+        macos_icon = macos_icon or (ICON_ICNS if ICON_ICNS.exists() else artifacts_dir / "Stet.icns")
+        # Never add the whole source package on macOS: that would copy the
+        # Windows installer/updater payload into the signed application.
+        data_flags = []
+        for relative, destination in (
+            (Path("stet") / "ui" / "stet.qss", "stet/ui"),
+            (Path("stet") / "logo.svg", "stet"),
+        ):
+            source = ROOT / relative
+            if source.exists():
+                data_flags.append(f"--add-data={source}{sep}{destination}")
 
     cmd = _base_pyinstaller_cmd(
         "Stet", artifacts_dir, version=version,
         mode="onedir", console="disable",
         product_name="Stet", description="Stet - AI Writing Assistant",
+        macos_arch=macos_arch,
+        macos_icon=macos_icon,
         extra_flags=[
-            f"--add-data={ROOT / 'stet'}{sep}stet",
+            *data_flags,
             "--hidden-import=PyQt6",
             "--hidden-import=requests",
             "--hidden-import=pyperclip",
@@ -458,10 +729,10 @@ RELEASE_CONFIG = {
     "context_size": 12800,
     "gpu_layers": 99,
     # Sampling parameters
-    "temperature": 0.1,
-    "top_k": 40,
+    "temperature": 0.0,
+    "top_k": 1,
     "top_p": 0.95,
-    "min_p": 0.05,
+    "min_p": 0.0,
     "repeat_penalty": 1.0,
     "frequency_penalty": 0.0,
     "presence_penalty": 0.0,
@@ -524,7 +795,7 @@ RUN_SH = "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")\"\n./Stet\n"
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
 
-_LLAMA_BACKEND_VERSION = "b10016"
+_LLAMA_BACKEND_VERSION = "b10107"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{_LLAMA_BACKEND_VERSION}"
 
 DOWNLOAD_BACKEND_BAT = rf"""@echo off
@@ -533,7 +804,7 @@ cd /d "%~dp0"
 
 set LLAMA_URL={_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip
 set CUDA_URL={_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip
-set LLAMA_HASH=AC780BF9A82AB9487946F458EFF6B7A57568FA831C6E9268DA32A1DB986BF75D
+set LLAMA_HASH=1E43BBEC9691CD0BC636603C366769148FA6265FD261C5F7C67050B450BBC237
 set CUDA_HASH=8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6
 set DEST=llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64
 
@@ -618,7 +889,7 @@ cd "$(dirname "$0")"
 
 LLAMA_URL="{_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip"
 CUDA_URL="{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip"
-LLAMA_HASH="ac780bf9a82ab9487946f458eff6b7a57568fa831c6e9268da32a1db986bf75d"
+LLAMA_HASH="1e43bbec9691cd0bc636603c366769148fa6265fd261c5f7c67050b450bbc237"
 CUDA_HASH="8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
 DEST="llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 
@@ -748,21 +1019,193 @@ pause
 """
 
 
+# ── macOS bundle validation/signing ──────────────────────────────────────────
+
+def _macho_arches(path: Path) -> set[str]:
+    """Return Mach-O architectures reported by the host toolchain."""
+    try:
+        result = subprocess.run(
+            ["lipo", "-archs", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return set(result.stdout.split())
+    except (FileNotFoundError, OSError):
+        pass
+    try:
+        result = subprocess.run(
+            ["file", "-b", str(path)],
+            capture_output=True, text=True, check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return set()
+    output = result.stdout.lower()
+    return {arch for arch in MACOS_ARCHES if arch in output}
+
+
+def _macho_files(root: Path) -> list[Path]:
+    """Find Mach-O files without treating ordinary resources as code."""
+    return [
+        path for path in sorted(p for p in root.rglob("*") if p.is_file() and not p.is_symlink())
+        if _macho_arches(path)
+    ]
+
+
+def _is_framework_alias(path: Path) -> bool:
+    """Return whether a Mach-O path is a duplicated framework entry.
+
+    Some PyQt wheels ship framework roots and ``Versions/Current`` as copied
+    files rather than symlinks.  codesign rejects those entries (and the
+    enclosing framework) as ambiguous.  The canonical signed code is under
+    ``Versions/<actual-version>/``.
+    """
+    for parent in path.parents:
+        if parent.suffix.lower() != ".framework":
+            continue
+        relative = path.relative_to(parent).parts
+        return (
+            len(relative) < 3
+            or relative[0] != "Versions"
+            or relative[1] == "Current"
+        )
+    return False
+
+
+def _signable_macho_files(root: Path) -> list[Path]:
+    """Return canonical native code paths suitable for codesign."""
+    app_executables = root / "Contents" / "MacOS"
+    return [
+        path for path in _macho_files(root)
+        if not _is_framework_alias(path) and path.parent != app_executables
+    ]
+
+
+def _macos_forbidden_payloads(root: Path) -> list[Path]:
+    forbidden = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        lower_name = path.name.lower()
+        if lower_name in MACOS_FORBIDDEN_PAYLOAD_NAMES:
+            forbidden.append(path)
+        elif path.suffix.lower() in {".bat", ".cmd", ".ps1", ".vbs", ".dll", ".exe"}:
+            forbidden.append(path)
+    return forbidden
+
+
+def _validate_macos_bundle(
+    app_bundle: Path,
+    arch: str,
+    minimum_macos: str,
+    require_signed: bool = False,
+):
+    """Validate metadata, payload policy, and exact native architecture."""
+    if PLATFORM != "macOS":
+        raise RuntimeError("macOS bundle validation must run on macOS")
+    if not app_bundle.is_dir() or app_bundle.suffix != ".app":
+        raise RuntimeError(f"Expected a macOS .app bundle at {app_bundle}")
+    plist_path = app_bundle / "Contents" / "Info.plist"
+    if not plist_path.exists():
+        raise RuntimeError(f"Missing app Info.plist: {plist_path}")
+    with plist_path.open("rb") as stream:
+        info = plistlib.load(stream)
+    expected = {
+        "CFBundleIdentifier": MACOS_BUNDLE_ID,
+        "LSMinimumSystemVersion": minimum_macos,
+        "StetArchitecture": arch,
+    }
+    for key, value in expected.items():
+        if info.get(key) != value:
+            raise RuntimeError(f"Info.plist {key} must be {value!r}, got {info.get(key)!r}")
+
+    forbidden = _macos_forbidden_payloads(app_bundle)
+    if forbidden:
+        names = ", ".join(str(p.relative_to(app_bundle)) for p in forbidden[:10])
+        raise RuntimeError(f"Windows payload found in macOS app: {names}")
+
+    binaries = _macho_files(app_bundle)
+    if not binaries:
+        raise RuntimeError("No Mach-O code found in macOS app bundle")
+    mismatched = []
+    for binary in binaries:
+        actual = _macho_arches(binary)
+        if actual != {arch}:
+            mismatched.append(f"{binary.relative_to(app_bundle)}={sorted(actual) or ['unknown']}")
+    if mismatched:
+        raise RuntimeError(
+            f"macOS app contains non-native or universal code for {arch}: "
+            + ", ".join(mismatched[:10])
+        )
+
+    if require_signed:
+        run(["codesign", "--verify", "--deep", "--strict", "--verbose=4", str(app_bundle)])
+        entitlements = subprocess.run(
+            ["codesign", "-d", "--entitlements", ":-", str(app_bundle)],
+            capture_output=True, text=True, check=False,
+        )
+        if "com.apple.security.get-task-allow" in entitlements.stdout + entitlements.stderr:
+            raise RuntimeError("Release app must not contain com.apple.security.get-task-allow")
+
+
 # ── Builder ──────────────────────────────────────────────────────────────────
 
 class PlatformBuilder:
     """Orchestrates the complete build pipeline for the current platform."""
 
-    def __init__(self, version: str, keep_folder: bool = False, skip_installer: bool = False):
+    def __init__(
+        self,
+        version: str,
+        keep_folder: bool = False,
+        skip_installer: bool = False,
+        macos_arch: str = "auto",
+        sign_identity: str | None = None,
+        notarize: bool = False,
+        allow_missing_macos_backend: bool = False,
+        dry_run: bool = False,
+    ):
         self.version = version
         self.keep_folder = keep_folder
         self.skip_installer = skip_installer
+        self.dry_run = dry_run
+        self.notarize = notarize
+        self.allow_missing_macos_backend = allow_missing_macos_backend
+        self.macos_arch = _resolve_macos_arch(macos_arch) if PLATFORM == "macOS" else None
+        self.sign_identity = sign_identity or os.environ.get("STET_MACOS_SIGN_IDENTITY", "-")
         self.release_name = f"Stet_{version}_{PLATFORM}"
         self.release_dir = DIST / self.release_name
         self.portable_dir = self.release_dir / "stet_portable"
         self.artifacts_dir = self.release_dir / "build_artifacts"
         self.llama_dir = _find_llama_dir()
         self.cuda_dir = _find_cuda_dir()
+        self.macos_backend = self._resolve_macos_backend() if PLATFORM == "macOS" else None
+        self.macos_minimum_system_version = (
+            _macos_backend_minimum_version(self.macos_backend)
+            if PLATFORM == "macOS"
+            else None
+        )
+        self.macos_zip = None
+        self.macos_dmg = None
+
+    def _resolve_macos_backend(self) -> Path | None:
+        """Resolve an already-built native llama-server; never download one."""
+        configured = os.environ.get("STET_MACOS_BACKEND", "").strip()
+        candidates = [Path(configured)] if configured else []
+        if self.llama_dir:
+            candidates.append(self.llama_dir / "llama-server")
+        found = shutil.which("llama-server")
+        if found:
+            candidates.append(Path(found))
+        for candidate in candidates:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return candidate.resolve()
+        return None
+
+    def _step(self, name: str) -> str:
+        if PLATFORM == "macOS":
+            numbers = {"app": 1, "extras": 2, "launchers": 3, "package": 4, "checksums": 5}
+            return f"Step {numbers[name]} / 5"
+        numbers = {"app": 1, "updater": 2, "extras": 3, "launchers": 4, "package": 5, "checksums": self._total_steps()}
+        return f"Step {numbers[name]} / {self._total_steps()}"
 
     def clean(self):
         if self.release_dir.exists():
@@ -775,22 +1218,42 @@ class PlatformBuilder:
     # ── Step 1: Compile main app ─────────────────────────────────────────
 
     def build_app(self):
-        total = self._total_steps()
-        banner(f"Step 1 / {total} — Compile Stet (PyInstaller → native binary)")
-        cmd = _pyinstaller_cmd(self.version, self.artifacts_dir)
-        run(cmd)
+        banner(f"{self._step('app')} — Compile Stet (PyInstaller → native binary)")
+        macos_icon = None
+        if PLATFORM == "macOS":
+            _write_macos_entitlements(self.artifacts_dir)
+            macos_icon = _generate_macos_icns(self.artifacts_dir)
+            print(f"  Generated macOS app icon: {macos_icon.name}")
+        cmd = _pyinstaller_cmd(self.version, self.artifacts_dir, self.macos_arch, macos_icon)
+        pyinstaller_env = None
+        if PLATFORM == "macOS":
+            # Keep PyInstaller's cache inside this release's intermediate
+            # directory.  Apart from being reproducible, this avoids --clean
+            # touching a user-wide Application Support cache.
+            pyinstaller_env = os.environ.copy()
+            pyinstaller_env["PYINSTALLER_CONFIG_DIR"] = str(self.artifacts_dir / "pyinstaller-cache")
+        run(cmd, env=pyinstaller_env)
 
         if PLATFORM == "macOS":
             app_bundle = self.artifacts_dir / "Stet.app"
-            if app_bundle.exists():
-                shutil.copytree(app_bundle, self.portable_dir / "Stet.app", dirs_exist_ok=True)
-            else:
-                dist_dir = self.artifacts_dir / "Stet"
-                if dist_dir.exists():
-                    shutil.copytree(dist_dir, self.portable_dir, dirs_exist_ok=True)
-                else:
-                    print("ERROR: PyInstaller output not found.")
-                    sys.exit(1)
+            if not app_bundle.exists():
+                raise RuntimeError(f"PyInstaller output not found at {app_bundle}")
+            destination = self.portable_dir / MACOS_APP_NAME
+            # PyInstaller's macOS bundle relies on framework and cross-tree
+            # symlinks.  Dereferencing them creates duplicated framework
+            # binaries that codesign rejects as structurally ambiguous.
+            shutil.copytree(app_bundle, destination, dirs_exist_ok=True, symlinks=True)
+            resources = destination / "Contents" / "Resources"
+            resources.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(macos_icon, resources / "Stet.icns")
+            _write_macos_info_plist(
+                destination,
+                self.version,
+                self.macos_arch,
+                self.macos_minimum_system_version,
+            )
+            self._bundle_macos_backend(destination)
+            self._verify_macos_app(destination, allow_unsigned=True)
         else:
             dist_dir = self.artifacts_dir / "Stet"
             if not dist_dir.exists():
@@ -803,8 +1266,10 @@ class PlatformBuilder:
     # ── Step 2: Compile updater ──────────────────────────────────────────
 
     def build_updater(self):
-        total = self._total_steps()
-        banner(f"Step 2 / {total} — Compile StetUpdater (onefile)")
+        if PLATFORM == "macOS":
+            print("  Skipping Windows file-overlay updater on macOS (signed app updates belong to Sparkle).")
+            return
+        banner(f"{self._step('updater')} — Compile StetUpdater (onefile)")
         cmd = _updater_pyinstaller_cmd(self.version, self.artifacts_dir)
         run(cmd)
         updater_name = "StetUpdater.exe" if PLATFORM == "Windows" else "StetUpdater"
@@ -838,8 +1303,7 @@ class PlatformBuilder:
     # ── Step 3: Copy extras ──────────────────────────────────────────────
 
     def build_extras(self):
-        total = self._total_steps()
-        banner(f"Step 3 / {total} — Copy extras (config, assets)")
+        banner(f"{self._step('extras')} — Copy extras (config, assets)")
 
         # NOTE: The llama-server backend is no longer bundled in the portable
         # directory.  It is downloaded at first run via download_backend scripts
@@ -861,8 +1325,10 @@ class PlatformBuilder:
         if readme.exists():
             shutil.copy(readme, self.portable_dir / "README.md")
 
-        # Root-level icons (safety net — also included via --include-data-files)
-        for asset in ("logo.png", "logo.ico"):
+        # Root-level icons (safety net — also included via --include-data-files).
+        # The Windows ICO is not copied into a macOS release directory.
+        assets = ("logo.png",) if PLATFORM == "macOS" else ("logo.png", "logo.ico")
+        for asset in assets:
             src = ROOT / asset
             if src.exists():
                 shutil.copy2(src, self.portable_dir / asset)
@@ -882,23 +1348,34 @@ class PlatformBuilder:
             svg_dst_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(svg_src, svg_dst_dir / "logo.svg")
 
-        # Windows startup script
-        startup_vbs = ROOT / "startup.vbs"
-        if startup_vbs.exists():
-            shutil.copy2(startup_vbs, self.portable_dir / "startup.vbs")
-            print("  Copied startup.vbs")
+        # Windows startup script.  It is intentionally never copied to the
+        # macOS release directory or app bundle.
+        if PLATFORM != "macOS":
+            startup_vbs = ROOT / "startup.vbs"
+            if startup_vbs.exists():
+                shutil.copy2(startup_vbs, self.portable_dir / "startup.vbs")
+                print("  Copied startup.vbs")
 
     # ── Step 4: Launcher scripts ─────────────────────────────────────────
 
     def build_launchers(self):
-        total = self._total_steps()
-        banner(f"Step 4 / {total} — Create launcher & download scripts")
+        banner(f"{self._step('launchers')} — Create launcher & download scripts")
         if PLATFORM == "Windows":
             (self.portable_dir / "run.bat").write_text(RUN_BAT, encoding="utf-8")
             (self.portable_dir / "download_model.bat").write_text(DOWNLOAD_BAT, encoding="utf-8")
             (self.portable_dir / "download_backend.bat").write_text(DOWNLOAD_BACKEND_BAT, encoding="utf-8")
             (self.portable_dir / "Unblock_Stet.bat").write_text(UNBLOCK_BAT, encoding="utf-8")
             print("  Created run.bat, download_model.bat, download_backend.bat, Unblock_Stet.bat")
+        elif PLATFORM == "macOS":
+            run_sh = """#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+open "$SCRIPT_DIR/Stet.app"
+"""
+            p = self.portable_dir / "run.sh"
+            p.write_text(run_sh, encoding="utf-8")
+            p.chmod(0o755)
+            print("  Created run.sh (opens Stet.app)")
         else:
             for name, content in [
                 ("run.sh", RUN_SH),
@@ -913,8 +1390,10 @@ class PlatformBuilder:
     # ── Step 5: Package portable ZIP ─────────────────────────────────────
 
     def package(self):
-        total = self._total_steps()
-        banner(f"Step 5 / {total} — Package portable ZIP")
+        if PLATFORM == "macOS":
+            self._package_macos()
+            return
+        banner(f"{self._step('package')} — Package portable ZIP")
         zip_path = DIST / "stet_portable.zip"
         print("  Creating stet_portable.zip from portable directory...")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -930,6 +1409,154 @@ class PlatformBuilder:
         size_mb = zip_path.stat().st_size / 1_048_576
         print(f"  Created: dist/stet_portable.zip  ({size_mb:.1f} MB)")
         self._portable_zip = zip_path
+
+    def _bundle_macos_backend(self, app_bundle: Path):
+        """Copy the server and all adjacent runtime dylibs into Resources."""
+        if self.macos_backend is None:
+            if self.allow_missing_macos_backend:
+                print("  WARNING: no native llama-server supplied; release is not runtime-complete")
+                return
+            raise RuntimeError(
+                "No native macOS llama-server found. Set STET_MACOS_BACKEND to an executable "
+                "built for the target architecture."
+            )
+        actual = _macho_arches(self.macos_backend)
+        if actual != {self.macos_arch}:
+            raise RuntimeError(
+                f"Backend architecture mismatch: {self.macos_backend} is "
+                f"{sorted(actual) or ['unknown']}, expected {self.macos_arch}"
+            )
+        destination_dir = app_bundle / "Contents" / "Resources" / "backend" / self.macos_arch
+        destination = destination_dir / "llama-server"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        # llama-server uses @loader_path to locate its shared libraries.  Copy
+        # every adjacent dylib, including versioned files and their symlinks,
+        # rather than a lone executable that would only work while the source
+        # backend remained installed elsewhere on the developer's machine.
+        runtime_files = [self.macos_backend, *sorted(self.macos_backend.parent.glob("*.dylib"))]
+        copied_names: set[str] = set()
+        for source in runtime_files:
+            if source.name in copied_names:
+                continue
+            copied_names.add(source.name)
+            shutil.copy2(source, destination_dir / source.name, follow_symlinks=False)
+        destination.chmod(destination.stat().st_mode | 0o111)
+        if not any(destination_dir.glob("libggml*.dylib")):
+            raise RuntimeError(
+                f"No llama.cpp runtime dylibs were found beside {self.macos_backend}; "
+                "supply the server from an official complete release archive."
+            )
+        manifest = app_bundle / "Contents" / "Resources" / "backend-manifest.json"
+        manifest.write_text(json.dumps({
+            "architecture": self.macos_arch,
+            "backend_mode": "cpu" if self.macos_arch == "x86_64" else "auto",
+            "minimum_macos": self.macos_minimum_system_version,
+            "release": _llama_release_from_path(self.macos_backend),
+            "server": "llama-server",
+            "source": str(self.macos_backend),
+            "sha256": _sha256(destination),
+        }, indent=2) + "\n", encoding="utf-8")
+        print(
+            f"  Bundled native llama-server plus {len(copied_names) - 1} runtime dylibs "
+            f"({self.macos_arch}, macOS {self.macos_minimum_system_version}+)"
+        )
+
+    def _verify_macos_app(self, app_bundle: Path, allow_unsigned: bool = False):
+        verifier = ROOT / "scripts" / "macos" / "verify_bundle.py"
+        if verifier.exists():
+            cmd = [
+                sys.executable, str(verifier), str(app_bundle), "--arch", self.macos_arch,
+                "--minimum-macos", self.macos_minimum_system_version,
+            ]
+            if allow_unsigned:
+                cmd.append("--allow-unsigned")
+            if self.allow_missing_macos_backend:
+                cmd.append("--allow-missing-backend")
+            run(cmd)
+        else:
+            _validate_macos_bundle(
+                app_bundle,
+                self.macos_arch,
+                self.macos_minimum_system_version,
+                require_signed=not allow_unsigned,
+            )
+
+    def _sign_macos_path(self, path: Path, entitlements: Path):
+        args = ["codesign", "--force"]
+        # Library validation from the hardened runtime requires all nested
+        # code to carry one Developer ID team.  Ad-hoc signatures have no
+        # team, so enabling the runtime on a local build makes macOS reject
+        # its bundled libpython at launch.  Production Developer ID builds
+        # keep the hardened runtime (and timestamp) as required for
+        # notarization.
+        if self.sign_identity != "-":
+            args.extend(["--options", "runtime", "--timestamp"])
+        args.extend(["--sign", self.sign_identity, "--entitlements", str(entitlements), str(path)])
+        run(args)
+
+    def _sign_macos_app(self, app_bundle: Path):
+        """Sign nested Mach-O code inside-out, then sign the outer app."""
+        if self.sign_identity == "-":
+            print("  Signing with ad-hoc identity for local use; set STET_MACOS_SIGN_IDENTITY for release notarization.")
+        else:
+            print(f"  Signing with Developer ID identity: {self.sign_identity}")
+        entitlements = _write_macos_entitlements(self.artifacts_dir)
+        for binary in sorted(_signable_macho_files(app_bundle), key=lambda p: len(p.parts), reverse=True):
+            self._sign_macos_path(binary, entitlements)
+        nested_bundles = [
+            path for path in app_bundle.rglob("*")
+            if (
+                path.is_dir()
+                and not path.is_symlink()
+                and path.suffix.lower() in {".bundle", ".xpc"}
+            )
+        ]
+        for bundle in sorted(nested_bundles, key=lambda p: len(p.parts), reverse=True):
+            self._sign_macos_path(bundle, entitlements)
+        self._sign_macos_path(app_bundle, entitlements)
+
+    def _package_macos(self):
+        banner(f"{self._step('package')} — Sign and package macOS {self.macos_arch} release")
+        app_bundle = self.portable_dir / MACOS_APP_NAME
+        self._verify_macos_app(app_bundle, allow_unsigned=True)
+        self._sign_macos_app(app_bundle)
+        self._verify_macos_app(app_bundle)
+
+        self.macos_zip = DIST / f"Stet-{self.version}-macos-{self.macos_arch}.zip"
+        run(["ditto", "-c", "-k", "--keepParent", str(app_bundle), str(self.macos_zip)])
+        print(f"  Created: {self.macos_zip.name}")
+
+        staging = self.artifacts_dir / "dmg-staging"
+        if staging.exists():
+            _remove_tree(staging)
+        staging.mkdir(parents=True)
+        shutil.copytree(app_bundle, staging / MACOS_APP_NAME, symlinks=True)
+        (staging / "Applications").symlink_to("/Applications")
+        self.macos_dmg = DIST / f"Stet-{self.version}-macos-{self.macos_arch}.dmg"
+        run([
+            "hdiutil", "create", "-volname", f"Stet {self.version}",
+            "-srcfolder", str(staging), "-format", "UDZO", "-ov", str(self.macos_dmg),
+        ])
+        print(f"  Created: {self.macos_dmg.name}")
+
+        if self.notarize:
+            self._notarize_macos_dmg()
+
+    def _notarize_macos_dmg(self):
+        if self.sign_identity == "-":
+            raise RuntimeError("--notarize requires a Developer ID signing identity")
+        apple_id = os.environ.get("APPLE_ID", "")
+        team_id = os.environ.get("APPLE_TEAM_ID", "")
+        password = os.environ.get("APPLE_APP_PASSWORD", "")
+        if not all((apple_id, team_id, password)):
+            raise RuntimeError("Notarization requires APPLE_ID, APPLE_TEAM_ID, and APPLE_APP_PASSWORD")
+        run([
+            "xcrun", "notarytool", "submit", str(self.macos_dmg),
+            "--apple-id", apple_id, "--team-id", team_id, "--password", password, "--wait",
+        ])
+        run(["xcrun", "stapler", "staple", str(self.macos_dmg)])
+        run(["xcrun", "stapler", "validate", str(self.macos_dmg)])
+        run(["spctl", "--assess", "--type", "open", "--context", "context:primary-signature", str(self.macos_dmg)])
 
     # ── Step 6: Self-contained installer (Windows only) ──────────────────
 
@@ -1034,12 +1661,14 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
     # ── Step 7: SHA-256 checksums ────────────────────────────────────────
 
     def generate_checksums(self):
-        total = self._total_steps()
-        step = total  # Always the last step
-        banner(f"Step {step} / {total} — Generate SHA-256 checksums")
+        banner(f"{self._step('checksums')} — Generate SHA-256 checksums")
         checksum_lines = []
         for f in sorted(DIST.iterdir()):
-            if f.is_file() and f.suffix in (".zip", ".exe"):
+            if f.is_file() and (
+                f.suffix in (".zip", ".exe")
+                if PLATFORM != "macOS"
+                else f in {self.macos_zip, self.macos_dmg}
+            ):
                 h = _sha256(f)
                 checksum_lines.append(f"{h}  {f.name}")
                 print(f"  {h}  {f.name}")
@@ -1070,6 +1699,8 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
 
     def _total_steps(self) -> int:
         """Total build steps for the current platform."""
+        if PLATFORM == "macOS":
+            return 5
         steps = 5  # app + updater + extras + launchers + zip
         if PLATFORM == "Windows":
             if UNINSTALLER_SCRIPT.exists():
@@ -1083,6 +1714,18 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
     def run(self):
         banner(f"Stet build  v{self.version}  [{PLATFORM}]")
 
+        if self.dry_run:
+            if PLATFORM == "macOS":
+                print(f"  Target architecture: {self.macos_arch} (native {_macos_host_arch()})")
+                print(f"  Expected ZIP: Stet-{self.version}-macos-{self.macos_arch}.zip")
+                print(f"  Expected DMG: Stet-{self.version}-macos-{self.macos_arch}.dmg")
+                print(f"  Signing identity: {self.sign_identity}")
+                print(f"  Native backend: {self.macos_backend or 'not found (required for a real release)'}")
+                print(f"  Minimum macOS: {self.macos_minimum_system_version}")
+            else:
+                print("  Dry-run is informational on non-macOS platforms; no files were changed.")
+            return
+
         # Pre-flight checks
         if PLATFORM == "Windows":
             if _check_msvc_available():
@@ -1093,6 +1736,11 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
             print(f"  ✓ llama-server found: {self.llama_dir.name}")
         else:
             print("  ⚠ llama-server not found — empty placeholder will be created")
+        if PLATFORM == "macOS":
+            if self.macos_backend:
+                print(f"  ✓ native macOS backend found: {self.macos_backend}")
+            else:
+                print("  ✗ native macOS backend not found — real macOS releases require STET_MACOS_BACKEND")
         if self.cuda_dir:
             print(f"  ✓ CUDA DLLs found: {self.cuda_dir}")
 
@@ -1110,8 +1758,26 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def build(version: str, keep_folder: bool = False, skip_installer: bool = False):
-    builder = PlatformBuilder(version, keep_folder, skip_installer)
+def build(
+    version: str,
+    keep_folder: bool = False,
+    skip_installer: bool = False,
+    macos_arch: str = "auto",
+    sign_identity: str | None = None,
+    notarize: bool = False,
+    allow_missing_macos_backend: bool = False,
+    dry_run: bool = False,
+):
+    builder = PlatformBuilder(
+        version,
+        keep_folder,
+        skip_installer,
+        macos_arch,
+        sign_identity,
+        notarize,
+        allow_missing_macos_backend,
+        dry_run,
+    )
     builder.run()
 
 
@@ -1122,5 +1788,24 @@ if __name__ == "__main__":
                         help="Keep intermediate dist/<release>/ folder for debugging")
     parser.add_argument("--skip-installer", action="store_true",
                         help="Skip building the self-contained StetSetup.exe installer")
+    parser.add_argument("--macos-arch", choices=("auto", "arm64", "x86_64"), default="auto",
+                        help="Native macOS target architecture (default: auto; macOS only)")
+    parser.add_argument("--sign-identity", default=None,
+                        help="macOS codesign identity (default: STET_MACOS_SIGN_IDENTITY or ad hoc '-')")
+    parser.add_argument("--notarize", action="store_true",
+                        help="Submit the signed macOS DMG to Apple and staple the ticket")
+    parser.add_argument("--allow-missing-macos-backend", action="store_true",
+                        help="Development-only: allow a macOS app without bundled llama-server")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print the selected macOS release contract without building")
     args = parser.parse_args()
-    build(args.version, args.keep_folder, args.skip_installer)
+    build(
+        args.version,
+        args.keep_folder,
+        args.skip_installer,
+        args.macos_arch,
+        args.sign_identity,
+        args.notarize,
+        args.allow_missing_macos_backend,
+        args.dry_run,
+    )

@@ -1,7 +1,9 @@
-target-version = "py312"
+target-version = "py310"
 line-length = 100
+cache-dir = "tests/.artifacts/.ruff_cache"
 
 [lint]
+select = ["E", "F"]
 # E402 is intentional: Qt HiDPI env vars must be set BEFORE PyQt6 import,
 # and test files manipulate sys.path before importing. Both are documented patterns.
-ignore = ["E402"]
+ignore = ["E402", "E501"]

@@ -42,6 +42,34 @@ def _boot_log(msg: str):
         pass
 
 
+def _macos_instance_lock_path(lock_key: str) -> Path:
+    """Return a safe, per-user file-lock location for macOS.
+
+    ``QSharedMemory`` can outlive a hard-killed process on macOS, leaving a
+    stale segment that prevents every future app launch.  Advisory file locks
+    are released by the kernel as soon as a process dies, which is the
+    behavior a tray app needs after a crash or forced update.
+    """
+    import tempfile
+
+    safe_key = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in lock_key)
+    return Path(tempfile.gettempdir()) / f"{safe_key or 'StetSingleInstanceLock'}.lock"
+
+
+def _acquire_macos_instance_lock(lock_key: str):
+    """Acquire a non-blocking macOS process lock, or return ``None``."""
+    import fcntl
+
+    lock_file = _macos_instance_lock_path(lock_key)
+    handle = lock_file.open("a+")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 # ── Import project modules AFTER boot logger is defined ──────────────────────
 try:
     _boot_log("[BOOT] Importing stet.constants...")
@@ -68,9 +96,12 @@ from stet.core.utils import log
 
 
 def main():
-    if sys.platform == "win32":
+    if sys.platform == "win32" and _is_compiled:
         # Unblock all files in the application directory on Windows to prevent SmartScreen/Mark of the Web
-        # blocks on updater executables or download helper scripts.
+        # blocks on updater executables or download helper scripts.  Source
+        # checkouts are deliberately excluded: recursively walking a project
+        # can touch multi-gigabyte local models and build output for no user
+        # benefit, and source launchers are not distributed Windows payloads.
         try:
             _boot_log(f"[BOOT] Starting background unblock of files in directory {_SCRIPT_DIR}...")
             def _unblock_worker():
@@ -104,27 +135,43 @@ def main():
 
     threading.excepthook = _thread_excepthook
 
-    _boot_log("[BOOT] Acquiring single-instance lock via QSharedMemory...")
-    from PyQt6.QtCore import QSharedMemory
-
     _lock_key = os.environ.get("STET_LOCK_KEY", "StetSingleInstanceLock")
-    _shared_mem = QSharedMemory(_lock_key)
-    if _shared_mem.attach():
-        _boot_log(
-            "[BOOT] Another instance is already running (shared memory attached). Exiting."
-        )
-        import tempfile
-        _SHOW_WELCOME_FLAG = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
-        try:
-            _SHOW_WELCOME_FLAG.write_text("show", encoding="utf-8")
-        except OSError:
-            pass
-        sys.exit(0)
-    if not _shared_mem.create(1):
-        _boot_log(
-            "[BOOT] Could not create shared memory segment — another instance likely running. Exiting."
-        )
-        sys.exit(0)
+    if sys.platform == "darwin":
+        _boot_log("[BOOT] Acquiring macOS single-instance file lock...")
+        _shared_mem = _acquire_macos_instance_lock(_lock_key)
+        if _shared_mem is None:
+            _boot_log("[BOOT] Another macOS instance is already running. Exiting.")
+            import tempfile
+
+            _SHOW_WELCOME_FLAG = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
+            try:
+                _SHOW_WELCOME_FLAG.write_text("show", encoding="utf-8")
+            except OSError:
+                pass
+            sys.exit(0)
+    else:
+        _boot_log("[BOOT] Acquiring single-instance lock via QSharedMemory...")
+        from PyQt6.QtCore import QSharedMemory
+
+        _shared_mem = QSharedMemory(_lock_key)
+        if _shared_mem.attach():
+            _boot_log(
+                "[BOOT] Another instance is already running (shared memory attached). Exiting."
+            )
+            import tempfile
+
+            _SHOW_WELCOME_FLAG = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
+            try:
+                _SHOW_WELCOME_FLAG.write_text("show", encoding="utf-8")
+            except OSError:
+                pass
+            sys.exit(0)
+        if not _shared_mem.create(1):
+            _boot_log(
+                "[BOOT] Could not create shared memory segment — another instance likely running. Exiting."
+            )
+            sys.exit(0)
+
     _boot_log("[BOOT] Lock acquired — this is the only instance.")
 
     try:
@@ -133,6 +180,10 @@ def main():
 
         qapp = QApplication(sys.argv)
         qapp.setStyle("Fusion")
+        from stet.ui.utils import get_app_icon
+        _icon = get_app_icon()
+        if not _icon.isNull():
+            qapp.setWindowIcon(_icon)
         _boot_log("[BOOT] QApplication created OK")
 
         _boot_log("[BOOT] Creating StetApp...")

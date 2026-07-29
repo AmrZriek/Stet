@@ -5,8 +5,11 @@ test_hotkey_edit.py, test_hotkey_stress.py, test_manual_edit.py.
 """
 
 import re
+import sys
 import time
+import copy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,6 +17,37 @@ from PyQt6.QtCore import Qt
 
 from stet.core.app import StetApp
 from stet.ui.components import HotkeyEdit
+
+
+@pytest.fixture(autouse=True)
+def mock_windows_hotkey_surface(monkeypatch):
+    """Run Win32 registration tests against a fully mocked API on macOS."""
+    if sys.platform != "win32":
+        import ctypes
+        import stet.core.app as app_module
+
+        user32 = MockUser32()
+        monkeypatch.setattr(
+            ctypes,
+            "windll",
+            SimpleNamespace(user32=user32, kernel32=MagicMock()),
+            raising=False,
+        )
+        monkeypatch.setattr(app_module, "ctypes", ctypes, raising=False)
+        monkeypatch.setattr(app_module, "WINDOWS", True)
+        monkeypatch.setattr(app_module, "MACOS", False)
+        # These are Win32 registration tests running on a Mac host.  Give
+        # their temporary ConfigManager the Windows-style defaults instead of
+        # the production Command+Option macOS defaults.
+        import stet.core.config as config_module
+
+        windows_defaults = copy.deepcopy(config_module.DEFAULT_CONFIG)
+        windows_defaults["hotkeys"] = [
+            {"shortcut": "f9", "mode": "panel", "strength": "full_correction"},
+            {"shortcut": "f10", "mode": "silent", "strength": "spelling_only"},
+            {"shortcut": "shift+f9", "mode": "panel", "strength": "rewrite_polish"},
+        ]
+        monkeypatch.setattr(config_module, "DEFAULT_CONFIG", windows_defaults)
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -163,8 +197,13 @@ def test_quit_uses_handle_removal_not_unhook_all():
 
 def test_escape_in_hotkey_edit_does_not_re_register():
     """Pressing Escape during HotkeyEdit recording must NOT call re_register_cb."""
+    components_src = (
+        Path(__file__).resolve().parent.parent / "stet" / "ui" / "components.py"
+    ).read_text(encoding="utf-8")
     body = re.search(
-        r"def keyPressEvent\(self, e\):.*?(?=\n    def |\nclass )", SRC, re.DOTALL
+        r"def keyPressEvent\(self, e\):.*?(?=\n    def |\nclass |\Z)",
+        components_src,
+        re.DOTALL,
     ).group(0)
     escape_block = re.search(r"Key_Escape:\s*\n(.*?)return", body, re.DOTALL)
     assert escape_block is not None, "Escape handling block must exist"
@@ -290,6 +329,11 @@ def test_register_hotkey_logs_success(qtbot):
         app_module.log = lambda x: log_calls.append(x)
         try:
             app = StetApp()
+            # This is a Win32 registration assertion; make its expected
+            # legacy shortcut explicit instead of inheriting macOS defaults.
+            app.cfg.config["hotkeys"] = [
+                {"shortcut": "f9", "mode": "panel", "strength": "full_correction"}
+            ]
             app._last_register_ts = 0.0
             app._register_hotkey()
             assert any("registered: f9" in msg for msg in log_calls)
@@ -452,6 +496,42 @@ def test_hotkey_edit_accepts_modifier_combos(qtbot):
     assert w.text() == "ctrl+shift+c"
 
 
+def test_hotkey_edit_records_macos_command_option_combo(qtbot, monkeypatch):
+    """The recording widget must receive Command-based shortcuts on macOS."""
+    import stet.ui.components as components_module
+    from PyQt6.QtCore import QEvent
+    from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtWidgets import QApplication
+
+    monkeypatch.setattr(components_module, "MACOS", True)
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    w._recording = True
+    event = QKeyEvent(
+        QEvent.Type.KeyPress,
+        Qt.Key.Key_F9,
+        Qt.KeyboardModifier.MetaModifier | Qt.KeyboardModifier.AltModifier,
+        "",
+    )
+    QApplication.sendEvent(w, event)
+    assert w.text() == "cmd+option+f9"
+
+
+def test_hotkey_edit_mouse_recording_claims_focus(qtbot):
+    """A click must capture the next keystroke even when focus stays elsewhere."""
+    from PyQt6.QtWidgets import QWidget
+
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.mouseClick(w, Qt.MouseButton.LeftButton)
+    assert w._recording is True
+    assert QWidget.keyboardGrabber() is w
+    w._stop_recording()
+    assert QWidget.keyboardGrabber() is not w
+    w.close()
+
+
 def test_hotkey_edit_rejects_common_conflict_keys_without_modifier(qtbot):
     """Bare 'c' without modifier must NOT be accepted by HotkeyEdit."""
     w = HotkeyEdit()
@@ -477,8 +557,8 @@ def test_hotkey_edit_overrides_event_to_intercept_shift_f10():
         SRC, re.DOTALL,
     ).group(0)
     assert "def event(self, e):" in body, "HotkeyEdit must override event()"
-    assert "Key_F10" in body and "ShiftModifier" in body, (
-        "event() override must explicitly intercept Shift+F10"
+    assert "self.keyPressEvent(e)" in body, (
+        "event() override must forward every recording KeyPress, including Shift+F10"
     )
     assert "def contextMenuEvent(self" in body, (
         "HotkeyEdit must suppress context menu while recording"
@@ -495,9 +575,10 @@ def test_hotkey_edit_shift_f10_registers_via_real_dispatcher(qtbot):
 
     w = HotkeyEdit()
     qtbot.addWidget(w)
-    w.show()
-    w.setFocus()
-    qtbot.mouseClick(w, Qt.MouseButton.LeftButton)
+    # QApplication.sendEvent exercises the actual Qt dispatcher.  Keeping
+    # this widget unshown makes the test reliable in macOS/headless runners
+    # where showing a transient native window can abort the process.
+    w._recording = True
     assert w._recording is True
 
     ev = QKeyEvent(
@@ -662,6 +743,19 @@ def test_manual_edit_sets_editable(qtbot):
     assert not w.isReadOnly()
     assert w._manual_editing is True
     assert w._recording is False
+    w.close()
+
+
+def test_manual_edit_moves_focus_from_the_type_button(qtbot):
+    """The fallback must accept typing immediately after its button is clicked."""
+    w = HotkeyEdit()
+    qtbot.addWidget(w)
+    with qtbot.waitExposed(w):
+        w.show()
+    w.setText("f9")
+    w.enable_manual_edit()
+    assert w.hasFocus()
+    assert not w.isReadOnly()
     w.close()
 
 

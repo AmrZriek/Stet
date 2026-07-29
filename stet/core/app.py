@@ -25,7 +25,15 @@ from PyQt6.QtWidgets import (
     QWidgetAction,
 )
 
-from stet.constants import APP_VERSION, GITHUB_RELEASES_API, SCRIPT_DIR, WINDOWS, DEFAULT_TEMPLATES
+from stet.constants import (
+    APP_VERSION,
+    DEBUG_LOG,
+    DEFAULT_TEMPLATES,
+    GITHUB_RELEASES_API,
+    MACOS,
+    SCRIPT_DIR,
+    WINDOWS,
+)
 from stet.core.clipboard import (
     VK_C,
     VK_V,
@@ -35,9 +43,14 @@ from stet.core.clipboard import (
     _send_ctrl_shift_chord,
 )
 from stet.core.config import ConfigManager
+from stet.core.input import HotkeySpec, InputCode, PermissionStatus
 from stet.core.utils import _release_zip_asset, friendly_name, log
 from stet.llm.model_manager import ModelManager
 from stet.llm.utils import _find_shipped_llama_server
+
+if MACOS:
+    from stet.core.input_macos import MacOSInputBackend
+    from stet.core.macos_permissions import request_input_monitoring
 
 if WINDOWS:
     try:
@@ -342,6 +355,7 @@ class StetApp(QObject):
     _trigger = pyqtSignal(str, str)
     _notify = pyqtSignal(str, str)
     _hotkey_signal = pyqtSignal(dict)
+    _undo_signal = pyqtSignal(str)
     _silent_osd_signal = pyqtSignal(
         str, str
     )  # message, state ('loading'|'success'|'warning')
@@ -386,17 +400,30 @@ class StetApp(QObject):
         )
         self._window: CorrectionWindow | None = None
         self._welcome_window: WelcomeWindow | None = None
+        self._taskbar_widget = None
+        self._app_is_quitting = False
         self._welcome_cancel_event: threading.Event | None = None
         self._first_run_setup_active = False
         self._first_run_setup_done = False
         self._status_lbl = QLabel("● AC: Offline")
         self._chat_status_lbl = QLabel("● Chat: Offline")
         self._old_clip = ""
+        self._mac_input = MacOSInputBackend() if MACOS else None
+        self._mac_input_monitoring_requested = False
+        self._mac_selection_target = None
+        self._mac_clipboard_snapshot = None
+        self._mac_clipboard_change_count = None
         # Hotkey re-entrancy guard — holding the keys or rapid repeat presses
         # used to spawn overlapping _hotkey_fired threads, each firing its own
         # "no text selected" notification in a feedback loop. This lock ensures
         # only one hotkey flow runs at a time.
         self._hotkey_busy = threading.Lock()
+        self._last_silent_history_id: str | None = None
+        from stet.core.history import CorrectionHistory
+        self._history = CorrectionHistory(
+            limit=int(self.cfg.get("history_limit", 200)),
+            enabled=bool(self.cfg.get("history_enabled", True)),
+        )
         self._pending_panel_strength = "full_correction"
         self._last_empty_notify_ts = 0.0
         # Debounce guard for _register_hotkey — prevents rapid re-registration
@@ -411,6 +438,7 @@ class StetApp(QObject):
         self._trigger.connect(self._show_window)
         self._notify.connect(self._show_notify)
         self._hotkey_signal.connect(self._handle_hotkey_fired)
+        self._undo_signal.connect(self._undo_correction)
         self._silent_osd_signal.connect(self._show_silent_osd)
         self._large_doc_warning_signal.connect(self._on_large_doc_warning)
         self._welcome_corr_finished.connect(self._on_welcome_correction_finished)
@@ -423,8 +451,9 @@ class StetApp(QObject):
         self.ac_model.model_warning.connect(self._show_model_warning)
         self.chat_model.model_warning.connect(self._show_model_warning)
 
-        self._hotkey_filter = WinHotkeyFilter()
-        QApplication.instance().installNativeEventFilter(self._hotkey_filter)
+        if WINDOWS:
+            self._hotkey_filter = WinHotkeyFilter()
+            QApplication.instance().installNativeEventFilter(self._hotkey_filter)
 
         self._build_tray()
         self._register_hotkey()
@@ -479,6 +508,11 @@ class StetApp(QObject):
             qapp = QApplication.instance()
             if qapp and hasattr(self, "_hotkey_filter"):
                 qapp.removeNativeEventFilter(self._hotkey_filter)
+        except Exception:
+            pass
+        try:
+            if self._mac_input is not None:
+                self._mac_input.close()
         except Exception:
             pass
 
@@ -617,9 +651,21 @@ class StetApp(QObject):
         act_settings.triggered.connect(self._open_settings)
         menu.addAction(act_settings)
 
+        act_logs = QAction("Open Log Folder", self)
+        act_logs.triggered.connect(self._open_log_folder)
+        menu.addAction(act_logs)
+
+        act_debug = QAction("Copy Debug Info", self)
+        act_debug.triggered.connect(self._copy_debug_info)
+        menu.addAction(act_debug)
+
+        act_history = QAction("Correction History...", self)
+        act_history.triggered.connect(self._show_history)
+        menu.addAction(act_history)
+
         self._update_action = QAction("Check for Updates", self)
 
-        if WINDOWS:
+        if WINDOWS or MACOS:
             self._act_startup = QAction("Run at Startup", self)
             self._act_startup.setCheckable(True)
             self._act_startup.triggered.connect(self._toggle_startup)
@@ -632,9 +678,8 @@ class StetApp(QObject):
         act_quit.triggered.connect(self._quit)
         menu.addAction(act_quit)
 
-        if WINDOWS:
-            self._tray_menu = menu
-        else:
+        self._tray_menu = menu
+        if not WINDOWS:
             self.tray.setContextMenu(menu)
         self._update_llm_menu_initial_text()
         self._show_tray_with_retry()
@@ -677,6 +722,31 @@ class StetApp(QObject):
 
     def _set_tray_icon(self, color: str):
         self.tray.setIcon(make_tray_icon(color))
+
+    def _open_log_folder(self):
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(DEBUG_LOG.parent)))
+
+    def _copy_debug_info(self):
+        import platform as _plat
+        lines = [
+            f"Stet {APP_VERSION}",
+            f"OS: {_plat.platform()}",
+            f"Python: {_plat.python_version()}",
+            f"model_path: {self.cfg.get('model_path', '')}",
+            f"model_loaded: {self.ac_model.is_loaded()}",
+            f"gpu_layers: {self.cfg.get('gpu_layers', '')}",
+            "--- last log lines ---",
+        ]
+        try:
+            with open(DEBUG_LOG, "r", encoding="utf-8", errors="replace") as f:
+                lines.extend(f.readlines()[-40:])
+        except OSError:
+            lines.append("(log unavailable)")
+        text = "".join(lines) if lines and lines[-1].endswith("\n") else "\n".join(lines)
+        QApplication.clipboard().setText(text)
+        self._notify.emit("Debug info copied to clipboard", "info")
 
     def _tray_activated(self, reason):
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -794,7 +864,66 @@ class StetApp(QObject):
             self._chat_status_lbl.hide()
 
     def _register_hotkey(self, force: bool = False):
-        """Register global hotkeys using Windows RegisterHotKey API."""
+        """Register global hotkeys through the native platform adapter."""
+        if MACOS:
+            now = time.monotonic()
+            if not force and now - self._last_register_ts < 0.5:
+                log("[Hotkey] register debounced — too recent")
+                return
+            self._last_register_ts = now
+            hotkeys = self.cfg.get("hotkeys", [])
+            by_shortcut = {}
+            specs = []
+            try:
+                for index, hk_cfg in enumerate(hotkeys):
+                    shortcut = hk_cfg.get("shortcut", "").lower().strip()
+                    if not shortcut:
+                        continue
+                    spec = HotkeySpec(shortcut, str(index))
+                    specs.append(spec)
+                    by_shortcut[spec.shortcut] = hk_cfg
+            except ValueError as error:
+                self.tray.showMessage(
+                    "Stet",
+                    f"Invalid macOS shortcut: {error}",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    4000,
+                )
+                return
+            permission = self._mac_input.permission_state()
+            if (
+                permission.input_monitoring is not PermissionStatus.GRANTED
+                and not self._mac_input_monitoring_requested
+            ):
+                # Prompt once per launch.  The check itself never prompts, so
+                # ordinary status refreshes cannot create a TCC prompt loop.
+                self._mac_input_monitoring_requested = True
+                request_input_monitoring()
+            result = self._mac_input.register_hotkeys(
+                specs,
+                lambda spec: self._hotkey_signal.emit(by_shortcut[spec.shortcut]),
+            )
+            self._hotkey_handles = list(result.handles)
+            if not result.ok:
+                log(f"[Hotkey] macOS registration failed: {result.code.value}: {result.message}")
+                self.tray.showMessage(
+                    "Stet — permissions needed",
+                    (
+                        result.message
+                        or "Could not register macOS global shortcuts."
+                    )
+                    + (
+                        " When testing with run_mac.command, macOS may list Python or Terminal "
+                        "instead of Stet in Input Monitoring."
+                        if result.code is InputCode.INPUT_MONITORING_REQUIRED
+                        else ""
+                    ),
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    6000,
+                )
+            else:
+                log(f"[Hotkey] registered {len(specs)} macOS shortcuts")
+            return
         if not WINDOWS:
             return
         now = time.monotonic()
@@ -848,6 +977,11 @@ class StetApp(QObject):
 
     def _unregister_hotkey(self):
         """Unregister global hotkeys temporarily."""
+        if MACOS:
+            if self._mac_input is not None:
+                self._mac_input.unregister_hotkeys()
+            self._hotkey_handles.clear()
+            return
         if not WINDOWS:
             return
         for hotkey_id in self._hotkey_handles:
@@ -861,10 +995,32 @@ class StetApp(QObject):
         log("[Hotkey] Temporarily unregistered all hotkeys")
 
     def _safe_paste(self) -> str:
+        if MACOS:
+            from stet.core.clipboard_macos import read_text
+
+            result = read_text()
+            return result.value if result.ok and result.value is not None else ""
         return _clipboard_read_text()
 
     def _safe_copy(self, text: str):
+        if MACOS:
+            from stet.core.clipboard_macos import write_text
+
+            write_text(text)
+            return
         _clipboard_write_text(text)
+
+    def _restore_macos_clipboard(self):
+        """Return clipboard fallback captures to their prior multi-format state."""
+
+        if not MACOS or self._mac_input is None or self._mac_clipboard_snapshot is None:
+            return
+        result = self._mac_input.restore_clipboard(
+            self._mac_clipboard_snapshot,
+            self._mac_clipboard_change_count,
+        )
+        if not result.ok and result.code is not InputCode.PASTEBOARD_CHANGED_EXTERNALLY:
+            log(f"[Clipboard] macOS restore failed: {result.message}")
 
     def _is_window_alive(self) -> bool:
         """Check if _window is alive without risking RuntimeError on deleted C++."""
@@ -951,6 +1107,17 @@ class StetApp(QObject):
         Saves the previous clipboard content to self._old_clip and restores it
         only when no selection is found.
         """
+        if MACOS:
+            result = self._mac_input.capture_selection()
+            self._mac_selection_target = result.target
+            self._mac_clipboard_snapshot = result.original_clipboard
+            self._mac_clipboard_change_count = result.clipboard_change_count
+            if result.ok and result.text is not None:
+                log(f"[Capture] macOS {result.source.value} capture succeeded: {result.text[:80]!r}")
+                return result.text
+            log(f"[Capture] macOS capture failed: {result.code.value}: {result.message}")
+            return ""
+
         # Try UIA direct text capture first (bypassing the clipboard)
         from stet.core.clipboard import _read_selection_uia
 
@@ -1114,7 +1281,9 @@ class StetApp(QObject):
         except Exception as e:
             log(f"[Hotkey] worker error: {e}")
         finally:
-            if self._old_clip:
+            if MACOS:
+                self._restore_macos_clipboard()
+            elif self._old_clip:
                 try:
                     self._safe_copy(self._old_clip)
                 except Exception:
@@ -1169,21 +1338,28 @@ class StetApp(QObject):
                         self._wait_for_model_ready()
 
             if not self._is_model_ready():
-                self._safe_copy(self._old_clip)
+                if MACOS:
+                    self._restore_macos_clipboard()
+                else:
+                    self._safe_copy(self._old_clip)
                 self._silent_osd_signal.emit("Model not ready", "warning")
                 return
 
             custom_sys = self.cfg.get("system_prompt", "").strip()
-            result, _units = self.ac_model.correct_text_patch(
+            _cr = self.ac_model.correct_text_patch(
                 text,
                 custom_sys=custom_sys or None,
                 strength=strength,
                 mode_prompt_override=custom_prompt or None,
             )
+            result = _cr.text_or_none if hasattr(_cr, 'text_or_none') else _cr[0]
 
             if result is None:
                 # patch failed — restore clipboard and show error
-                self._safe_copy(self._old_clip)
+                if MACOS:
+                    self._restore_macos_clipboard()
+                else:
+                    self._safe_copy(self._old_clip)
                 self._silent_osd_signal.emit("Correction failed, try again", "warning")
                 return
 
@@ -1192,24 +1368,47 @@ class StetApp(QObject):
                 log(
                     f"[Silent] no changes needed (input={text[:80]!r}, result identical)"
                 )
-                self._safe_copy(self._old_clip)
+                if MACOS:
+                    self._restore_macos_clipboard()
+                else:
+                    self._safe_copy(self._old_clip)
                 self._silent_osd_signal.emit("No changes needed", "success")
                 return
 
             # Write corrected text and paste it
-            self._safe_copy(result)
-            time.sleep(0.12)
-            _send_ctrl_chord(VK_V)
-            time.sleep(0.08)
+            if MACOS:
+                if self._mac_selection_target is None:
+                    self._silent_osd_signal.emit("Original app is no longer available", "warning")
+                    return
+                pasted = self._mac_input.paste_text(
+                    result,
+                    self._mac_selection_target,
+                    self._mac_clipboard_snapshot,
+                )
+                if not pasted.ok:
+                    log(f"[Silent] macOS paste failed: {pasted.code.value}: {pasted.message}")
+                    self._silent_osd_signal.emit("Could not paste safely", "warning")
+                    return
+            else:
+                self._safe_copy(result)
+                time.sleep(0.12)
+                _send_ctrl_chord(VK_V)
+                time.sleep(0.08)
 
             # Restore original clipboard after paste settles.
             # We're already in a background thread — just sleep instead of
             # QTimer.singleShot, which would crash from a non-Qt thread.
-            if self._old_clip and self._old_clip != result:
+            if not MACOS and self._old_clip and self._old_clip != result:
                 time.sleep(0.5)
                 self._safe_copy(self._old_clip)
 
-            self._silent_osd_signal.emit("Silently corrected", "success")
+            self._last_silent_history_id = self._history.add(
+                mode="silent",
+                strength=strength,
+                original=text,
+                corrected=result,
+            )
+            self._silent_osd_signal.emit("Silently corrected", "success_undo")
             log("[Silent] done")
 
         except Exception as e:
@@ -1225,7 +1424,8 @@ class StetApp(QObject):
         10-60 s while the model loads weights, rejecting all requests.
         This method ensures we don't try to correct during that window.
         """
-        if not self.ac_model.is_loaded():
+        is_ready = getattr(self.ac_model, "is_ready", self.ac_model.is_loaded)
+        if not is_ready():
             return False
         try:
             import requests
@@ -1255,7 +1455,15 @@ class StetApp(QObject):
                 prev.close()
             except Exception:
                 pass
-        osd = SilentCorrectionOSD(message, state=state)
+        action_text = None
+        action_callback = None
+        if state == "success_undo" and self._last_silent_history_id:
+            action_text = "Undo"
+            lid = self._last_silent_history_id
+            def _emit_undo(lid=lid):
+                self._undo_signal.emit(lid)
+            action_callback = _emit_undo
+        osd = SilentCorrectionOSD(message, state=state, action_text=action_text, action_callback=action_callback)
         self._osd_widget = osd
         # Loading state stays visible until replaced; others auto-dismiss
         osd.show_animated(auto_dismiss=(state != "loading"))
@@ -1324,6 +1532,7 @@ class StetApp(QObject):
                 initial_strength=initial_strength,
                 mode_prompt_override=custom_prompt or None,
             )
+            self._window._history = self._history
             self._window.accepted.connect(self._paste_text)
             # Clear stale reference when the user closes the window,
             # preventing RuntimeError on next hotkey press.
@@ -1341,6 +1550,31 @@ class StetApp(QObject):
         log("[Window] CorrectionWindow destroyed — reference cleared")
 
     def _paste_text(self, text: str):
+        if self._window is not None:
+            strength = (
+                getattr(self._window, "_correction_stream_strength", "") or
+                self.cfg.get("streaming_strength", "full_correction")
+            )
+            self._history.add(
+                mode="panel",
+                strength=strength,
+                original=getattr(self._window, "original", "") or "",
+                corrected=text,
+            )
+        if MACOS:
+            target = self._mac_selection_target
+            if target is None:
+                self._show_notify("The original app is no longer available for a safe paste.", "warn")
+                return
+
+            def _paste_macos() -> None:
+                result = self._mac_input.paste_text(text, target, self._mac_clipboard_snapshot)
+                if not result.ok:
+                    log(f"[Paste] macOS paste failed: {result.code.value}: {result.message}")
+                    self._notify.emit("Could not paste safely: " + (result.message or result.code.value), "warn")
+
+            threading.Thread(target=_paste_macos, name="StetMacPaste", daemon=True).start()
+            return
         self._safe_copy(text)
         time.sleep(0.15)
         _send_ctrl_chord(VK_V)
@@ -1353,7 +1587,54 @@ class StetApp(QObject):
                     _clipboard_write_text(clip_to_restore)
             QTimer.singleShot(500, _restore_if_unchanged)
 
+    def _undo_correction(self, entry_id: str):
+        """Paste the entry's original text back over the corrected text."""
+        entry = self._history.get(entry_id)
+        if not entry or entry.get("undone"):
+            return
+
+        def _worker():
+            try:
+                if MACOS:
+                    if self._mac_selection_target is not None:
+                        self._mac_input.paste_text(
+                            entry["original"],
+                            self._mac_selection_target,
+                            self._mac_clipboard_snapshot,
+                        )
+                else:
+                    self._safe_copy(entry["original"])
+                    time.sleep(0.12)
+                    _send_ctrl_chord(VK_V)
+                    time.sleep(0.08)
+                    time.sleep(0.5)
+                    self._safe_copy(self._old_clip or entry["corrected"])
+                self._history.mark_undone(entry_id)
+                self._silent_osd_signal.emit("Correction undone", "success")
+            except Exception as e:
+                log(f"[Undo] failed: {e}")
+                self._silent_osd_signal.emit("Undo failed — use Ctrl+Z in the app", "warning")
+
+        threading.Thread(target=_worker, name="StetUndo", daemon=True).start()
+
+    def _show_history(self):
+        from stet.ui.history_window import HistoryWindow
+        self._history_window = HistoryWindow(
+            self._history, self.cfg, self._undo_signal.emit, None
+        )
+        self._history_window.show()
+        self._history_window.raise_()
+        self._history_window.activateWindow()
+
     def _open_settings(self):
+        from PyQt6.QtCore import Qt
+
+        if self._window is not None:
+            self._window.setWindowFlags(
+                self._window.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint
+            )
+            self._window.show()
+
         dlg = SettingsDialog(
             self.cfg,
             re_register_cb=self._register_hotkey,
@@ -1362,8 +1643,23 @@ class StetApp(QObject):
             app_update_label=self._settings_update_action_text(),
         )
         dlg.saved.connect(self._on_settings_saved)
+
+        if self._window is not None:
+            dlg.destroyed.connect(self._window._restore_top_hint)
+
         dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
         self._settings_dlg = dlg
+
+    def _trigger_first_minimize_osd(self):
+        if not self.cfg.get("has_shown_tray_osd", False):
+            self.cfg.set("has_shown_tray_osd", True)
+            self.cfg.save()
+            self._silent_osd_signal.emit(
+                "Stet is running in your system tray. Press F9 or F10 anytime.",
+                "success"
+            )
 
     def _on_settings_saved(self):
         self._register_hotkey(force=True)
@@ -1450,8 +1746,10 @@ class StetApp(QObject):
             return
 
         self._welcome_window = WelcomeWindow(self.cfg, self.ac_model)
+        self._welcome_window._trigger_first_minimize_osd = self._trigger_first_minimize_osd
         self._welcome_window.settings_requested.connect(self._open_settings)
         self._welcome_window.correction_requested.connect(self._on_welcome_correction)
+        self._welcome_window.startup_toggled.connect(self._toggle_startup)
         self._welcome_window.closed_signal.connect(self._on_welcome_closed)
         self._welcome_window.show()
         self._welcome_window.raise_()
@@ -1486,13 +1784,14 @@ class StetApp(QObject):
         def run_correction():
             result = None
             try:
-                result, _ = self.ac_model.correct_text_patch(
+                _cr = self.ac_model.correct_text_patch(
                     text=text,
                     custom_sys=custom_sys,
                     strength=strength,
                     cancel_event=self._welcome_cancel_event,
                     mode_prompt_override=template_prompt,
                 )
+                result = _cr.text_or_none if hasattr(_cr, 'text_or_none') else _cr[0]
             except Exception as e:
                 log(f"[Welcome] correction error: {e}")
             self._welcome_corr_finished.emit(text, result)
@@ -1529,9 +1828,11 @@ class StetApp(QObject):
                 from PyQt6.QtCore import Qt
                 from stet.ui.downloader import DownloadProgressDialog
                 from stet.constants import (
+                    BACKENDS_DIR,
                     LLAMA_BACKEND_URLS,
                     LLAMA_BACKEND_HASHES,
                     LLAMA_BACKEND_DIR,
+                    MODELS_DIR,
                     RECOMMENDED_MODEL_URL,
                     RECOMMENDED_MODEL_FILE,
                     RECOMMENDED_MODEL_HASH,
@@ -1553,32 +1854,27 @@ class StetApp(QObject):
                     QPushButton:pressed { background-color: #121315; }
                 """)
                 dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
-                dlg.setFixedSize(400, 220)
+                dlg.setFixedSize(440, 240)
                 
                 layout = QVBoxLayout(dlg)
                 layout.setContentsMargins(20, 20, 20, 20)
                 layout.setSpacing(12)
                 
-                if not backend_exists and not model_exists:
-                    msg = "Stet needs the local AI engine (llama.cpp backend) and a language model to correct your text.\nSelect which components to download:"
-                elif not backend_exists:
-                    msg = "Stet needs the local AI engine (llama.cpp backend) to correct your text.\nSelect which components to download:"
+                if not model_exists:
+                    msg = (
+                        "Stet requires a local AI model to correct spelling, grammar, and style.\n\n"
+                        "Google Gemma 4 is the recommended model — lightweight, fast, and 100% private."
+                    )
                 else:
-                    msg = "Stet needs a language model to correct your text.\nSelect which components to download:"
+                    msg = "Stet needs to download required runtime dependencies to run locally."
 
                 lbl = QLabel(msg)
                 lbl.setWordWrap(True)
                 layout.addWidget(lbl)
                 
-                cb_backend = None
-                if not backend_exists:
-                    cb_backend = QCheckBox("Download llama.cpp Backend & CUDA (~652 MB)")
-                    cb_backend.setChecked(True)
-                    layout.addWidget(cb_backend)
-                
                 cb_model = None
                 if not model_exists:
-                    cb_model = QCheckBox("Download recommended AI model (~1.8 GB)")
+                    cb_model = QCheckBox("Download Google Gemma 4 model (~1.8 GB)")
                     cb_model.setChecked(True)
                     layout.addWidget(cb_model)
                 
@@ -1601,25 +1897,46 @@ class StetApp(QObject):
                 # Show dialog
                 if dlg.exec() == QDialog.DialogCode.Accepted:
                     downloads = []
-                    if cb_backend and cb_backend.isChecked():
-                        downloads.append({
-                            "url": LLAMA_BACKEND_URLS["llama"],
-                            "dest": SCRIPT_DIR / "llama_zip.zip",
-                            "hash": LLAMA_BACKEND_HASHES["llama"],
-                            "label": "llama.cpp server binary",
-                            "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
-                        })
-                        downloads.append({
-                            "url": LLAMA_BACKEND_URLS["cuda"],
-                            "dest": SCRIPT_DIR / "cuda_zip.zip",
-                            "hash": LLAMA_BACKEND_HASHES["cuda"],
-                            "label": "CUDA runtime dependencies",
-                            "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
-                        })
+                    # Backend download is mandatory whenever missing
+                    if not backend_exists:
+                        if MACOS:
+                            from stet.llm.backend_manager import BackendError, BackendManager
+
+                            try:
+                                release = BackendManager().latest_download()
+                                downloads.append({
+                                    "url": release.url,
+                                    "dest": release.destination,
+                                    "hash": release.sha256,
+                                    "label": release.label,
+                                    "extract_dir": BACKENDS_DIR,
+                                })
+                            except BackendError as error:
+                                QMessageBox.warning(
+                                    dlg,
+                                    "Stet — Native Backend Unavailable",
+                                    str(error),
+                                )
+                                return
+                        else:
+                            downloads.append({
+                                "url": LLAMA_BACKEND_URLS["llama"],
+                                "dest": SCRIPT_DIR / "llama_zip.zip",
+                                "hash": LLAMA_BACKEND_HASHES["llama"],
+                                "label": "llama.cpp server binary",
+                                "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
+                            })
+                            downloads.append({
+                                "url": LLAMA_BACKEND_URLS["cuda"],
+                                "dest": SCRIPT_DIR / "cuda_zip.zip",
+                                "hash": LLAMA_BACKEND_HASHES["cuda"],
+                                "label": "CUDA runtime dependencies",
+                                "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
+                            })
                     if cb_model and cb_model.isChecked():
                         downloads.append({
                             "url": RECOMMENDED_MODEL_URL,
-                            "dest": SCRIPT_DIR / RECOMMENDED_MODEL_FILE,
+                            "dest": (MODELS_DIR if MACOS else SCRIPT_DIR) / RECOMMENDED_MODEL_FILE,
                             "hash": RECOMMENDED_MODEL_HASH,
                             "label": "AI language model"
                         })
@@ -1628,13 +1945,17 @@ class StetApp(QObject):
                         dl_dialog = DownloadProgressDialog(downloads)
                         if dl_dialog.exec() == QDialog.DialogCode.Accepted:
                             # Auto-detect and configure
-                            if cb_backend and cb_backend.isChecked():
-                                new_backend_path = SCRIPT_DIR / LLAMA_BACKEND_DIR / SERVER_EXE
-                                if new_backend_path.exists():
+                            if not backend_exists:
+                                new_backend_path = (
+                                    _find_shipped_llama_server()
+                                    if MACOS
+                                    else SCRIPT_DIR / LLAMA_BACKEND_DIR / SERVER_EXE
+                                )
+                                if new_backend_path and Path(new_backend_path).exists():
                                     self.cfg.set("llama_server_path", str(new_backend_path))
                                     log(f"[FirstRun] Configured llama_server_path: {new_backend_path}")
                             if cb_model and cb_model.isChecked():
-                                new_model_path = SCRIPT_DIR / RECOMMENDED_MODEL_FILE
+                                new_model_path = (MODELS_DIR if MACOS else SCRIPT_DIR) / RECOMMENDED_MODEL_FILE
                                 if new_model_path.exists():
                                     self.cfg.set("model_path", str(new_model_path))
                                     if not self.cfg.get("chat_use_separate_model", False):
@@ -1759,6 +2080,14 @@ class StetApp(QObject):
                 log(f"[Startup] Failed to delete legacy scheduled task: {e}")
 
     def _update_startup_action(self):
+        if MACOS:
+            from stet.core.macos_startup import query_login_item
+
+            state = query_login_item()
+            self._act_startup.setChecked(state.enabled)
+            if state.detail:
+                log(f"[Startup] macOS login-item state: {state.status.value}: {state.detail}")
+            return
         if WINDOWS and winreg:
             try:
                 key = winreg.OpenKey(
@@ -1779,10 +2108,36 @@ class StetApp(QObject):
                 self._act_startup.setChecked(False)
         else:
             self._act_startup.setChecked(False)
+        self._sync_welcome_startup_cb()
 
     def _toggle_startup(self, checked: bool):
+        if MACOS:
+            from stet.core.macos_startup import disable_login_item, enable_login_item
+
+            state = enable_login_item() if checked else disable_login_item()
+            actual_enabled = state.enabled
+            if hasattr(self, "cfg"):
+                self.cfg.set("startup_on_login", actual_enabled)
+            self._act_startup.blockSignals(True)
+            self._act_startup.setChecked(actual_enabled)
+            self._act_startup.blockSignals(False)
+            self._sync_welcome_startup_cb()
+            if state.status.value == "requires_approval":
+                message = "macOS needs approval for Stet in Login Items. Open System Settings to allow it."
+                icon = QSystemTrayIcon.MessageIcon.Warning
+            elif state.status.value in {"enabled", "disabled"}:
+                message = "Stet will run at login." if actual_enabled else "Stet will no longer run at login."
+                icon = QSystemTrayIcon.MessageIcon.Information
+            else:
+                message = state.detail or "macOS could not change Stet's login-item setting."
+                icon = QSystemTrayIcon.MessageIcon.Warning
+            self.tray.showMessage("Stet", message, icon, 4000)
+            return
         if hasattr(self, "cfg"):
             self.cfg.set("startup_on_login", checked)
+        self._act_startup.blockSignals(True)
+        self._act_startup.setChecked(checked)
+        self._act_startup.blockSignals(False)
         # 1. Clean up legacy scheduled task
         self._cleanup_legacy_startup_task()
 
@@ -1819,6 +2174,17 @@ class StetApp(QObject):
             self.tray.showMessage(
                 "Stet", f"Startup error: {e}", QSystemTrayIcon.MessageIcon.Warning, 3000
             )
+        self._sync_welcome_startup_cb()
+
+    def _sync_welcome_startup_cb(self):
+        """Keep the welcome window's 'Run at startup' checkbox in sync with the
+        tray action's checked state, using blockSignals to avoid feedback loops."""
+        ww = self._welcome_window
+        if ww is not None and hasattr(ww, "_startup_cb"):
+            checked = self._act_startup.isChecked()
+            ww._startup_cb.blockSignals(True)
+            ww._startup_cb.setChecked(checked)
+            ww._startup_cb.blockSignals(False)
 
     def _check_app_update(self):
         """Start background update check. Safe to call multiple times."""
@@ -1871,6 +2237,11 @@ class StetApp(QObject):
 
     def _updater_command(self) -> list[str]:
         """Return a command that runs the external updater outside this process."""
+        if MACOS:
+            # A signed macOS .app is an indivisible code-signing unit.  The
+            # release DMG/ZIP is opened externally instead of trying to patch
+            # the running bundle in place.
+            raise RuntimeError("macOS updates install from a downloaded release image")
         if getattr(sys, "frozen", False):
             updater = SCRIPT_DIR / ("StetUpdater.exe" if WINDOWS else "StetUpdater")
             if not updater.exists():
@@ -1906,6 +2277,21 @@ class StetApp(QObject):
 
     def _start_app_update(self, url: str, tag: str):
         """Launch the packaged updater, then exit so Windows can replace files."""
+        if MACOS:
+            reply = QMessageBox.question(
+                None,
+                "Update Stet",
+                f"Download Stet {tag} now?\n\nmacOS will install it from the signed release image; "
+                "your current app bundle will not be modified in place.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                from PyQt6.QtCore import QUrl
+                from PyQt6.QtGui import QDesktopServices
+
+                QDesktopServices.openUrl(QUrl(url))
+            return
         reply = QMessageBox.question(
             None,
             "Update Stet",
@@ -1935,12 +2321,17 @@ class StetApp(QObject):
         self._quit()
 
     def _quit(self):
-        for hotkey_id in self._hotkey_handles:
-            try:
-                ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
-            except Exception as e:
-                log(f"[Hotkey] Unregister failed on quit: {e}")
-        self._hotkey_handles.clear()
+        if MACOS:
+            if self._mac_input is not None:
+                self._mac_input.close()
+            self._hotkey_handles.clear()
+        else:
+            for hotkey_id in self._hotkey_handles:
+                try:
+                    ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+                except Exception as e:
+                    log(f"[Hotkey] Unregister failed on quit: {e}")
+            self._hotkey_handles.clear()
         qapp = QApplication.instance()
         if hasattr(self, "_hotkey_filter"):
             self._hotkey_filter.clear_callbacks()

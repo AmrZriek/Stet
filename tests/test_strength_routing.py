@@ -209,6 +209,7 @@ def test_correction_window_initial_strength_overrides_global_config(monkeypatch)
             strength=None,
             cancel_event=None,
             mode_prompt_override=None,
+            progress_cb=None,
         ):
             self.calls.append(strength)
             return "clean text", 1

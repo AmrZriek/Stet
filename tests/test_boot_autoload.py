@@ -45,6 +45,10 @@ class TestBootAutoLoad:
             "keep_model_loaded": True,
         }))
         monkeypatch.setattr(config_mod, "CONFIG_FILE", config_file)
+        # The developer checkout deliberately has the production GGUF in its
+        # project-root Models directory.  This test specifically models an
+        # install with no discoverable model, so isolate auto-detection.
+        monkeypatch.setattr(config_mod, "MODELS_DIR", tmp_path / "Models")
 
         load_calls = []
 
@@ -70,6 +74,7 @@ class TestBootAutoLoad:
             "keep_model_loaded": True,
         }))
         monkeypatch.setattr(config_mod, "CONFIG_FILE", config_file)
+        monkeypatch.setattr(config_mod, "MODELS_DIR", tmp_path / "Models")
 
         load_calls = []
         def track_load(*args, **kwargs):

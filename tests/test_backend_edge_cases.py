@@ -14,6 +14,11 @@ from stet.llm.model_manager import ModelManager
 def manager(monkeypatch):
     cfg = ConfigManager()
     mgr = ModelManager(cfg)
+    # This test models the existing non-macOS GPU fallback path.  On a Mac
+    # host the real backend manager intentionally applies macOS policy.
+    from stet.llm.backend_manager import BackendManager
+
+    mgr.backend_manager = BackendManager(platform_name="win32")
     # Bypass loading
     monkeypatch.setattr(mgr, "is_loaded", lambda: True)
     monkeypatch.setattr(mgr, "load_model", lambda: True)
@@ -207,6 +212,9 @@ def test_gpu_fallback_detection_logging(monkeypatch, tmp_path):
     monkeypatch.setattr("stet.llm.model_manager.LOG_FILE", temp_log)
 
     mgr = ModelManager(cfg)
+    from stet.llm.backend_manager import BackendManager
+
+    mgr.backend_manager = BackendManager(platform_name="win32")
 
     # Restore original load_model method to bypass conftest autouse mock
     from stet.llm.model_manager import ModelManager as OriginalModelManager
@@ -281,6 +289,9 @@ def test_gpu_loaded_detection(monkeypatch, tmp_path):
     monkeypatch.setattr("stet.llm.model_manager.LOG_FILE", temp_log)
 
     mgr = ModelManager(cfg)
+    from stet.llm.backend_manager import BackendManager
+
+    mgr.backend_manager = BackendManager(platform_name="win32")
 
     # Restore original load_model method to bypass conftest autouse mock
     from stet.llm.model_manager import ModelManager as OriginalModelManager
@@ -332,19 +343,26 @@ def test_carriage_return_preservation(manager):
     input_text = "Line 1.\r\nLine 2.\r\nLine 3."
     with patch("requests.Session.post") as mock_post:
         def mock_post_side_effect(url, json, timeout):
-            user_content = json["messages"][1]["content"]
-            m = re.search(r"<<<START>>>\s*([\s\S]*?)\s*<<<END>>>", user_content)
+            user_content = json["messages"][-1]["content"]
+            # The instruction text also names the delimiters.  Match the
+            # actual final content block, not that explanatory sentence.
+            m = re.search(r"\nCONTENT_BEGIN\n([\s\S]*?)\nCONTENT_END\s*$", user_content)
             sent = m.group(1).strip() if m else "Line 1."
-            
+
             mock_resp = MagicMock()
             mock_resp.ok = True
+            mock_resp.status_code = 200
             mock_resp.json.return_value = {
                 "choices": [
-                    {
-                        "message": {
-                            "content": f"<<<START>>>{sent}<<<END>>>"
+                        {
+                            "message": {
+                                # Gemma's current correction contract returns
+                                # plain corrected text; the source line ending
+                                # is restored by correct_text_patch.
+                                    "content": sent.replace("\n", "\r\n")
+                                },
+                            "finish_reason": "stop",
                         }
-                    }
                 ]
             }
             return mock_resp

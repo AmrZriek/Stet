@@ -1,4 +1,14 @@
+import pytest
+
 import stet.core.app as app
+
+
+@pytest.fixture(autouse=True)
+def isolate_legacy_startup_tests_from_macos(monkeypatch):
+    """This module exercises the legacy Windows registry implementation."""
+
+    monkeypatch.setattr(app, "MACOS", False)
+    monkeypatch.setattr(app.subprocess, "CREATE_NO_WINDOW", 0, raising=False)
 
 
 def test_startup_command_uses_pythonw_and_main_py_for_source(tmp_path, monkeypatch):
@@ -90,7 +100,12 @@ class FakeApp:
                 self.checked = False
             def setChecked(self, val):
                 self.checked = val
+            def isChecked(self):
+                return self.checked
+            def blockSignals(self, _block):
+                pass
         self._act_startup = FakeAction()
+        self._welcome_window = None
         
         class FakeTray:
             def __init__(self):
@@ -102,6 +117,7 @@ class FakeApp:
     _update_startup_action = app.StetApp._update_startup_action
     _toggle_startup = app.StetApp._toggle_startup
     _cleanup_legacy_startup_task = app.StetApp._cleanup_legacy_startup_task
+    _sync_welcome_startup_cb = app.StetApp._sync_welcome_startup_cb
 
 
 def test_update_startup_action_checked(monkeypatch):

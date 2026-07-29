@@ -18,6 +18,7 @@ def temp_config_setup(tmp_path, monkeypatch):
     config_file = tmp_path / "config.json"
     monkeypatch.setattr(config_mod, "CONFIG_FILE", config_file)
     monkeypatch.setattr(config_mod, "SCRIPT_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "MODELS_DIR", tmp_path / "Models")
     return config_file
 
 
@@ -98,4 +99,4 @@ class TestConfigMigration:
 
             cfg = ConfigManager()
             modes = cfg.get("correction_modes")
-            assert modes[0]["hallucination_threshold"] == 0.35
+            assert modes[0]["hallucination_threshold"] == 0.45

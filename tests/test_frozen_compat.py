@@ -67,17 +67,19 @@ class TestFrozenPathResolution:
         assert SCRIPT_DIR.name == expected_name, \
             f"SCRIPT_DIR should be project root 'Stet', got: {SCRIPT_DIR}"
 
-    def test_config_file_is_in_script_dir(self):
-        """CONFIG_FILE is always SCRIPT_DIR / 'config.json'."""
-        from stet.constants import SCRIPT_DIR, CONFIG_FILE
-        assert CONFIG_FILE == SCRIPT_DIR / "config.json"
+    def test_config_file_uses_the_source_runtime_on_macos(self):
+        """macOS source state stays in the checkout's ignored runtime directory."""
+        from stet.constants import APP_DATA_DIR, CONFIG_FILE, MACOS, SCRIPT_DIR
+        expected = APP_DATA_DIR / "config.json" if MACOS else SCRIPT_DIR / "config.json"
+        assert CONFIG_FILE == expected
         assert CONFIG_FILE.name == "config.json"
 
-    def test_log_file_is_in_script_dir(self):
-        """Server log and debug log are in SCRIPT_DIR."""
-        from stet.constants import SCRIPT_DIR, LOG_FILE, DEBUG_LOG
-        assert LOG_FILE.parent == SCRIPT_DIR
-        assert DEBUG_LOG.parent == SCRIPT_DIR
+    def test_log_files_stay_with_source_runtime_on_macos(self):
+        """Source logs must not leak into Application Support or the app bundle."""
+        from stet.constants import APP_DATA_DIR, DEBUG_LOG, LOG_FILE, MACOS, SCRIPT_DIR
+        expected = APP_DATA_DIR / "logs" if MACOS else SCRIPT_DIR
+        assert LOG_FILE.parent == expected
+        assert DEBUG_LOG.parent == expected
 
 
 class TestReleaseConfigCompleteness:
@@ -217,7 +219,10 @@ class TestBuildScriptIntegrity:
         builder.llama_dir = None
         builder.cuda_dir = None
 
-        with patch.object(build, "ROOT", src_root):
+        with (
+            patch.object(build, "ROOT", src_root),
+            patch.object(build, "PLATFORM", "Windows"),
+        ):
             builder.build_extras()
 
         assert (portable / "startup.vbs").exists(), \

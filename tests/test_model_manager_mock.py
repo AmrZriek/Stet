@@ -10,6 +10,7 @@ import pytest
 from stet.core.config import ConfigManager
 from stet.llm.model_manager import (
     _STRENGTH_TO_MODE_INDEX,
+    _detect_loaded_backend,
     ModelManager,
     _create_job_object_for_subprocess,
     _estimate_tokens,
@@ -129,6 +130,28 @@ class TestIsLoaded:
         manager.server_process = proc
         assert manager.is_loaded() is False
 
+    def test_not_ready_until_model_startup_completes(self, manager):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+        assert manager.is_ready() is False
+        manager._server_ready = True
+        assert manager.is_ready() is True
+
+
+class TestBackendLogDetection:
+    def test_recognizes_current_macos_mtl_device_format(self):
+        assert _detect_loaded_backend("MTL0: Apple M2") == "metal"
+
+    def test_quiet_or_cpu_log_is_never_reported_as_metal(self):
+        assert _detect_loaded_backend("llama_server: model loaded") == "cpu"
+        assert _detect_loaded_backend("loaded CPU backend") == "cpu"
+
+    def test_uses_a_fresh_successful_metal_probe_for_quiet_current_logs(self):
+        assert _detect_loaded_backend(
+            "llama_server: model loaded", metal_verified=True
+        ) == "metal"
+
 
 # -- _base_url / _health_url / _chat_url --------------------------------------
 
@@ -189,7 +212,10 @@ class TestJobObject:
         with patch("stet.llm.model_manager.WINDOWS", True):
             mock_kernel32 = MagicMock()
             mock_kernel32.CreateJobObjectW.return_value = 0  # failure
-            with patch("ctypes.windll.kernel32", mock_kernel32):
+            import ctypes
+
+            with patch.object(ctypes, "windll", create=True) as mock_windll:
+                mock_windll.kernel32 = mock_kernel32
                 proc = MagicMock()
                 proc._handle = 1234
                 _create_job_object_for_subprocess(proc)
@@ -691,7 +717,7 @@ class TestTerminalPunctuationGuard:
 
         monkeypatch.setattr(requests.Session, "post", fake_post)
         # Force the extracted sentence to have trailing whitespace to test preservation
-        monkeypatch.setattr(mm, "_extract_rewritten_sentence", lambda raw: "Hello world ")
+        monkeypatch.setattr(mm, "_extract_rewritten_sentence", lambda raw, original_text="": "Hello world ")
 
         res = manager._rewrite_sentence_chunk("Hello world. ", None, 1, 1, "full_correction")
         assert res == "Hello world. "
@@ -802,3 +828,101 @@ class TestModelManagerPrefixAndPayload:
         assert payload.get("temperature") == 0.25
         assert payload.get("top_k") == 5
         assert payload.get("repeat_penalty") == 1.2
+
+
+class TestGpuOomFallback:
+    """Regression tests for GPU OOM process exit and CPU-only retry routing."""
+
+    def test_gpu_oom_immediate_exit_triggers_single_cpu_retry(self, cfg, monkeypatch):
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+        cfg.set("gpu_layers", 99)
+        mgr = ModelManager(cfg)
+
+        retry_calls = []
+        original_load = _ORIGINAL_LOAD_MODEL
+        real_read_text = Path.read_text
+
+        log_text = "ggml_cuda_init: CUDA error: out of memory\nfailed to allocate buffer"
+        monkeypatch.setattr(
+            Path,
+            "read_text",
+            lambda self, encoding=None, errors=None: log_text if self == mgr.server_log_path else real_read_text(self, encoding=encoding, errors=errors),
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # Exited immediately
+
+        def fake_popen(*args, **kwargs):
+            return mock_proc
+
+        monkeypatch.setattr("subprocess.Popen", fake_popen)
+
+        # Track calls to load_model
+        def spy_load_model(self, force_cpu=False):
+            retry_calls.append(force_cpu)
+            return original_load(self, force_cpu=force_cpu)
+
+        monkeypatch.setattr(ModelManager, "load_model", spy_load_model)
+
+        res = mgr.load_model()
+        assert res is False
+        # Expect first call force_cpu=False, second call force_cpu=True (exactly 1 retry)
+        assert retry_calls == [False, True]
+
+    def test_non_gpu_immediate_exit_does_not_trigger_cpu_retry(self, cfg, monkeypatch):
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+        cfg.set("gpu_layers", 99)
+        mgr = ModelManager(cfg)
+
+        retry_calls = []
+        original_load = _ORIGINAL_LOAD_MODEL
+        real_read_text = Path.read_text
+
+        log_text = "error: failed to open model file\n"
+        monkeypatch.setattr(
+            Path,
+            "read_text",
+            lambda self, encoding=None, errors=None: log_text if self == mgr.server_log_path else real_read_text(self, encoding=encoding, errors=errors),
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+
+        monkeypatch.setattr("subprocess.Popen", lambda *a, **kw: mock_proc)
+
+        def spy_load_model(self, force_cpu=False):
+            retry_calls.append(force_cpu)
+            return original_load(self, force_cpu=force_cpu)
+
+        monkeypatch.setattr(ModelManager, "load_model", spy_load_model)
+
+        res = mgr.load_model()
+        assert res is False
+        assert retry_calls == [False]
+
+    def test_gpu_unreadable_or_empty_log_returns_normal_failure(self, cfg, monkeypatch):
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+        cfg.set("gpu_layers", 99)
+        mgr = ModelManager(cfg)
+        real_read_text = Path.read_text
+
+        monkeypatch.setattr(
+            Path,
+            "read_text",
+            lambda self, encoding=None, errors=None: "" if self == mgr.server_log_path else real_read_text(self, encoding=encoding, errors=errors),
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+
+        monkeypatch.setattr("subprocess.Popen", lambda *a, **kw: mock_proc)
+
+        res = mgr.load_model()
+        assert res is False
+

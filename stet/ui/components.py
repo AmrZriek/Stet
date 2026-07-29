@@ -1,8 +1,9 @@
 import re
 
-from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import QContextMenuEvent
 from PyQt6.QtWidgets import QLineEdit, QWidget
+from stet.constants import MACOS
 
 
 class HotkeyEdit(QLineEdit):
@@ -47,6 +48,10 @@ class HotkeyEdit(QLineEdit):
         self._re_register_cb = re_register_cb
         self._unregister_cb = unregister_cb
         self.setReadOnly(True)
+        # The recording field must become the responder before a Command-based
+        # sequence arrives. Cocoa otherwise leaves focus on the control that
+        # opened this dialog and the shortcut appears not to record.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(self._IDLE)
         self._saved_context_menu_policy = self.contextMenuPolicy()
@@ -57,18 +62,33 @@ class HotkeyEdit(QLineEdit):
         return self._combo
 
     def setText(self, val: str):
+        was_recording = self._recording
         self._combo = val.lower().strip()
         self._recording = False
+        if was_recording:
+            self.releaseKeyboard()
         self.setStyleSheet(self._IDLE)
         self._refresh()
         self._update_container_style()
 
     def _refresh(self):
-        display = (
-            " + ".join(p.upper() for p in self._combo.split("+"))
-            if self._combo
-            else "Click to record"
-        )
+        if self._combo:
+            if MACOS:
+                labels = {
+                    "cmd": "⌘ Command",
+                    "command": "⌘ Command",
+                    "ctrl": "⌃ Control",
+                    "control": "⌃ Control",
+                    "alt": "⌥ Option",
+                    "opt": "⌥ Option",
+                    "option": "⌥ Option",
+                    "shift": "⇧ Shift",
+                }
+                display = " + ".join(labels.get(p, p.upper()) for p in self._combo.split("+"))
+            else:
+                display = " + ".join(p.upper() for p in self._combo.split("+"))
+        else:
+            display = "Click to record"
         super().setText(display)
 
     def _update_container_style(self):
@@ -93,6 +113,7 @@ class HotkeyEdit(QLineEdit):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton and not self._recording:
+            self.setFocus(Qt.FocusReason.MouseFocusReason)
             self._recording = True
             if self._unregister_cb:
                 try:
@@ -102,11 +123,28 @@ class HotkeyEdit(QLineEdit):
             self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
             self.setStyleSheet(self._REC)
             super().setText("Press keys" + "\u2026")
+            # Focus alone is not reliable with every Cocoa dialog/control
+            # combination.  Capture keyboard delivery while recording so the
+            # next Command/Option sequence is sent to this editor.
+            self.grabKeyboard()
+            # A modal dialog's focus hand-off can complete immediately after a
+            # mouse press on macOS.  Reassert it on the next event-loop turn so
+            # the next physical Command/Option keypress reaches this widget.
+            QTimer.singleShot(0, self._restore_recording_focus)
             self._update_container_style()
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def _restore_recording_focus(self):
+        if self._recording:
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+            self.grabKeyboard()
 
     def _stop_recording(self):
         """End recording mode and restore context-menu policy."""
         self._recording = False
+        self.releaseKeyboard()
         self.setContextMenuPolicy(self._saved_context_menu_policy)
         self.setStyleSheet(self._IDLE)
         self._refresh()
@@ -132,6 +170,8 @@ class HotkeyEdit(QLineEdit):
         current combo string (e.g. "ctrl+f9"), and awaits Enter or focus-loss
         to commit. Escape cancels back to the previous value.
         """
+        if self._recording:
+            self.releaseKeyboard()
         self._recording = False
         self._manual_editing = True
         self.setReadOnly(False)
@@ -139,6 +179,9 @@ class HotkeyEdit(QLineEdit):
         self.setCursor(Qt.CursorShape.IBeamCursor)
         super().setText(self._combo.upper())
         self.selectAll()
+        # This method is normally called by the "Type shortcut" button.
+        # Explicitly move focus back from that button before accepting input.
+        self.setFocus(Qt.FocusReason.OtherFocusReason)
         self._update_container_style()
 
     def _commit_manual_edit(self):
@@ -192,12 +235,14 @@ class HotkeyEdit(QLineEdit):
         if key in _MOD_KEYS:
             return
         parts = []
+        if MACOS and mods & Qt.KeyboardModifier.MetaModifier:
+            parts.append("cmd")
         if mods & Qt.KeyboardModifier.ControlModifier:
             parts.append("ctrl")
+        if mods & Qt.KeyboardModifier.AltModifier:
+            parts.append("option" if MACOS else "alt")
         if mods & Qt.KeyboardModifier.ShiftModifier:
             parts.append("shift")
-        if mods & Qt.KeyboardModifier.AltModifier:
-            parts.append("alt")
         kn = _QT_KEYS.get(key) or (e.text().lower() or None)
         if not parts:
             if key in _STANDALONE_OK and kn:
@@ -207,7 +252,10 @@ class HotkeyEdit(QLineEdit):
                 self._stop_recording()
                 self.shortcut_changed.emit(combo)
                 return
-            super().setText("Add Ctrl / Shift / Alt…")
+            if MACOS:
+                super().setText("Add ⌘ Command / ⌥ Option / Shift…")
+            else:
+                super().setText("Add Ctrl / Shift / Alt…")
             return
         if not kn:
             return
@@ -241,14 +289,12 @@ class HotkeyEdit(QLineEdit):
                 e.accept()
                 return True
             if e.type() == QEvent.Type.KeyPress:
-                k = e.key()
-                mods = e.modifiers()
-                if k in _SHIFT_F10_REMAPS or (
-                    k == Qt.Key.Key_F10
-                    and (mods & Qt.KeyboardModifier.ShiftModifier)
-                ):
-                    self.keyPressEvent(e)
-                    return True
+                # Qt's macOS line-edit integration can consume Command-based
+                # key sequences before QLineEdit.keyPressEvent is reached.
+                # Deliver every recording keystroke ourselves so Command +
+                # Option shortcuts are captured consistently on a real Mac.
+                self.keyPressEvent(e)
+                return True
         return super().event(e)
 
     def contextMenuEvent(self, e):

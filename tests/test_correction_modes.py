@@ -55,7 +55,7 @@ def test_correction_mode_thresholds():
     # Rewrite & Polish (index 2) is the config-driven guard bar for the
     # rewrite path. 0.99 is the coarse catastrophic backstop; refusals are
     # caught by _is_refusal_or_empty in text_utils.
-    assert thresholds == [0.35, 0.65, 0.9, 1.0]
+    assert thresholds == [0.45, 0.75, 0.97, 1.0]
 
 
 def test_correction_modes_are_builtin():

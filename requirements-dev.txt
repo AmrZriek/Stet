@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Test-only dependencies. Keep these out of the packaged application build.
+pytest>=8.0.0
+pytest-qt>=4.4.0
+ruff>=0.1.0
+psutil>=5.9.0

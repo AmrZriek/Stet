@@ -104,4 +104,20 @@ def test_looks_like_prose():
     # Both must return True for the pipeline to accept it as prose
     assert looks_like_prose(chunk_text)
     assert looks_like_prose(editable_text)
+
+
+def test_extract_rewritten_content_candidate_length_ceiling():
+    from stet.core.text_utils import _extract_rewritten_sentence, _MAX_REWRITTEN_CANDIDATE_CHARS
+
+    # Candidate <= 3000 chars should be accepted
+    text_2500 = "a" * 2500
+    assert _extract_rewritten_sentence(text_2500) == text_2500
+
+    text_3000 = "b" * _MAX_REWRITTEN_CANDIDATE_CHARS
+    assert _extract_rewritten_sentence(text_3000) == text_3000
+
+    # Candidate > 3000 chars should be rejected (returns None)
+    text_3001 = "c" * (_MAX_REWRITTEN_CANDIDATE_CHARS + 1)
+    assert _extract_rewritten_sentence(text_3001) is None
+
 

@@ -2,8 +2,15 @@ import time
 import tempfile
 import hashlib
 import zipfile
+import tarfile
 import urllib.request
+import sys
+import ctypes
+if sys.platform == "win32":
+    import ctypes.wintypes
 from pathlib import Path
+
+from PyQt6 import sip
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt6.QtWidgets import (
@@ -151,8 +158,41 @@ class DownloadWorker(QThread):
                     if extract_dir is not None:
                         extract_path = Path(extract_dir)
                         extract_path.mkdir(parents=True, exist_ok=True)
-                        with zipfile.ZipFile(dest, "r") as zip_ref:
-                            zip_ref.extractall(extract_path)
+                        root = extract_path.resolve()
+                        if zipfile.is_zipfile(dest):
+                            with zipfile.ZipFile(dest, "r") as archive:
+                                members = archive.infolist()
+                                for member in members:
+                                    member_path = (extract_path / member.filename).resolve()
+                                    if member_path != root and root not in member_path.parents:
+                                        raise ValueError("Archive contains an unsafe extraction path")
+                                for member in members:
+                                    archive.extract(member, extract_path)
+                                    mode = member.external_attr >> 16
+                                    if mode & 0o111:
+                                        try:
+                                            (extract_path / member.filename).chmod(mode & 0o777)
+                                        except OSError:
+                                            pass
+                        else:
+                            with tarfile.open(dest, "r:*") as archive:
+                                members = archive.getmembers()
+                                for member in members:
+                                    if member.issym() or member.islnk():
+                                        raise ValueError("Archive contains unsafe symlinks or hardlinks")
+                                    member_path = (extract_path / member.name).resolve()
+                                    if (
+                                        (member_path != root and root not in member_path.parents)
+                                        or member.isdev()
+                                    ):
+                                        raise ValueError("Archive contains an unsafe extraction path")
+                                for member in members:
+                                    archive.extract(member, extract_path)
+                                    if member.mode & 0o111:
+                                        try:
+                                            (extract_path / member.name).chmod(member.mode & 0o777)
+                                        except OSError:
+                                            pass
                         # Remove the leftover zip file after successful extraction
                         try:
                             if dest.exists():
@@ -193,6 +233,8 @@ class DownloadProgressDialog(QDialog):
     def _setup_window(self):
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        from stet.ui.utils import set_window_icon
+        set_window_icon(self)
 
         # Set Fusion style if available
         fusion = QStyleFactory.create("Fusion")
@@ -207,6 +249,8 @@ class DownloadProgressDialog(QDialog):
             geo = self.frameGeometry()
             geo.moveCenter(sr.center())
             self.move(geo.topLeft())
+        self.setMouseTracking(True)
+        self._ui_built = True
 
     def _build_ui(self):
         outer_lay = QVBoxLayout(self)
@@ -490,8 +534,84 @@ class DownloadProgressDialog(QDialog):
         self._cleanup_partial_files()
         super().reject()
 
+    def nativeEvent(self, eventType, message):
+        try:
+            if sip.isdeleted(self) or not getattr(self, "_ui_built", False):
+                return False, 0
+            if sys.platform == "win32" and (eventType == b"windows_generic_MSG" or eventType == b"windows_dispatcher_MSG"):
+                msg_ptr = int(message)
+                if not msg_ptr:
+                    return False, 0
+                msg = ctypes.wintypes.MSG.from_address(msg_ptr)
+                if msg.message == 0x0084:  # WM_NCHITTEST
+                    pos = self.mapFromGlobal(QCursor.pos())
+                    w, h = self.width(), self.height()
+                    x, y = pos.x(), pos.y()
+                    b = 6  # 6px unconditional outer border margin
+
+                    # Unconditional Border Hit Tests (when not maximized/fullscreen)
+                    if not (self.isMaximized() or self.isFullScreen()):
+                        if x < b and y < b:
+                            return True, 13  # HTTOPLEFT
+                        if x >= w - b and y < b:
+                            return True, 14  # HTTOPRIGHT
+                        if x < b and y >= h - b:
+                            return True, 16  # HTBOTTOMLEFT
+                        if x >= w - b and y >= h - b:
+                            return True, 17  # HTBOTTOMRIGHT
+                        if x < b:
+                            return True, 10  # HTLEFT
+                        if x >= w - b:
+                            return True, 11  # HTRIGHT
+                        if y < b:
+                            return True, 12  # HTTOP
+                        if y >= h - b:
+                            return True, 15  # HTBOTTOM
+
+                    # Title bar Area (top 48px)
+                    if y < 48 and not (self.isMaximized() or self.isFullScreen()):
+                        child = self.childAt(pos)
+                        is_interactive = False
+                        curr = child
+                        while curr is not None and curr is not self:
+                            try:
+                                if sip.isdeleted(curr):
+                                    break
+                                if isinstance(curr, (QPushButton, QProgressBar)):
+                                    is_interactive = True
+                                    break
+                                curr = curr.parentWidget()
+                            except Exception:
+                                break
+                        if not is_interactive:
+                            return True, 2  # HTCAPTION
+        except Exception:
+            pass
+        return False, 0
+
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if pos.y() < 48 and sys.platform != "win32":
+                ch = self.childAt(pos)
+                is_interactive = False
+                curr = ch
+                while curr is not None and curr is not self:
+                    try:
+                        if sip.isdeleted(curr):
+                            break
+                        if isinstance(curr, (QPushButton, QProgressBar)):
+                            is_interactive = True
+                            break
+                        curr = curr.parentWidget()
+                    except Exception:
+                        break
+                if not is_interactive:
+                    wh = self.windowHandle()
+                    if wh and hasattr(wh, "startSystemMove"):
+                        wh.startSystemMove()
+                        return
+
             self._drag_pos = event.globalPosition().toPoint() - self.pos()
             event.accept()
         else:

@@ -231,7 +231,9 @@ def _should_skip_update_file(rel_path: Path) -> bool:
         return True
     if name.endswith((".gguf", ".onnx")):
         return True
-    if name in {"config.json", "app_debug.log", "server_log.txt"}:
+    if name in {"config.json", "server_log.txt"}:
+        return True
+    if name == "app_debug.log" or name.startswith("app_debug.log."):
         return True
     return False
 

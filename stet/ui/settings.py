@@ -1,8 +1,13 @@
 import tempfile
+import sys
+import ctypes
+if sys.platform == "win32":
+    import ctypes.wintypes
 from pathlib import Path
 
+from PyQt6 import sip
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,13 +31,14 @@ from PyQt6.QtWidgets import (
     QSpinBox,
 )
 
-from stet.constants import SCRIPT_DIR
+from stet.constants import MACOS
 from stet.core.config import ConfigManager
 from stet.ui.components import HotkeyEdit
 from stet.ui.settings_pages import (
     CorrectionModesPage,
     ParametersPage,
     ProfilesPage,
+    ProtectedTermsPage,
     ServerPage,
     TemplatesPage,
 )
@@ -58,6 +64,8 @@ class SettingsDialog(QDialog):
         self._app_update_cb = app_update_cb
         self._app_update_label = app_update_label
         self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.FramelessWindowHint)
+        from stet.ui.utils import set_window_icon
+        set_window_icon(self)
         self._drag_pos = None
         # Clamp dimensions to the current screen so the dialog never opens
         # taller than the display (observed on 1366×768 / 1440×900 laptops
@@ -86,46 +94,184 @@ class SettingsDialog(QDialog):
             geo = self.frameGeometry()
             geo.moveCenter(sr.center())
             self.move(geo.topLeft())
+        self._ui_built = True
+
+    def nativeEvent(self, eventType, message):
+        try:
+            if sip.isdeleted(self) or not getattr(self, "_ui_built", False):
+                return False, 0
+            if sys.platform == "win32" and (eventType in (b"windows_generic_MSG", b"windows_dispatcher_MSG", "windows_generic_MSG", "windows_dispatcher_MSG")):
+                msg_ptr = int(message)
+                if not msg_ptr:
+                    return False, 0
+                msg = ctypes.wintypes.MSG.from_address(msg_ptr)
+                if msg.message == 0x0084:  # WM_NCHITTEST
+                    pos = self.mapFromGlobal(QCursor.pos())
+                    w, h = self.width(), self.height()
+                    x, y = pos.x(), pos.y()
+                    b = 8  # 8px unconditional outer border margin
+
+                    # Unconditional Border Hit Tests (when not maximized/fullscreen)
+                    if not (self.isMaximized() or self.isFullScreen()):
+                        if x < b and y < b:
+                            return True, 13  # HTTOPLEFT
+                        if x >= w - b and y < b:
+                            return True, 14  # HTTOPRIGHT
+                        if x < b and y >= h - b:
+                            return True, 16  # HTBOTTOMLEFT
+                        if x >= w - b and y >= h - b:
+                            return True, 17  # HTBOTTOMRIGHT
+                        if x < b:
+                            return True, 10  # HTLEFT
+                        if x >= w - b:
+                            return True, 11  # HTRIGHT
+                        if y < b:
+                            return True, 12  # HTTOP
+                        if y >= h - b:
+                            return True, 15  # HTBOTTOM
+
+                    # Check for Maximize Button hover (Windows 11 Snap Layouts)
+                    if hasattr(self, "_max_btn") and self._max_btn is not None and self._max_btn.isVisible():
+                        max_rect = self._max_btn.geometry()
+                        if max_rect.contains(pos):
+                            return True, 9  # HTMAXBUTTON
+
+                    # Title bar Area (top 48px)
+                    if y < 48 and not (self.isMaximized() or self.isFullScreen()):
+                        child = self.childAt(pos)
+                        block_list = (
+                            QTextEdit,
+                            QPlainTextEdit,
+                            QLineEdit,
+                            QComboBox,
+                            QScrollBar,
+                            QSpinBox,
+                            QListWidget,
+                            QAbstractButton,
+                        )
+                        is_interactive = False
+                        curr = child
+                        while curr is not None and curr is not self:
+                            try:
+                                if sip.isdeleted(curr):
+                                    break
+                                if isinstance(curr, block_list):
+                                    is_interactive = True
+                                    break
+                                curr = curr.parentWidget()
+                            except Exception:
+                                break
+                        if not is_interactive:
+                            return True, 2  # HTCAPTION
+        except Exception:
+            pass
+        return False, 0
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "_max_btn") and self._max_btn is not None:
+            if self.isMaximized():
+                self._max_btn.setToolTip("Restore")
+            else:
+                self._max_btn.setToolTip("Maximize")
+
+    def _toggle_maximize(self):
+        if self.isMaximized():
+            self.showNormal()
+            if hasattr(self, "_max_btn") and self._max_btn:
+                self._max_btn.setToolTip("Maximize")
+        else:
+            self.showMaximized()
+            if hasattr(self, "_max_btn") and self._max_btn:
+                self._max_btn.setToolTip("Restore")
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() < 48:
+            child = self.childAt(e.position().toPoint())
+            block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QSpinBox, QListWidget, QAbstractButton)
+            is_interactive = False
+            curr = child
+            while curr is not None and curr is not self:
+                try:
+                    if sip.isdeleted(curr):
+                        break
+                    if isinstance(curr, block_list):
+                        is_interactive = True
+                        break
+                    curr = curr.parentWidget()
+                except Exception:
+                    break
+            if not is_interactive:
+                self._toggle_maximize()
 
     def mousePressEvent(self, e):
+        self.raise_()
+        self.activateWindow()
         if e.button() == Qt.MouseButton.LeftButton:
             pos = e.pos()
-            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
-                self._resize_start = e.globalPosition().toPoint()
-                self._resize_start_geometry = self.geometry()
-                return
+            if pos.y() < 48 and sys.platform != "win32":
+                ch = self.childAt(pos)
+                block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QSpinBox, QListWidget, QAbstractButton)
+                is_interactive = False
+                curr = ch
+                while curr is not None and curr is not self:
+                    try:
+                        if sip.isdeleted(curr):
+                            break
+                        if isinstance(curr, block_list):
+                            is_interactive = True
+                            break
+                        curr = curr.parentWidget()
+                    except Exception:
+                        break
+                if not is_interactive:
+                    wh = self.windowHandle()
+                    if wh and hasattr(wh, "startSystemMove"):
+                        wh.startSystemMove()
+                        return
 
             ch = self.childAt(e.pos())
             block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QSpinBox, QListWidget, QAbstractButton)
             is_interactive = False
             curr = ch
-            while curr is not None:
-                if isinstance(curr, block_list):
-                    is_interactive = True
+            while curr is not None and curr is not self:
+                try:
+                    if sip.isdeleted(curr):
+                        break
+                    if isinstance(curr, block_list):
+                        is_interactive = True
+                        break
+                    curr = curr.parentWidget()
+                except Exception:
                     break
-                curr = curr.parentWidget()
             if not is_interactive:
                 self._drag_pos = e.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, e):
         if not e.buttons():
             pos = e.pos()
-            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            w, h = self.width(), self.height()
+            x, y = pos.x(), pos.y()
+            b = 8
+            if not (self.isMaximized() or self.isFullScreen()):
+                if (x < b and y < b) or (x >= w - b and y >= h - b):
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                elif (x >= w - b and y < b) or (x < b and y >= h - b):
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                elif x < b or x >= w - b:
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                elif y < b or y >= h - b:
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                else:
+                    self.unsetCursor()
             else:
                 self.unsetCursor()
 
-        if hasattr(self, "_resize_start") and self._resize_start:
-            delta = e.globalPosition().toPoint() - self._resize_start
-            new_w = max(self.minimumWidth(), self._resize_start_geometry.width() + delta.x())
-            new_h = max(self.minimumHeight(), self._resize_start_geometry.height() + delta.y())
-            self.resize(new_w, new_h)
-        elif self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
+        if hasattr(self, "_drag_pos") and self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
-        self._resize_start = None
 
     def _field_group(self, label: str, widget, desc: str = "") -> QVBoxLayout:
         lay = QVBoxLayout()
@@ -179,14 +325,22 @@ class SettingsDialog(QDialog):
         hdr_lay.addWidget(lbl_header)
         hdr_lay.addStretch()
 
-        # Add Minimize and Close buttons utilizing SVGs written to tempfile
+        # Add Minimize, Maximize, and Close buttons utilizing SVGs written to tempfile
         min_svg = Path(tempfile.gettempdir()) / "stet_min.svg"
+        max_svg = Path(tempfile.gettempdir()) / "stet_max.svg"
         close_svg = Path(tempfile.gettempdir()) / "stet_close.svg"
         try:
             if not min_svg.exists():
                 min_svg.write_text(
                     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
                     '<line x1="1" y1="5" x2="9" y2="5" stroke="#ffffff" stroke-width="1" stroke-linecap="round"/>'
+                    '</svg>',
+                    encoding="utf-8"
+                )
+            if not max_svg.exists():
+                max_svg.write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+                    '<rect x="1.5" y="1.5" width="7" height="7" stroke="#ffffff" stroke-width="1" fill="none" rx="0.5"/>'
                     '</svg>',
                     encoding="utf-8"
                 )
@@ -210,6 +364,15 @@ class SettingsDialog(QDialog):
         min_btn.setAccessibleName("Minimize window")
         min_btn.setToolTip("Minimize")
 
+        self._max_btn = QPushButton()
+        self._max_btn.setObjectName("windowMaxBtn")
+        self._max_btn.setIcon(QIcon(str(max_svg)))
+        self._max_btn.setFixedSize(28, 28)
+        self._max_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._max_btn.clicked.connect(self._toggle_maximize)
+        self._max_btn.setAccessibleName("Maximize window")
+        self._max_btn.setToolTip("Maximize")
+
         close_btn = QPushButton()
         close_btn.setObjectName("windowCloseBtn")
         close_btn.setIcon(QIcon(str(close_svg)))
@@ -220,6 +383,7 @@ class SettingsDialog(QDialog):
         close_btn.setToolTip("Close")
 
         hdr_lay.addWidget(min_btn)
+        hdr_lay.addWidget(self._max_btn)
         hdr_lay.addWidget(close_btn)
 
         main_vlay.addWidget(header)
@@ -249,8 +413,14 @@ class SettingsDialog(QDialog):
             "Correction Profiles",
             "Correction Modes",
             "Templates",
+            "Protected Terms",
         ]:
             self.nav_list.addItem(item)
+        if self.nav_list.count() > 1:
+            self.nav_list.item(1).setToolTip(
+                "Advanced inference settings. Default values work well for nearly all cases. "
+                "Only change these if you need a specific behavior or are experimenting."
+            )
         side_lay.addWidget(self.nav_list)
         side_lay.addStretch()
         grid_lay.addWidget(sidebar)
@@ -297,6 +467,7 @@ class SettingsDialog(QDialog):
         self.profiles_page = ProfilesPage(self)
         self.correction_modes_page = CorrectionModesPage(self)
         self.templates_page = TemplatesPage(self)
+        self.protected_terms_page = ProtectedTermsPage(self)
 
         # Backward compatibility for static source-inspection tests:
         # QListWidget, templates_list_w, setDragDropMode, optionList
@@ -389,19 +560,32 @@ class SettingsDialog(QDialog):
         dlg.setWindowTitle("Edit Correction Profile")
         dlg.resize(400, 300)
         dlg.setStyleSheet(self.styleSheet())
-        logo = SCRIPT_DIR / "logo.png"
-        if logo.exists():
-            dlg.setWindowIcon(QIcon(str(logo)))
+        from stet.ui.utils import set_window_icon
+        set_window_icon(dlg)
 
         lay = QVBoxLayout(dlg)
 
-        lay.addWidget(QLabel("Shortcut Key:"))
+        shortcut_label = "Shortcut Key:"
+        if MACOS:
+            shortcut_label = "Shortcut Key (click, then press the combination):"
+        lay.addWidget(QLabel(shortcut_label))
         shortcut_edit = HotkeyEdit(
             re_register_cb=self._re_register_cb,
             unregister_cb=self._unregister_cb,
         )
         shortcut_edit.setText(hk.get("shortcut", ""))
         lay.addWidget(shortcut_edit)
+        if MACOS:
+            hint = QLabel(
+                "Example: ⌘ Command + ⌥ Option + F9. Press Escape to cancel. "
+                "If a keyboard layout blocks capture, use Type shortcut."
+            )
+            hint.setStyleSheet("color:#88898c; font-size:11px;")
+            lay.addWidget(hint)
+            type_shortcut_btn = QPushButton("Type shortcut")
+            type_shortcut_btn.setObjectName("ghost")
+            type_shortcut_btn.clicked.connect(shortcut_edit.enable_manual_edit)
+            lay.addWidget(type_shortcut_btn)
 
         lay.addWidget(QLabel("Mode:"))
         mode_combo = no_scroll(QComboBox())
@@ -576,6 +760,8 @@ class SettingsDialog(QDialog):
         dlg.setWindowTitle("Generation Control")
         dlg.resize(500, 400)
         dlg.setStyleSheet(self.styleSheet())
+        from stet.ui.utils import set_window_icon
+        set_window_icon(dlg)
         
         lay = QVBoxLayout(dlg)
         lay.addWidget(QLabel("Grammar or JSON Schema:"))
@@ -688,9 +874,8 @@ class SettingsDialog(QDialog):
         dlg.setWindowTitle("Edit Template")
         dlg.resize(400, 300)
         dlg.setStyleSheet(self.styleSheet())
-        logo = SCRIPT_DIR / "logo.png"
-        if logo.exists():
-            dlg.setWindowIcon(QIcon(str(logo)))
+        from stet.ui.utils import set_window_icon
+        set_window_icon(dlg)
 
         lay = QVBoxLayout(dlg)
 
@@ -771,6 +956,8 @@ class SettingsDialog(QDialog):
         self._refresh_settings_templates()
         self._temp_hotkeys = [h.copy() for h in self.cfg.get("hotkeys", [])]
         self._refresh_hotkeys()
+        terms = self.cfg.get("protected_terms", []) or []
+        self.protected_terms_edit.setPlainText("\n".join(terms))
         self.server_edit.setText(self.cfg.get("llama_server_path", ""))
         self.model_edit.setText(self.cfg.get("model_path", ""))
         recents = [p for p in self.cfg.get("recent_models", []) if p and Path(p).exists()]
@@ -780,6 +967,10 @@ class SettingsDialog(QDialog):
         self.chat_keep_cb.setChecked(self.cfg.get("chat_keep_loaded", False))
         self.chat_idle_spin.setValue(self.cfg.get("chat_idle_timeout_seconds", 60))
         self.port_spin.setValue(self.cfg.get("server_port", 8080))
+        if hasattr(self, "backend_mode_combo"):
+            backend_mode = self.cfg.get("backend_mode", "auto")
+            index = self.backend_mode_combo.findData(backend_mode)
+            self.backend_mode_combo.setCurrentIndex(max(index, 0))
 
         self.chat_ctx_spin.setValue(self.cfg.get("chat_context_size", 12800))
         self.chat_gpu_spin.setValue(self.cfg.get("chat_gpu_layers", 99))
@@ -851,6 +1042,12 @@ class SettingsDialog(QDialog):
     def _write_settings_to_config(self):
         self.cfg.set("custom_templates", [t.copy() for t in self._temp_templates])
         self.cfg.set("hotkeys", [h.copy() for h in self._temp_hotkeys])
+        terms = [
+            line.strip()
+            for line in self.protected_terms_edit.toPlainText().splitlines()
+            if line.strip()
+        ]
+        self.cfg.set("protected_terms", terms)
         self.cfg.set("llama_server_path", self.server_edit.text())
         self.cfg.set("model_path", self.model_edit.text())
         chat_separate = self.chat_use_separate_cb.isChecked()
@@ -860,6 +1057,8 @@ class SettingsDialog(QDialog):
         self.cfg.set("chat_keep_loaded", self.chat_keep_cb.isChecked())
         self.cfg.set("chat_idle_timeout_seconds", self.chat_idle_spin.value())
         self.cfg.set("server_port", self.port_spin.value())
+        if hasattr(self, "backend_mode_combo"):
+            self.cfg.set("backend_mode", self.backend_mode_combo.currentData() or "auto")
 
         self.cfg.set("chat_context_size", self.chat_ctx_spin.value())
         self.cfg.set("chat_gpu_layers", self.chat_gpu_spin.value())

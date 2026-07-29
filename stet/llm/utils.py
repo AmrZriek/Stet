@@ -2,7 +2,7 @@ import os
 import re
 import subprocess
 
-from stet.constants import LLAMA_CPP_DIR, SCRIPT_DIR, SERVER_EXE, WINDOWS
+from stet.constants import LLAMA_CPP_DIR, MACOS, SCRIPT_DIR, SERVER_EXE, WINDOWS
 
 
 def _model_size_billions(model_path: str) -> float | None:
@@ -77,7 +77,25 @@ def _find_shipped_llama_server() -> str:
       2. Any sibling folder matching `llama*` containing the server binary
     Returns an empty string if nothing is found.
     """
+    # macOS bundles are selected through the architecture/backend manifest so
+    # an Intel or translated process cannot accidentally pick another build.
+    # Windows and the historical non-macOS scan below intentionally retain
+    # their existing behavior.
+    if MACOS:
+        try:
+            from stet.llm.backend_manager import BackendManager
+
+            resolved = BackendManager().resolve_bundled_backend(
+                legacy_dir=LLAMA_CPP_DIR,
+                executable_name=SERVER_EXE,
+            )
+            if resolved:
+                return resolved
+        except Exception:
+            pass
+
     # Legacy location first — if someone upgrades in place, keep their setup
+
     legacy = LLAMA_CPP_DIR / SERVER_EXE
     if legacy.exists():
         return str(legacy)

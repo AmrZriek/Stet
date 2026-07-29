@@ -17,14 +17,18 @@ class SilentCorrectionOSD(QWidget):
 
     # Status dot colors — same palette as CorrectionWindow.status_lbl
     _STATE_COLORS = {
-        "loading": "#fbbf24",  # amber — matches "⏳ Processing" in main window
-        "success": "#4ade80",  # green — matches "✓ Done" in main window
-        "warning": "#f87171",  # red   — matches "⚠ Could not correct"
+        "loading": "#fbbf24",
+        "success": "#4ade80",
+        "success_undo": "#4ade80",
+        "warning": "#f87171",
     }
 
-    def __init__(self, message: str, state: str = "success", parent=None):
-        """state: 'loading', 'success', or 'warning'"""
+    def __init__(self, message: str, state: str = "success", parent=None,
+                 action_text: str | None = None, action_callback=None):
+        """state: 'loading', 'success', 'success_undo', or 'warning'"""
         super().__init__(parent)
+        self._action_text = action_text
+        self._action_callback = action_callback
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowFlags(
             Qt.WindowType.Window
@@ -93,6 +97,22 @@ class SilentCorrectionOSD(QWidget):
         msg_lbl.setWordWrap(False)
         inner.addWidget(msg_lbl)
 
+        if self._action_text:
+            act = QLabel(f'<a href="#" style="color:#d4a373;text-decoration:underline;">{self._action_text}</a>')
+            act.setStyleSheet(
+                "QLabel{font-size:12px;font-weight:600;background:transparent;"
+                "padding-left:14px;font-family:'IBM Plex Mono','Consolas',monospace;}"
+            )
+            act.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            def _clicked(_event):
+                if callable(self._action_callback):
+                    self._action_callback()
+                self.close()
+
+            act.mousePressEvent = _clicked
+            inner.addWidget(act)
+
         self.adjustSize()
 
     def _position(self):
@@ -129,8 +149,10 @@ class SilentCorrectionOSD(QWidget):
             self._start_dot_pulse()
             return
 
+        hold_ms = 6000 if self._action_text else 2500
+
         hold = QPropertyAnimation(self, b"windowOpacity")
-        hold.setDuration(2500)
+        hold.setDuration(hold_ms)
         hold.setStartValue(1.0)
         hold.setEndValue(1.0)
 

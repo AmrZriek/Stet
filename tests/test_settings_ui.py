@@ -65,11 +65,11 @@ class TestSettingsConstruction:
         assert dialog is not None
         assert dialog.stack is not None
 
-    def test_sidebar_has_five_pages(self, dialog):
-        assert dialog.nav_list.count() == 5
+    def test_sidebar_has_pages(self, dialog):
+        assert dialog.nav_list.count() == 6
 
-    def test_stack_has_five_pages(self, dialog):
-        assert dialog.stack.count() == 5
+    def test_stack_has_pages(self, dialog):
+        assert dialog.stack.count() == 6
 
     def test_sidebar_labels(self, dialog):
         labels = [
@@ -81,6 +81,7 @@ class TestSettingsConstruction:
             "Correction Profiles",
             "Correction Modes",
             "Templates",
+            "Protected Terms",
         ]
 
     def test_nav_changes_stack(self, dialog):
@@ -181,6 +182,45 @@ class TestThemeConstant:
 
     def test_theme_contains_checkmark_placeholder(self):
         assert "{checkmark_url}" in THEME
+
+
+# ── Interactive Style Builder ──────────────────────────────────────────────
+
+
+class TestTemplatesPageStyleBuilder:
+    """TemplatesPage interactive style template creation."""
+
+    def test_create_style_template_with_samples(self, dialog, qtbot):
+        dialog.nav_list.setCurrentRow(4)  # Templates page
+        page = dialog.templates_page
+        page.sample1_edit.setPlainText("Sample text 1 written by user.")
+        page.sample2_edit.setPlainText("Sample text 2 written by user.")
+
+        page._create_style_template()
+
+        # Verify template created in _temp_templates
+        my_style = next((t for t in dialog._temp_templates if t.get("name") == "My Style"), None)
+        assert my_style is not None
+        assert "Sample text 1 written by user." in my_style["prompt"]
+        assert "Sample text 2 written by user." in my_style["prompt"]
+
+        # Verify list item selected
+        curr_item = dialog.templates_list_w.currentItem()
+        assert curr_item is not None
+        assert curr_item.text() == "My Style"
+
+    def test_create_style_template_fallback_without_samples(self, dialog, qtbot):
+        dialog.nav_list.setCurrentRow(4)
+        page = dialog.templates_page
+        page.sample1_edit.clear()
+        page.sample2_edit.clear()
+        page.sample3_edit.clear()
+
+        page._create_style_template()
+
+        my_style = next((t for t in dialog._temp_templates if t.get("name") == "My Style"), None)
+        assert my_style is not None
+        assert "MY STYLE SAMPLES:" in my_style["prompt"]
 
 
 

@@ -5,6 +5,10 @@ import threading
 import traceback
 import tempfile
 from pathlib import Path
+import sys
+import ctypes
+if sys.platform == "win32":
+    import ctypes.wintypes
 
 from PyQt6 import sip
 from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
@@ -27,16 +31,17 @@ from PyQt6.QtWidgets import (
     QScrollBar,
 )
 
-from stet.constants import SCRIPT_DIR
 from stet.core.clipboard import _clipboard_write_text
 from stet.core.config import ConfigManager
 from stet.core.text_utils import (
+    _INLINE_SENTINEL_RE,
     _is_corrupt_output,
     _is_fewshot_echo,
     _is_refusal_or_empty,
     _normalize_chunk_newlines,
     _INLINE_HAZARD_RE,
     _apply_post_fixes,
+    build_user_protection_re,  # noqa: F401
     recover_sentinels,
     strip_meta_commentary,
     strip_preamble,
@@ -73,6 +78,7 @@ class CorrectionWindow(QWidget):
         initial_strength: str | None = None,
         current_strength: str | None = None,
         mode_prompt_override: str | None = None,
+        history=None,
     ):
         super().__init__()
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -81,6 +87,7 @@ class CorrectionWindow(QWidget):
         self.ac_model = ac_model
         self.chat_model = chat_model
         self.cfg = cfg
+        self._history = history
         self._mode_prompt_override = mode_prompt_override
         self._current_strength = self._normalize_strength(
             current_strength
@@ -169,9 +176,8 @@ class CorrectionWindow(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         # Set window icon so the taskbar entry shows our logo instead of a blank icon
-        logo_path = SCRIPT_DIR / "logo.png"
-        if logo_path.exists():
-            self.setWindowIcon(QIcon(str(logo_path)))
+        from stet.ui.utils import set_window_icon
+        set_window_icon(self)
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         sr = screen.geometry()
         w = min(740, int(sr.width() * 0.8))
@@ -198,46 +204,157 @@ class CorrectionWindow(QWidget):
         self._status_streaming_signal.connect(self._on_status_streaming)
         self.ac_model.status_changed.connect(self._on_model_status)
         self.chat_input.textChanged.connect(lambda text: self.send_btn.setEnabled(bool(text.strip())))
+        self.setMouseTracking(True)
+        self._ui_built = True
+
+    def nativeEvent(self, eventType, message):
+        try:
+            if sip.isdeleted(self) or not getattr(self, "_ui_built", False):
+                return False, 0
+            if sys.platform == "win32" and (eventType == b"windows_generic_MSG" or eventType == b"windows_dispatcher_MSG"):
+                msg_ptr = int(message)
+                if not msg_ptr:
+                    return False, 0
+                msg = ctypes.wintypes.MSG.from_address(msg_ptr)
+                if msg.message == 0x0084:  # WM_NCHITTEST
+                    pos = self.mapFromGlobal(QCursor.pos())
+                    w, h = self.width(), self.height()
+                    x, y = pos.x(), pos.y()
+                    b = 8  # 8px unconditional outer border margin
+
+                    # Unconditional Border Hit Tests (when not maximized/fullscreen)
+                    if not (self.isMaximized() or self.isFullScreen()):
+                        if x < b and y < b:
+                            return True, 13  # HTTOPLEFT
+                        if x >= w - b and y < b:
+                            return True, 14  # HTTOPRIGHT
+                        if x < b and y >= h - b:
+                            return True, 16  # HTBOTTOMLEFT
+                        if x >= w - b and y >= h - b:
+                            return True, 17  # HTBOTTOMRIGHT
+                        if x < b:
+                            return True, 10  # HTLEFT
+                        if x >= w - b:
+                            return True, 11  # HTRIGHT
+                        if y < b:
+                            return True, 12  # HTTOP
+                        if y >= h - b:
+                            return True, 15  # HTBOTTOM
+
+                    # Check for Maximize Button hover (Windows 11 Snap Layouts)
+                    if hasattr(self, "_max_btn") and self._max_btn is not None and self._max_btn.isVisible():
+                        max_rect = self._max_btn.geometry()
+                        if max_rect.contains(pos):
+                            return True, 9  # HTMAXBUTTON
+
+                    # Title bar Area (top 40px)
+                    if y < 40 and not (self.isMaximized() or self.isFullScreen()):
+                        child = self.childAt(pos)
+                        is_interactive = False
+                        curr = child
+                        while curr is not None and curr is not self:
+                            try:
+                                if sip.isdeleted(curr):
+                                    break
+                                if isinstance(curr, (QAbstractButton, QComboBox, QLineEdit, QTextEdit, QPlainTextEdit, QScrollBar)) or curr.objectName() in ("chat_input", "acceptBtn", "cancelBtn", "copyBtn"):
+                                    is_interactive = True
+                                    break
+                                curr = curr.parentWidget()
+                            except Exception:
+                                break
+                        if not is_interactive:
+                            return True, 2  # HTCAPTION
+        except Exception:
+            pass
+        return False, 0
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() < 40:
+            child = self.childAt(e.position().toPoint())
+            block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QAbstractButton)
+            is_interactive = False
+            curr = child
+            while curr is not None and curr is not self:
+                try:
+                    if sip.isdeleted(curr):
+                        break
+                    if isinstance(curr, block_list) or curr.objectName() in ("chat_input", "acceptBtn", "cancelBtn", "copyBtn"):
+                        is_interactive = True
+                        break
+                    curr = curr.parentWidget()
+                except Exception:
+                    break
+            if not is_interactive:
+                self._toggle_maximized()
 
     def mousePressEvent(self, e):
+        self.raise_()
+        self.activateWindow()
         if e.button() == Qt.MouseButton.LeftButton:
             pos = e.pos()
-            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
-                self._resize_start = e.globalPosition().toPoint()
-                self._resize_start_geometry = self.geometry()
-                return
+            if pos.y() < 40 and sys.platform != "win32":
+                ch = self.childAt(pos)
+                block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QAbstractButton)
+                is_interactive = False
+                curr = ch
+                while curr is not None and curr is not self:
+                    try:
+                        if sip.isdeleted(curr):
+                            break
+                        if isinstance(curr, block_list) or curr.objectName() in ("chat_input", "acceptBtn", "cancelBtn", "copyBtn"):
+                            is_interactive = True
+                            break
+                        curr = curr.parentWidget()
+                    except Exception:
+                        break
+                if not is_interactive:
+                    wh = self.windowHandle()
+                    if wh and hasattr(wh, "startSystemMove"):
+                        wh.startSystemMove()
+                        return
 
             ch = self.childAt(e.pos())
             block_list = (QTextEdit, QPlainTextEdit, QLineEdit, QComboBox, QScrollBar, QAbstractButton)
             is_interactive = False
             curr = ch
-            while curr is not None:
-                if isinstance(curr, block_list) or curr.objectName() in ("chat_input", "acceptBtn", "cancelBtn", "copyBtn"):
-                    is_interactive = True
+            while curr is not None and curr is not self:
+                try:
+                    if sip.isdeleted(curr):
+                        break
+                    if isinstance(curr, block_list) or curr.objectName() in ("chat_input", "acceptBtn", "cancelBtn", "copyBtn"):
+                        is_interactive = True
+                        break
+                    curr = curr.parentWidget()
+                except Exception:
                     break
-                curr = curr.parentWidget()
             if not is_interactive:
                 self._drag_pos = e.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, e):
         if not e.buttons():
             pos = e.pos()
-            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+            w, h = self.width(), self.height()
+            x, y = pos.x(), pos.y()
+            b = 8
+            if not (self.isMaximized() or self.isFullScreen()):
+                if (x < b and y < b) or (x >= w - b and y >= h - b):
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                elif (x >= w - b and y < b) or (x < b and y >= h - b):
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                elif x < b or x >= w - b:
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                elif y < b or y >= h - b:
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                else:
+                    self.unsetCursor()
             else:
                 self.unsetCursor()
 
-        if hasattr(self, "_resize_start") and self._resize_start:
-            delta = e.globalPosition().toPoint() - self._resize_start
-            new_w = max(self.minimumWidth(), self._resize_start_geometry.width() + delta.x())
-            new_h = max(self.minimumHeight(), self._resize_start_geometry.height() + delta.y())
-            self.resize(new_w, new_h)
-        elif self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
+        if hasattr(self, "_drag_pos") and self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
-        self._resize_start = None
 
     def _toggle_maximized(self):
         if self.isMaximized():
@@ -333,6 +450,19 @@ class CorrectionWindow(QWidget):
                 ("Ctrl+Tab", "Cycle Strength"),
                 ("?", "Toggle Shortcuts"),
             ]
+
+            hk_list = self.cfg.get("hotkeys", []) if self.cfg else []
+            if hk_list:
+                for hk in hk_list:
+                    sc = hk.get("shortcut", "").replace("+", " + ").upper()
+                    mode = hk.get("mode", "panel")
+                    str_name = hk.get("strength", "full_correction").replace("_", " ").title()
+                    if mode == "silent":
+                        desc = f"Silent Correction ({str_name})"
+                    else:
+                        desc = f"Open Panel ({str_name})"
+                    if sc:
+                        shortcuts.append((sc, desc))
 
             for i, (k, v) in enumerate(shortcuts):
                 klbl = QLabel(k)
@@ -587,6 +717,8 @@ class CorrectionWindow(QWidget):
         self.corr_edit.setAccessibleName("Corrected text preview")
         self.corr_edit.setMinimumHeight(80)
         self.corr_edit.setObjectName("corrEdit")
+        self.corr_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.corr_edit.customContextMenuRequested.connect(self._show_corr_context_menu)
         lay.addWidget(self.corr_edit, 1)
 
         # Chat
@@ -716,7 +848,7 @@ class CorrectionWindow(QWidget):
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setObjectName("cancelBtn")
         cancel_btn.setAccessibleName("Cancel correction")
-        cancel_btn.clicked.connect(self.hide)
+        cancel_btn.clicked.connect(self.close)
         btn_row.addWidget(cancel_btn)
 
         self.copy_btn = QPushButton("Copy")
@@ -737,7 +869,7 @@ class CorrectionWindow(QWidget):
 
     def _chat_transcript_html(self, final_result: str | None = None) -> str:
         parts = [
-            '<body style="color:#e2e8f0;font-family:Segoe UI,sans-serif;font-size:13px;">',
+            '<body style="color:#e2e8f0;font-family:\'IBM Plex Mono\',\'Consolas\',monospace;font-size:13px;">',
             '<div style="padding:8px 0;">',
         ]
         final_result_html = None
@@ -1066,7 +1198,7 @@ class CorrectionWindow(QWidget):
             )
             log(f"[CW] method={method} strength={strength}")
 
-            result, units = self.ac_model.correct_text_patch(
+            cr = self.ac_model.correct_text_patch(
                 text,
                 custom_sys=custom_sys,
                 strength=strength,
@@ -1082,21 +1214,55 @@ class CorrectionWindow(QWidget):
             if is_stale():
                 log("[CW] stale thread — dropping result")
                 return
-            if result is None:
-                log("[CW] patch fallback -> streaming")
-                self._start_streaming_correction(text, custom_sys, strength)
+
+            # cr is a CorrectionResult. Access structured fields directly.
+            # text_or_none returns None for failure outcomes (triggers streaming).
+            _text_or_none = cr.text_or_none
+            _outcome = cr.outcome
+            _reason = cr.reason
+            units = cr.units_processed
+
+            if _text_or_none is None:
+                # Total failure — fall back to streaming for unprotected failures.
+                reason = _reason or getattr(self.ac_model, "last_patch_error", None) or "All rewrite units failed validation"
+                fallback_msg = f"Patch failed ({reason}) — resorting back to streaming..."
+                log(f"[CW] {fallback_msg}")
+                self._update_status(fallback_msg, "loading")
+                mode_override = self.__dict__.get("_mode_prompt_override")
+                self._streaming_fallback_reason = reason
+                self._start_streaming_correction(text, custom_sys, strength, mode_prompt_override=mode_override)
                 return
+
+            result_text = cr.text
+
             label_strength = {
                 "full_correction": "Full Correction",
                 "rewrite_polish": "Rewrite & Polish",
                 "custom_patch": "Custom Patch",
             }.get(strength, "Spelling Only")
             unit_suffix = f", {units} units" if units > 1 else ""
-            if result == text:
-                self._correction_ready.emit(text, "Already correct")
+
+            if result_text == text:
+                # Text unchanged — check outcome for the reason.
+                from stet.core.text_utils import CorrectionOutcome
+                if _outcome == CorrectionOutcome.UNCHANGED_PROTECTED:
+                    _atom_count = cr.protected_atom_count
+                    _atom_label = f" ({_atom_count} link{'s' if _atom_count != 1 else ''}/path{'es' if _atom_count != 1 else ''})" if _atom_count else ""
+                    msg = f"Couldn\u2019t safely correct text containing protected content{_atom_label}; no text was changed."
+                    log(f"[CW] {msg}")
+                    self._correction_ready.emit(
+                        text, f"\u26a0 Protected content \u2014 {msg}"
+                    )
+                elif _reason:
+                    log(f"[CW] Correction unchanged due to: {_reason}")
+                    self._correction_ready.emit(
+                        text, f"\u26a0 Unchanged \u2014 {_reason}"
+                    )
+                else:
+                    self._correction_ready.emit(text, "Already correct")
             else:
                 self._correction_ready.emit(
-                    result, f"Patch ({label_strength}{unit_suffix})"
+                    result_text, f"Patch ({label_strength}{unit_suffix})"
                 )
 
         except Exception as e:
@@ -1116,7 +1282,10 @@ class CorrectionWindow(QWidget):
         corrected = self._match_original_newlines(corrected)
         self.corrected = corrected
         self._render_diff(corrected)
-        self._update_status("✓  Done", "done")
+        if method.startswith("\u26a0"):
+            self._update_status("\u26a0  Correction unchanged", "warning")
+        else:
+            self._update_status("\u2713  Done", "done")
         self.method_badge.setText(f"via {method}")
         self.method_badge.show()
         self.accept_btn.setEnabled(True)
@@ -1146,7 +1315,7 @@ class CorrectionWindow(QWidget):
         self.send_btn.setEnabled(True)
 
     # ── streaming correction ──────────────────────────────────────────────
-    def _start_streaming_correction(self, text: str, custom_sys: str, strength: str):
+    def _start_streaming_correction(self, text: str, custom_sys: str, strength: str, mode_prompt_override: str | None = None):
         """Kick off a StreamWorker that streams corrected text into ``corr_edit``.
 
         Reuses the existing chat StreamWorker plumbing. On ``done`` we rerun
@@ -1176,7 +1345,9 @@ class CorrectionWindow(QWidget):
             system = custom_sys
             wrapped = text
         else:
-            if strength == "spelling_only":
+            if mode_prompt_override:
+                fix_rule = mode_prompt_override
+            elif strength == "spelling_only":
                 fix_rule = "Fix only clear spelling mistakes and obvious typos. Do NOT change grammar, punctuation, capitalization, word choice, or style."
             elif strength == "rewrite_polish":
                 fix_rule = "Fix all errors and improve clarity, conciseness, and flow. Reorder sentences or change word choice if it significantly improves the text while preserving the author's core intent."
@@ -1228,7 +1399,13 @@ class CorrectionWindow(QWidget):
         self._streaming_masked = _streaming_masked
         self._correction_stream_buf = ""
         self._correction_stream_strength = strength
-        self._update_status("⏳  Streaming…", "streaming")
+        # Show fallback reason in streaming status if we got here from patch failure
+        _fallback_reason = getattr(self, '_streaming_fallback_reason', None)
+        if _fallback_reason:
+            self._update_status(f"\u23f3  Streaming (patch: {_fallback_reason})\u2026", "streaming")
+            self._streaming_fallback_reason = None
+        else:
+            self._update_status("\u23f3  Streaming\u2026", "streaming")
         log(f"[CW] streaming correction started (strength={strength})")
         worker.start()
 
@@ -1258,17 +1435,25 @@ class CorrectionWindow(QWidget):
             _expected_sentinels = [
                 f"__STET_PROTECTED_{i+1}__" for i in range(len(self._streaming_masked))
             ]
-            _surviving = all(s in cleaned for s in _expected_sentinels)
+            # Strict anchor validation: same count, order, and identity.
+            # The weak ``all(s in cleaned)`` check allowed duplicated or
+            # reordered sentinels to pass, which would corrupt unmasking.
+            _found_sentinels = _INLINE_SENTINEL_RE.findall(cleaned)
+            _surviving = _found_sentinels == _expected_sentinels
             if not _surviving:
                 # Try restoring mangled sentinels before bailing out.
                 _recovered = recover_sentinels(cleaned, _expected_sentinels)
-                if _recovered != cleaned and all(
-                    s in _recovered for s in _expected_sentinels
-                ):
+                _found_after = _INLINE_SENTINEL_RE.findall(_recovered)
+                if _found_after == _expected_sentinels:
                     log("[CW] streaming output: recovered mangled sentinel(s)")
                     cleaned = _recovered
                 else:
-                    log("[CW] streaming output lost sentinel(s)")
+                    log(
+                        f"[CW] streaming output lost sentinel(s) — "
+                        f"expected={len(_expected_sentinels)} "
+                        f"found={len(_found_sentinels)} "
+                        f"match={_found_sentinels == _expected_sentinels}"
+                    )
                     self._on_correction_ready(
                         self.original, "Sentinel lost — try a larger model"
                     )
@@ -1299,14 +1484,10 @@ class CorrectionWindow(QWidget):
             )
             return
         cleaned = _normalize_chunk_newlines(self.original, cleaned)
-        from stet.core.text_utils import _hallucination_ratio, _post_splice_sanity
-        from stet.llm.model_manager import (
-            _HALLUCINATION_THRESHOLDS_BY_STRENGTH,
-            _resolve_mode_index,
-        )
+        from stet.core.text_utils import _hallucination_ratio, _post_splice_sanity, get_profile
+        from stet.llm.model_manager import _resolve_mode_index
         # Config-driven threshold — single source of truth.
-        # Falls back to the legacy strength→threshold dict if the config row
-        # is missing, then to 0.6 as a last-resort backstop.
+        # Falls back to get_profile(strength).hallucination_threshold if missing.
         _modes = self.cfg.get("correction_modes", [])
         _mi = _resolve_mode_index(self._correction_stream_strength, _modes)
         _stream_threshold = (
@@ -1315,9 +1496,7 @@ class CorrectionWindow(QWidget):
             else None
         )
         if _stream_threshold is None:
-            _stream_threshold = _HALLUCINATION_THRESHOLDS_BY_STRENGTH.get(
-                self._correction_stream_strength, 0.6
-            )
+            _stream_threshold = get_profile(self._correction_stream_strength).hallucination_threshold
         if _hallucination_ratio(self.original, cleaned) > _stream_threshold:
             log(
                 f"[CW] streaming output diverged too far from input "
@@ -1571,7 +1750,7 @@ class CorrectionWindow(QWidget):
     def _render_diff(self, corrected: str):
         html = self._diff_html(corrected)
         self.corr_edit.setHtml(
-            f'<body style="color:#e2e8f0;font-family:Segoe UI,sans-serif;font-size:13px;">'
+            f'<body style="color:#e2e8f0;font-family:\'IBM Plex Mono\',\'Consolas\',monospace;font-size:13px;">'
             f"{html}</body>"
         )
 
@@ -1744,9 +1923,38 @@ class CorrectionWindow(QWidget):
         self.close()
         self.accepted.emit(text)
 
+    def _show_corr_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self.corr_edit)
+        menu.setStyleSheet(
+            "QMenu{background:#121315; border:1px solid #28292c; color:#ededee; font-size:12px; font-family:'IBM Plex Mono','Consolas',monospace;}"
+            "QMenu::item{padding:6px 16px; background:transparent;}"
+            "QMenu::item:selected{background:#28292c; color:#d4a373;}"
+        )
+        act_copy = menu.addAction("Copy Selected")
+        act_copy_all = menu.addAction("Copy All")
+        tc = self.corr_edit.textCursor()
+        act_copy.setEnabled(tc.hasSelection())
+        chosen = menu.exec(self.corr_edit.mapToGlobal(pos))
+        if chosen == act_copy:
+            self.corr_edit.copy()
+        elif chosen == act_copy_all:
+            _clipboard_write_text(getattr(self, "corrected", "") or self.corr_edit.toPlainText())
+
     def _copy(self):
         _clipboard_write_text(self.corrected)
         self.copy_btn.setText("Copied")
+        if hasattr(self, "_history") and self._history:
+            try:
+                strength = getattr(self, "_correction_stream_strength", "") or self.cfg.get("streaming_strength", "full_correction")
+                self._history.add(
+                    mode="panel_copy",
+                    strength=strength,
+                    original=getattr(self, "original", "") or "",
+                    corrected=self.corrected,
+                )
+            except Exception as e:
+                log(f"[CW] history copy record error: {e}")
         QTimer.singleShot(1500, self._restore_copy_label)
 
     def _restore_copy_label(self):
@@ -1808,11 +2016,26 @@ class CorrectionWindow(QWidget):
             self.strength_combo.setToolTip("")
 
     def _open_settings(self):
+        # Downgrade so Settings can rise above us.  WindowStaysOnTopHint
+        # forces this window on top of every non-top-hint window regardless
+        # of focus — raise_() / activateWindow() on the dialog are ignored
+        # unless we temporarily drop the hint.
+        self.setWindowFlags(
+            self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.show()
         dlg = SettingsDialog(self.cfg, self, re_register_cb=self._re_register_cb)
         dlg.saved.connect(self._re_register_cb)
         dlg.saved.connect(self._update_strength_combo_state)
+        dlg.destroyed.connect(self._restore_top_hint)
         dlg.show()
         self._settings_dlg = dlg
+
+    def _restore_top_hint(self):
+        self.setWindowFlags(
+            self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.show()
 
     def closeEvent(self, e):
         # Remove the app-level event filter before the C++ object is destroyed

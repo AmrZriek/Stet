@@ -30,6 +30,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 SRC = "\n".join(f.read_text(encoding="utf-8") for f in (ROOT / "stet").rglob("*.py"))
+APP_SRC = (ROOT / "stet" / "core" / "app.py").read_text(encoding="utf-8")
 UPDATE_SRC = (ROOT / "stet" / "update.py").read_text(encoding="utf-8")
 
 # Build ZIP fixtures on first use (re-uses built copies thereafter).
@@ -139,9 +140,10 @@ def test_update_checker_points_to_stet_repo():
     )
 
 
-def test_old_llama_api_removed():
-    assert "ggml-org/llama.cpp/releases/latest" not in SRC, (
-        "Old llama.cpp GitHub API URL should be removed"
+def test_app_update_checker_does_not_use_llama_release_api():
+    """App updates and the separately verified backend-update channel differ."""
+    assert "ggml-org/llama.cpp/releases/latest" not in APP_SRC, (
+        "The app update checker must not point at llama.cpp releases"
     )
 
 

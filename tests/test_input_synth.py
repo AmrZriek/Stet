@@ -3,6 +3,9 @@ from unittest.mock import patch
 
 import pytest
 
+if sys.platform != "win32":
+    pytest.skip("Windows-only path", allow_module_level=True)
+
 from stet.core.clipboard import (
     KEYEVENTF_KEYUP,
     VK_C,
@@ -11,9 +14,6 @@ from stet.core.clipboard import (
     _send_ctrl_chord,
     _user32,
 )
-
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only path")
-
 
 def _captured_inputs(call_args):
     """Decode the (count, inputs_array, size) SendInput call back to a list of

@@ -8,6 +8,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import requests
 from PyQt6.QtCore import QObject, pyqtSignal
@@ -15,10 +16,11 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from stet.constants import DEFAULT_CONFIG, LOG_FILE, WINDOWS
 from stet.core.config import ConfigManager
 from stet.core.text_utils import (
-    _HALLUCINATION_THRESHOLD_CONSERVATIVE,
     _INLINE_HAZARD_RE,
     PROFILES,
+    CorrectionOutcome,
     CorrectionProfile,
+    CorrectionResult,
     _apply_post_fixes,
     _chunk_text_by_sentences,
     _dict_prepass,
@@ -41,13 +43,10 @@ from stet.llm.utils import (
     _model_size_billions,
     has_nvidia,
 )
+from stet.llm.backend_manager import (
+    BackendManager,
+)
 from stet.llm.worker import StreamWorker
-
-_HALLUCINATION_THRESHOLDS_BY_STRENGTH = {
-    "spelling_only": _HALLUCINATION_THRESHOLD_CONSERVATIVE,
-    "full_correction": 1.0,
-    "rewrite_polish": 1.0,
-}
 
 _STRENGTH_TO_MODE_INDEX = {
     "spelling_only": 0,
@@ -56,6 +55,54 @@ _STRENGTH_TO_MODE_INDEX = {
 }
 
 _INLINE_SENTINEL_RE = re.compile(r"__STET_PROTECTED_\d+__")
+
+
+def _detect_loaded_backend(log_content: str, *, metal_verified: bool = False) -> str:
+    """Classify execution backend from llama.cpp server logs.
+    Returns: 'cuda', 'metal', 'cpu', or 'unknown'
+    """
+    if not log_content:
+        return "metal" if metal_verified else "unknown"
+
+    content_lower = log_content.lower()
+
+    if any(
+        kw in content_lower
+        for kw in (
+            "ggml_cuda",
+            "cuda0",
+            "using cuda",
+            "cublas",
+            "device 0: nvidia",
+        )
+    ):
+        return "cuda"
+
+    if (
+        metal_verified
+        or "ggml_metal" in content_lower
+        or "using metal" in content_lower
+        or bool(re.search(r"mtl\d*:", content_lower))
+        or bool(re.search(r"\bmetal\b", content_lower))
+    ):
+        return "metal"
+
+    if any(
+        kw in content_lower
+        for kw in (
+            "blast",
+            "openblas",
+            "accelerate",
+            "cpu",
+            "ggml_cpu",
+            "model loaded",
+        )
+    ) or not metal_verified:
+        return "cpu"
+
+    return "metal" if metal_verified else "unknown"
+
+
 
 
 def _resolve_mode_index(strength: str, modes: list) -> int:
@@ -79,6 +126,9 @@ def _normalize_newlines(text: str, use_windows_newlines: bool) -> str:
     if use_windows_newlines:
         return normalized.replace("\n", "\r\n")
     return normalized
+
+
+
 
 
 def _create_job_object_for_subprocess(proc: subprocess.Popen):
@@ -178,6 +228,7 @@ class ModelManager(QObject):
         label: str = "LLM",
         keep_loaded_key: str = "keep_model_loaded",
         idle_timeout_key: str = "idle_timeout_seconds",
+        server_log_path: str | Path | None = None,
     ):
         super().__init__()
         self.cfg = cfg
@@ -185,10 +236,16 @@ class ModelManager(QObject):
         self.label = label
         self.keep_loaded_key = keep_loaded_key
         self.idle_timeout_key = idle_timeout_key
+        self.server_log_path = Path(server_log_path) if server_log_path is not None else LOG_FILE
         self.server_process = None
         self.log_file = None
         self.last_used = None
         self.loading = False
+        # A live server process is not necessarily a usable model.  llama.cpp
+        # starts the HTTP listener before GGUF loading is complete on macOS.
+        # This latch becomes true only after our complete startup sequence,
+        # including the cache warmup, has finished.
+        self._server_ready = False
         self._lock = threading.Lock()
         # Persistent HTTP session for LLM requests. Created lazily on first use
         # (so unit tests that never trigger a correction never open a socket)
@@ -207,6 +264,14 @@ class ModelManager(QObject):
         # Reset to False at the start of each load_model() call and on success.
         # Checked by StetApp to schedule a deferred retry.
         self._last_load_failed_not_found: bool = False
+        self.last_load_error: str = ""
+        self.last_patch_error: str | None = None
+        self.backend_manager = BackendManager()
+
+    def is_ready(self) -> bool:
+        """True only once the live server has finished loading this model."""
+        return self._server_ready and self.is_loaded()
+
 
     # ── internal helpers ──────────────────────────────────────────────────
     def _get_param(self, key: str, default=None):
@@ -217,6 +282,15 @@ class ModelManager(QObject):
             if prefixed_key in DEFAULT_CONFIG:
                 return self.cfg.get(prefixed_key, default)
         return self.cfg.get(key, default)
+
+    def _get_user_protection_re(self):
+        """Compile (and cache) the protected-terms regex from config."""
+        terms = tuple(self.cfg.get("protected_terms", []) or [])
+        if terms != getattr(self, "_prot_terms_cache_key", None):
+            from stet.core.text_utils import build_user_protection_re
+            self._prot_terms_cache = build_user_protection_re(list(terms))
+            self._prot_terms_cache_key = terms
+        return self._prot_terms_cache
 
     def mark_used(self):
         self.last_used = datetime.now()
@@ -640,7 +714,8 @@ class ModelManager(QObject):
                     log(f"[{self.label}] Added CUDA paths to PATH: {extra}")
                 kwargs["env"] = env
 
-            self.log_file = open(LOG_FILE, "w", encoding="utf-8")
+            self.server_log_path.parent.mkdir(parents=True, exist_ok=True)
+            self.log_file = open(self.server_log_path, "w", encoding="utf-8")
             self.server_process = subprocess.Popen(
                 cmd, stdout=self.log_file, stderr=self.log_file, **kwargs
             )
@@ -660,14 +735,17 @@ class ModelManager(QObject):
                 _proc = self.server_process
                 if _proc is not None and _proc.poll() is not None:
                     # Dump server log into app_debug.log for easier diagnosis
+                    tail = ""
                     try:
-                        tail = LOG_FILE.read_text(encoding="utf-8", errors="replace")[
+                        tail = self.server_log_path.read_text(encoding="utf-8", errors="replace")[
                             -2000:
                         ]
                         log(f"[{self.label}] server_log.txt tail:\n{tail}")
                     except Exception:
                         pass
-                    raise RuntimeError("Server exited immediately — see server_log.txt")
+                    if tail:
+                        raise RuntimeError(f"Server exited immediately — see {self.server_log_path}:\n{tail}")
+                    raise RuntimeError(f"Server exited immediately — see {self.server_log_path}")
                 try:
                     if requests.get(self._health_url(), timeout=1).status_code == 200:
                         break
@@ -682,12 +760,13 @@ class ModelManager(QObject):
             else:
                 raise RuntimeError("Server did not start within 180 s")
 
+            name = friendly_name(model_path)
+            self._warmup_prompt_cache()
+            self._server_ready = True
             self.mark_used()
             with self._lock:
                 self.loading = False
-            name = friendly_name(model_path)
             self.status_changed.emit(f"Ready — {name}")
-            self._warmup_prompt_cache()
             self.model_loaded.emit()
             log(f"[{self.label}] Model ready: {name}")
 
@@ -695,7 +774,8 @@ class ModelManager(QObject):
             self.actual_backend_type = "cpu"
             if gpu_layers > 0:
                 try:
-                    log_content = LOG_FILE.read_text(encoding="utf-8", errors="replace")
+                    log_content = self.server_log_path.read_text(encoding="utf-8", errors="replace")
+
                     # Look for which backends were loaded.
                     # Patterns cover multiple llama.cpp log format generations:
                     #   - Old format:        "loaded CUDA backend"
@@ -878,7 +958,9 @@ class ModelManager(QObject):
 
     def unload_model(self):
         with self._lock:
+            self._server_ready = False
             if self.server_process:
+
                 try:
                     self.server_process.terminate()
                     self.server_process.wait(timeout=5)
@@ -915,30 +997,40 @@ class ModelManager(QObject):
         strength: str = "full_correction",
         cancel_event: threading.Event | None = None,
         mode_prompt_override: str | None = None,
-    ) -> tuple[str | None, int]:
+        progress_cb: "Callable[[int, int], None] | None" = None,
+    ) -> CorrectionResult:
         """Three-phase correction: dict pre-pass, parallel sentence rewrite, hallucination guard.
 
-        Returns (corrected_text_or_None, units_processed).
-        - Returns (None, 0) on total failure -> caller falls back to streaming.
-        - Returns (text, 0) when text is empty.
-        - Returns (text, 0) when dict pre-pass is sufficient (fast path, no LLM call).
-        - Returns (final, N) where N = sentence-units sent to the LLM.
-
-        The return-tuple shape is preserved so existing call sites in _do_correction
-        don't need to change. The second element was "passes_run" and is now
-        "units_processed" — semantically different but used only for the method
-        badge ("Patch (Smart Fix, 3x)" reads fine either way).
+        Returns a CorrectionResult with structured outcome.  Backward-compatible
+        tuple unpacking (``result, units = ...``) still works via __iter__.
+        Use ``result.text_or_none`` for the old ``is None`` check to trigger
+        streaming fallback.
         """
+        _t0 = time.monotonic()
+        self.last_patch_error = None
         if not self.is_loaded():
             if not self.load_model():
-                return None, 0
+                self.last_patch_error = "Model failed to load"
+                return CorrectionResult(
+                    text=text, outcome=CorrectionOutcome.MODEL_UNAVAILABLE,
+                    reason="Model failed to load",
+                    elapsed_s=time.monotonic() - _t0,
+                )
         self.mark_used()
         self.status_changed.emit("Correcting…")
         if not text.strip():
-            return text, 0
+            return CorrectionResult(
+                text=text, outcome=CorrectionOutcome.CORRECTED,
+                elapsed_s=time.monotonic() - _t0,
+            )
 
         if cancel_event is not None and cancel_event.is_set():
-            return None, 0
+            self.last_patch_error = "Correction cancelled by user"
+            return CorrectionResult(
+                text=text, outcome=CorrectionOutcome.CANCELLED,
+                reason="Correction cancelled by user",
+                elapsed_s=time.monotonic() - _t0,
+            )
 
         has_windows_newlines = "\r\n" in text
         text = _normalize_newlines(text, use_windows_newlines=False)
@@ -978,6 +1070,10 @@ class ModelManager(QObject):
 
         pre_corrected = _INLINE_HAZARD_RE.sub(mask_repl, pre_corrected)
 
+        user_re = self._get_user_protection_re()
+        if user_re is not None:
+            pre_corrected = user_re.sub(mask_repl, pre_corrected)
+
         chunks = _chunk_text_by_sentences(pre_corrected, profile.chunk_words)
         if len(chunks) > 1:
             log(
@@ -988,6 +1084,8 @@ class ModelManager(QObject):
         corrected_parts: list[tuple[str, str]] = [("", "")] * len(chunks)
         any_success = False
         any_preserved = False
+        _completed = 0
+        units_corrected = 0
 
         from stet.core.text_utils import looks_like_prose
 
@@ -999,6 +1097,9 @@ class ModelManager(QObject):
 
         shared_session = self._get_session()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+        # Track which chunks have protected atoms so we can attempt span-only
+        # recovery on sentinel validation failure.
+        _chunks_with_sentinels: dict[int, str] = {}  # idx -> original chunk text
         try:
             futures = {}
             for idx, (chunk_text, sep) in enumerate(chunks):
@@ -1011,7 +1112,17 @@ class ModelManager(QObject):
                 ):
                     corrected_parts[idx] = (chunk_text, sep)
                     any_preserved = True
+                    _completed += 1
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(_completed, len(chunks))
+                        except Exception:
+                            pass
                     continue
+
+                # Record chunks that contain sentinels for recovery.
+                if _INLINE_SENTINEL_RE.search(chunk_text):
+                    _chunks_with_sentinels[idx] = chunk_text
 
                 futures[executor.submit(
                     self._rewrite_sentence_chunk,
@@ -1030,7 +1141,11 @@ class ModelManager(QObject):
             while remaining:
                 if cancel_event is not None and cancel_event.is_set():
                     log(f"[{self.label}] Patch: cancelled mid-correction")
-                    return None, 0
+                    return CorrectionResult(
+                        text=text, outcome=CorrectionOutcome.CANCELLED,
+                        reason="Cancelled mid-correction",
+                        elapsed_s=time.monotonic() - _t0,
+                    )
 
                 done, _pending = concurrent.futures.wait(
                     remaining,
@@ -1044,7 +1159,9 @@ class ModelManager(QObject):
                     try:
                         corrected = future.result()
                     except Exception as e:
-                        log(f"[{self.label}] Patch: unit {idx + 1} exception: {e}")
+                        err_msg = f"Unit {idx + 1} model generation error ({e})"
+                        self.last_patch_error = err_msg
+                        log(f"[{self.label}] Patch: {err_msg}")
                         corrected = None
 
                     if corrected is None:
@@ -1073,14 +1190,106 @@ class ModelManager(QObject):
                                 log(f"[{self.label}] Patch unit {idx + 1}: recovered mangled sentinel(s)")
                                 corrected = _recovered
                             else:
-                                log(f"[{self.label}] Patch unit {idx + 1} rejected: sentinel(s) lost or reordered")
-                                corrected_parts[idx] = (chunk_text, sep)
-                                any_preserved = True
-                                continue
+                                # ── Span-only recovery ──────────────────
+                                # The LLM mangled protected atoms.  Instead
+                                # of rejecting the whole chunk, try sending
+                                # only the editable prose spans to the LLM.
+                                err_msg = f"Unit {idx + 1} rejected: protected placeholders/entities mangled"
+                                self.last_patch_error = err_msg
+                                log(f"[{self.label}] Patch {err_msg} — attempting span-only recovery")
+
+                                # Build per-chunk entity list from sentinel indices.
+                                # chunk_text has __STET_PROTECTED_N__ where N is
+                                # 1-based into masked_entities.  Extract the
+                                # indices present in this chunk and build a local
+                                # entity list (0-based for the recovery method).
+                                _chunk_sentinel_indices = [
+                                    int(m.group(1))
+                                    for m in re.finditer(r"__STET_PROTECTED_(\d+)__", chunk_text)
+                                ]
+                                _chunk_entities = [
+                                    masked_entities[si - 1]
+                                    for si in _chunk_sentinel_indices
+                                    if 0 < si <= len(masked_entities)
+                                ]
+
+                                span_result = self._correct_spans_around_atoms(
+                                    chunk_text,
+                                    _chunk_entities,
+                                    custom_sys,
+                                    idx + 1,
+                                    len(chunks),
+                                    strength,
+                                    cancel_event,
+                                    mode_prompt_override,
+                                    shared_session,
+                                    profile,
+                                )
+                                if span_result is not None:
+                                    # Apply standard safety guards on the
+                                    # reassembled result — span recovery
+                                    # validates individual spans, but the
+                                    # reassembled whole may still diverge.
+                                    #
+                                    # Compare against the UNMASKED chunk
+                                    # (original text with real URLs/paths),
+                                    # not the masked chunk_text which has
+                                    # __STET_PROTECTED_n__ tokens.  Long
+                                    # URLs cause false hallucination rejections
+                                    # when compared against sentinel tokens.
+                                    _unmasked_chunk = chunk_text
+                                    for _si in _chunk_sentinel_indices:
+                                        if 0 < _si <= len(masked_entities):
+                                            _unmasked_chunk = _unmasked_chunk.replace(
+                                                f"__STET_PROTECTED_{_si}__",
+                                                masked_entities[_si - 1],
+                                            )
+                                    _span_ratio = _hallucination_ratio(_unmasked_chunk, span_result, strength)
+                                    if _span_ratio > threshold:
+                                        log(
+                                            f"[{self.label}] Patch unit {idx + 1}: "
+                                            f"span recovery result diverged ({_span_ratio:.2f} > {threshold}) — keeping original"
+                                        )
+                                        corrected_parts[idx] = (chunk_text, sep)
+                                        any_preserved = True
+                                        continue
+
+                                    if not _post_splice_sanity(
+                                        _unmasked_chunk, span_result,
+                                        min_ratio=profile.min_word_ratio,
+                                        max_ratio=profile.max_word_ratio,
+                                    ):
+                                        log(
+                                            f"[{self.label}] Patch unit {idx + 1}: "
+                                            "span recovery failed post-splice sanity — keeping original"
+                                        )
+                                        corrected_parts[idx] = (chunk_text, sep)
+                                        any_preserved = True
+                                        continue
+
+                                    log(f"[{self.label}] Patch unit {idx + 1}: span-only recovery succeeded")
+                                    corrected = span_result
+                                    corrected_parts[idx] = (corrected, sep)
+                                    any_success = True
+                                    units_corrected += 1
+                                    _completed += 1
+                                    if progress_cb is not None:
+                                        try:
+                                            progress_cb(_completed, len(chunks))
+                                        except Exception:
+                                            pass
+                                    continue
+                                else:
+                                    log(f"[{self.label}] Patch unit {idx + 1}: span-only recovery failed — keeping original")
+                                    corrected_parts[idx] = (chunk_text, sep)
+                                    any_preserved = True
+                                    continue
 
                     # Reject if raw output exceeds the (config-driven) hallucination threshold
                     if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
-                        log(f"[{self.label}] Patch unit {idx + 1} rejected: raw hallucination ratio exceeds threshold")
+                        err_msg = f"Unit {idx + 1} rejected: raw hallucination ratio exceeded threshold ({threshold})"
+                        self.last_patch_error = err_msg
+                        log(f"[{self.label}] Patch {err_msg}")
                         corrected = None
                         corrected_parts[idx] = (chunk_text, sep)
                         continue
@@ -1091,7 +1300,9 @@ class ModelManager(QObject):
                     # rewrites — distributions overlap (refusal 0.58–0.87 vs
                     # legit max ~0.687) — so use a dedicated detector.
                     if _is_refusal_or_empty(corrected, chunk_text):
-                        log(f"[{self.label}] Patch unit {idx + 1} rejected: refusal/empty output from model")
+                        err_msg = f"Unit {idx + 1} rejected: model refused or returned empty edit"
+                        self.last_patch_error = err_msg
+                        log(f"[{self.label}] Patch {err_msg}")
                         corrected_parts[idx] = (chunk_text, sep)
                         continue
 
@@ -1130,6 +1341,13 @@ class ModelManager(QObject):
 
                     corrected_parts[idx] = (corrected, sep)
                     any_success = True
+                    units_corrected += 1
+                    _completed += 1
+                    if progress_cb is not None:
+                        try:
+                            progress_cb(_completed, len(chunks))
+                        except Exception:
+                            pass
 
         finally:
             executor.shutdown(wait=False)
@@ -1141,21 +1359,42 @@ class ModelManager(QObject):
         for i, entity in enumerate(masked_entities):
             reassembled = reassembled.replace(f"__STET_PROTECTED_{i+1}__", entity)
 
+        _elapsed = time.monotonic() - _t0
+
         # If dict pre-pass changed nothing AND no unit ever succeeded, report
         # total failure so the caller falls back to streaming. Otherwise we
         # accept partial success (kept-original units are not a failure).
         if not any_success and dict_fixes == 0 and reassembled == text:
             if any_preserved or masked_entities:
+                _reason = self.last_patch_error or "Protected/non-prose unit(s) preserved original"
                 log(
                     f"[{self.label}] Patch: protected/non-prose unit(s) "
-                    "preserved original — skipping streaming fallback"
+                    f"preserved original — outcome=UNCHANGED_PROTECTED "
+                    f"atoms={len(masked_entities)} elapsed={_elapsed:.2f}s"
+                )
+                return CorrectionResult(
+                    text=text, outcome=CorrectionOutcome.UNCHANGED_PROTECTED,
+                    units_processed=len(chunks), units_corrected=0,
+                    protected_atom_count=len(masked_entities),
+                    reason=_reason, elapsed_s=_elapsed,
                 )
             else:
-                log(f"[{self.label}] Patch: no unit succeeded — streaming fallback")
-                return None, len(chunks)
+                if not self.last_patch_error:
+                    self.last_patch_error = "All rewrite units failed validation"
+                log(
+                    f"[{self.label}] Patch failed ({self.last_patch_error}) "
+                    f"— outcome=FAILED_ALL_UNITS elapsed={_elapsed:.2f}s"
+                )
+                return CorrectionResult(
+                    text=text, outcome=CorrectionOutcome.FAILED_ALL_UNITS,
+                    units_processed=len(chunks), units_corrected=0,
+                    reason=self.last_patch_error,
+                    elapsed_s=_elapsed,
+                )
 
         final = reassembled
-        if final != text:
+        changed = final != text
+        if changed:
             final = _apply_post_fixes(final, original=text, strength=strength)
 
         # Restore Windows/original newlines
@@ -1163,7 +1402,217 @@ class ModelManager(QObject):
 
         self.mark_used()
         self.status_changed.emit("Ready")
-        return final, len(chunks)
+
+        outcome = CorrectionOutcome.CORRECTED if changed else CorrectionOutcome.UNCHANGED_NO_ERRORS
+        if not changed and self.last_patch_error:
+            outcome = CorrectionOutcome.UNCHANGED_PROTECTED
+
+        log(
+            f"[{self.label}] Patch: outcome={outcome.value} "
+            f"units={len(chunks)} corrected={units_corrected} "
+            f"atoms={len(masked_entities)} elapsed={_elapsed:.2f}s"
+        )
+        return CorrectionResult(
+            text=final, outcome=outcome,
+            units_processed=len(chunks), units_corrected=units_corrected,
+            protected_atom_count=len(masked_entities),
+            reason=self.last_patch_error or "",
+            elapsed_s=_elapsed,
+        )
+
+    # ── span-only recovery ────────────────────────────────────────────────
+    def _correct_spans_around_atoms(
+        self,
+        masked_chunk: str,
+        chunk_entities: list[str],
+        custom_sys: str | None,
+        unit_idx: int,
+        total: int,
+        strength: str,
+        cancel_event: threading.Event | None = None,
+        mode_prompt_override: str | None = None,
+        session: requests.Session | None = None,
+        profile: CorrectionProfile | None = None,
+    ) -> str | None:
+        """Recovery path when protected-atom sentinel validation fails.
+
+        Instead of sending the whole chunk (with fragile sentinel aliases) to
+        the LLM, this method:
+
+        1. Splits *masked_chunk* into alternating editable/protected segments
+           using the sentinel regex and the explicit *chunk_entities* mapping.
+        2. Expands protected regions to cover complete Markdown link constructs
+           (``[text](SENTINEL)``) so the LLM never sees broken syntax.
+        3. Sends only the editable prose spans to the LLM with standard safety
+           guards (hallucination, refusal, corruption).
+        4. Reassembles with the original protected atoms verbatim.
+
+        Args:
+            masked_chunk: Chunk text with ``__STET_PROTECTED_N__`` sentinels.
+            chunk_entities: Original entities for the sentinels in this chunk,
+                indexed by sentinel position within the chunk (0-based).
+            All other args forwarded to _rewrite_sentence_chunk.
+
+        Returns the corrected chunk text, or None if recovery fails.
+        """
+        if not masked_chunk:
+            return None
+
+        sentinel_re = _INLINE_SENTINEL_RE
+        sentinels_in_chunk = sentinel_re.findall(masked_chunk)
+        if not sentinels_in_chunk or not chunk_entities:
+            return None
+
+        # Split masked chunk into editable parts (between sentinels).
+        editable_parts = sentinel_re.split(masked_chunk)
+
+        # Build segments: [(text, is_protected), ...]
+        # Use the explicit chunk_entities mapping — no find() needed.
+        segments: list[tuple[str, bool]] = []
+        for i, editable in enumerate(editable_parts):
+            if editable:
+                segments.append((editable, False))
+            if i < len(chunk_entities):
+                segments.append((chunk_entities[i], True))
+
+        if not segments:
+            return None
+
+        # ── Expand protected regions for Markdown link syntax ─────────
+        # If an editable segment ends with "[label](" and the next segment is
+        # protected, the link destination may or may not include the closing
+        # ")".  The URL hazard regex (_INLINE_HAZARD_RE) sometimes captures
+        # trailing ")" as part of the URL (e.g. Wikipedia links).  Handle
+        # both cases:
+        #   Case A: entity ends with ")" → merge [label]( + entity as one
+        #           protected region (link fully enclosed).
+        #   Case B: entity does NOT end with ")" → look for ")" in the next
+        #           editable segment and merge [label]( + entity + ")".
+        _MD_LINK_OPEN = re.compile(r'\[[^\]]*\]\(\s*$')
+        _MD_LINK_CLOSE = re.compile(r'^\s*\)')
+        merged: list[tuple[str, bool]] = []
+        i = 0
+        while i < len(segments):
+            text, is_prot = segments[i]
+            if (
+                not is_prot
+                and i + 1 < len(segments)
+                and segments[i + 1][1]  # next is protected
+                and _MD_LINK_OPEN.search(text)
+            ):
+                open_match = _MD_LINK_OPEN.search(text)
+                pre_link = text[:open_match.start()]
+                entity = segments[i + 1][0]
+
+                if entity.endswith(')'):
+                    # Case A: entity includes close paren → full link in entity.
+                    protected_region = text[open_match.start():] + entity
+                    if pre_link:
+                        merged.append((pre_link, False))
+                    merged.append((protected_region, True))
+                    i += 2
+                elif (
+                    i + 2 < len(segments)
+                    and not segments[i + 2][1]
+                    and _MD_LINK_CLOSE.search(segments[i + 2][0])
+                ):
+                    # Case B: close paren in next editable segment.
+                    link_suffix = segments[i + 2][0]
+                    close_match = _MD_LINK_CLOSE.search(link_suffix)
+                    post_link = link_suffix[close_match.end():]
+                    protected_region = (
+                        text[open_match.start():]
+                        + entity
+                        + link_suffix[: close_match.end()]
+                    )
+                    if pre_link:
+                        merged.append((pre_link, False))
+                    merged.append((protected_region, True))
+                    if post_link:
+                        merged.append((post_link, False))
+                    i += 3
+                else:
+                    merged.append((text, is_prot))
+                    i += 1
+            else:
+                merged.append((text, is_prot))
+                i += 1
+        segments = merged
+
+        # Extract only the editable spans for LLM correction.
+        editable_spans = [
+            (i, text)
+            for i, (text, is_prot) in enumerate(segments)
+            if not is_prot and text.strip()
+        ]
+        if not editable_spans:
+            return None
+
+        # Send each editable span to the LLM with standard safety guards.
+        corrected_segments = [text for text, _ in segments]
+        session = session or self._get_session()
+        profile = profile or PROFILES.get(strength, PROFILES["full_correction"])
+        threshold = profile.hallucination_threshold
+
+        for seg_idx, span_text in editable_spans:
+            if cancel_event is not None and cancel_event.is_set():
+                return None
+
+            corrected_span = self._rewrite_sentence_chunk(
+                span_text,
+                custom_sys,
+                unit_idx,
+                total,
+                strength,
+                cancel_event,
+                mode_prompt_override,
+                session,
+                profile,
+            )
+            if corrected_span is None:
+                # Span rewrite failed — keep original for this span.
+                continue
+
+            # ── Standard safety guards on the corrected span ──────────
+            # The span was sent without sentinels, so no sentinel check needed.
+            # But we still guard against hallucination, refusal, and corruption.
+
+            if _is_corrupt_output(corrected_span):
+                log(f"[{self.label}] span recovery unit {unit_idx}: corrupt output in span")
+                continue
+
+            if _is_fewshot_echo(corrected_span, span_text):
+                log(f"[{self.label}] span recovery unit {unit_idx}: few-shot echo in span")
+                continue
+
+            if _is_refusal_or_empty(corrected_span, span_text):
+                log(f"[{self.label}] span recovery unit {unit_idx}: refusal/empty in span")
+                continue
+
+            if _hallucination_ratio(span_text, corrected_span, strength) > threshold:
+                log(
+                    f"[{self.label}] span recovery unit {unit_idx}: "
+                    f"span diverged beyond threshold ({threshold})"
+                )
+                continue
+
+            if profile.hunk_guard_mode is not None:
+                from stet.core.text_utils import apply_hunk_guard
+                guarded = apply_hunk_guard(
+                    span_text, corrected_span, profile.hunk_guard_mode, threshold=threshold,
+                )
+                corrected_span = guarded
+
+            if not _post_splice_sanity(
+                span_text, corrected_span,
+                min_ratio=profile.min_word_ratio, max_ratio=profile.max_word_ratio,
+            ):
+                log(f"[{self.label}] span recovery unit {unit_idx}: post-splice sanity failed in span")
+                continue
+
+            corrected_segments[seg_idx] = corrected_span
+
+        return "".join(corrected_segments)
 
     def _rewrite_sentence_chunk(
         self,
@@ -1187,8 +1636,25 @@ class ModelManager(QObject):
         if not chunk_text.strip():
             return chunk_text
 
+        # ── Sentinel alias transformation ─────────────────────────────
+        # Replace __STET_PROTECTED_N__ with LLM-friendly [REFN] aliases
+        # before the model sees the text.  Short bracket-style references
+        # survive BPE tokenisation far better than double-underscore
+        # tokens that Gemma (and other small models) intermittently
+        # mangle, drop, or "helpfully" unmask.
+        _sentinel_indices = [
+            m.group(1)
+            for m in re.finditer(r"__STET_PROTECTED_(\d+)__", chunk_text)
+        ]
+        if _sentinel_indices:
+            llm_text = re.sub(
+                r"__STET_PROTECTED_(\d+)__", r"[REF\1]", chunk_text,
+            )
+        else:
+            llm_text = chunk_text
+
         messages = self._build_correction_messages(
-            chunk_text,
+            llm_text,
             custom_sys,
             strength,
             mode_prompt_override,
@@ -1201,7 +1667,7 @@ class ModelManager(QObject):
         est_input_tokens = _estimate_tokens(chunk_text)
         ctx = self._get_param("context_size", 12800)
         slot_limit = (self.actual_ctx_size or ctx) // self._get_param("parallel", 4)
-        max_tokens = min(int(est_input_tokens * 1.4) + 16, 2048)
+        max_tokens = min(max(int(est_input_tokens * 3.0) + 128, 512), 2048)
         # Prevent slot overflow by capping max_tokens to the remaining slot budget
         if est_input_tokens + max_tokens > slot_limit:
             max_tokens = max(128, slot_limit - est_input_tokens - 64)
@@ -1319,10 +1785,41 @@ class ModelManager(QObject):
             )
             return None
 
-        corrected = _extract_rewritten_sentence(raw)
+        corrected = _extract_rewritten_sentence(raw, original_text=chunk_text)
         if corrected is None:
             log(f"[{self.label}] no marker pair in rewrite unit {unit_idx}")
             return None
+
+        # ── Restore sentinel aliases ──────────────────────────────────
+        # Map [REFN] back to __STET_PROTECTED_N__ so the outer sentinel
+        # validation check sees canonical tokens.
+        if _sentinel_indices:
+            for _sidx in _sentinel_indices:
+                corrected = corrected.replace(
+                    f"[REF{_sidx}]", f"__STET_PROTECTED_{_sidx}__",
+                )
+            # Fuzzy recovery for mangled aliases (spaces, case, brackets)
+            for _sidx in _sentinel_indices:
+                _sentinel = f"__STET_PROTECTED_{_sidx}__"
+                if _sentinel in corrected:
+                    continue
+                for _var in (
+                    f"[REF {_sidx}]",
+                    f"[ref{_sidx}]",
+                    f"[Ref{_sidx}]",
+                    f"REF{_sidx}",
+                    f"[REF{_sidx}",
+                    f"REF{_sidx}]",
+                    f"[ REF{_sidx} ]",
+                    f"[REF {_sidx} ]",
+                ):
+                    if _var in corrected:
+                        corrected = corrected.replace(_var, _sentinel, 1)
+                        log(
+                            f"[{self.label}] Recovered mangled alias "
+                            f"{_var!r} -> {_sentinel}"
+                        )
+                        break
 
         # Guard against LLM-introduced extra newlines (common with small models
         # that insert blank lines between lines that were single-spaced).

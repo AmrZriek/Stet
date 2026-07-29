@@ -1,12 +1,12 @@
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPixmap, QPen
 
-from stet.constants import SCRIPT_DIR
 
 
 def make_tray_icon(color: str) -> QIcon:
-    logo_path = SCRIPT_DIR / "logo.png"
-    if logo_path.exists():
+    from stet.ui.utils import get_logo_path
+    logo_path = get_logo_path()
+    if logo_path and logo_path.exists():
         base = QPixmap(str(logo_path)).scaled(
             64,
             64,

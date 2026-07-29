@@ -1,77 +1,65 @@
 #!/usr/bin/env bash
-# build_mac.command — Automated macOS builder for non-technical users
-set -e
+# build_mac.command — native, signed, notarization-ready macOS release builder
+set -euo pipefail
 
-# Set working directory to the folder containing this script
 cd "$(dirname "$0")"
 
-clear
 echo "=================================================================="
-echo "          STET AUTOMATED MACOS RELEASE BUILDER                    "
+echo "             STET NATIVE MACOS RELEASE BUILDER                   "
 echo "=================================================================="
-echo "Hi! Thank you so much for helping me compile Stet for macOS!"
-echo "This script will handle all the setup and build steps automatically."
-echo ""
-echo "If macOS displays a popup asking to install:"
-echo "   'Command Line Developer Tools' or 'Xcode'"
-echo "Please click 'Install', wait for it to complete, and then"
-echo "re-run this script."
-echo "=================================================================="
+echo "This builds one native architecture per Mac: arm64 by default;"
+echo "x86_64 is CPU-only and must be built on an Intel Mac natively."
 echo ""
 
-# 1. Check for Python 3
-if ! command -v python3 &>/dev/null; then
-    echo "Python 3 is not installed."
-    echo "Attempting to trigger the macOS developer tools installer..."
-    echo "Please click 'Install' on the popup window that appears."
-    python3 --version || true
-    echo ""
-    echo "After the installation finishes, please run this script again!"
-    echo "Press Enter to exit..."
-    read
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "Python 3 is not installed. Install it, then run this script again."
+    exit 1
+fi
+if ! command -v sips >/dev/null 2>&1; then
+    echo "The macOS system image tool 'sips' is unavailable. Reinstall Command Line Tools, then retry."
     exit 1
 fi
 
-echo "==> Python 3 detected."
-echo "==> Creating temporary setup environment (this takes a moment)..."
-
-# 2. Set up virtual environment and install dependencies
+echo "==> Creating/refreshing the local Python build environment..."
 python3 -m venv venv
+# shellcheck disable=SC1091
 source venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 
-echo "==> Installing compilation libraries..."
-pip install --upgrade pip
-pip install -r requirements.txt
-pip install nuitka
+ARCH="${STET_MACOS_ARCH:-auto}"
+ARGS=(--macos-arch "$ARCH")
 
-# 3. Execute the build
-echo "==> Compiling Stet into a native Mac application..."
-python3 build.py
-
-# 4. Locate and present the final ZIP
-echo ""
-echo "=================================================================="
-echo "                    BUILD COMPLETE!                               "
-echo "=================================================================="
-
-ZIP_FILE=$(find dist -maxdepth 1 -name "stet_portable.zip" | head -n 1)
-
-if [ -n "$ZIP_FILE" ]; then
-    # Copy the zip next to the script and rename to Stet_macOS.zip for clarity
-    cp "$ZIP_FILE" ./Stet_macOS.zip
-    FINAL_ZIP="Stet_macOS.zip"
-    echo "Success! You are amazing!"
-    echo "Please email/send me this file:"
-    echo "    $FINAL_ZIP"
-    echo "which has been created right next to this script!"
-    echo "=================================================================="
-    # Open Finder showing the file
-    open -R "$FINAL_ZIP"
+if [[ -n "${STET_MACOS_SIGN_IDENTITY:-}" ]]; then
+    ARGS+=(--sign-identity "$STET_MACOS_SIGN_IDENTITY")
 else
-    echo "The build finished, but we couldn't find stet_portable.zip in dist/."
-    echo "Please check if there were errors above."
-    echo "=================================================================="
+    echo "==> No signing identity supplied; local output will be ad-hoc signed."
+    echo "    For distribution, set STET_MACOS_SIGN_IDENTITY to a Developer ID identity."
 fi
 
-echo "Press Enter to close this window..."
-read
+if [[ -n "${STET_MACOS_BACKEND:-}" ]]; then
+    echo "==> Using native llama-server: $STET_MACOS_BACKEND"
+else
+    echo "==> Searching for an executable native llama-server..."
+    echo "    Set STET_MACOS_BACKEND explicitly if it is outside the project."
+fi
+VERSION="${STET_VERSION:-$(python -c 'from build import _get_version; print(_get_version())')}"
+ARGS+=(--version "$VERSION")
+
+if [[ "${STET_MACOS_NOTARIZE:-0}" == "1" ]]; then
+    ARGS+=(--notarize)
+fi
+
+echo "==> Building Stet.app and architecture-specific ZIP/DMG..."
+echo "    The app icon is generated as Stet.icns with macOS system tools; Pillow is not required."
+python build.py "${ARGS[@]}"
+
+echo ""
+echo "=================================================================="
+echo "                    BUILD COMPLETE                               "
+echo "=================================================================="
+find dist -maxdepth 1 -type f \( -name "Stet-*-macos-*.zip" -o -name "Stet-*-macos-*.dmg" -o -name "SHA256SUMS.txt" \) -print | sort
+
+if [[ "${STET_OPEN_ARTIFACTS:-0}" == "1" ]]; then
+    open -R "$(find dist -maxdepth 1 -type f -name "Stet-*-macos-*.dmg" | sort | tail -n 1)"
+fi

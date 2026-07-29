@@ -10,8 +10,10 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTabWidget,
     QTextEdit,
@@ -20,6 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from stet.ui.utils import no_scroll
+from stet.constants import MACOS
 
 
 class ClickableLabel(QLabel):
@@ -33,6 +36,36 @@ class ClickableLabel(QLabel):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
+
+
+class CollapsibleSection(QWidget):
+    """A subtitle header with a toggle that shows/hides its content.
+    Collapsed by default. Expansion state is session-only.
+    """
+
+    def __init__(self, title: str, content: QWidget, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(8)
+        self._arrow = ClickableLabel("\u25b8  " + title)
+        self._arrow.setObjectName("pageSubtitle")
+        self._content = content
+        self._content.setVisible(False)
+        self._arrow.clicked.connect(self._toggle)
+        lay.addWidget(self._arrow)
+        lay.addWidget(self._content)
+
+    def _toggle(self):
+        visible = not self._content.isVisible()
+        self._content.setVisible(visible)
+        title = self._arrow.text().split("  ", 1)[-1]
+        self._arrow.setText(("\u25be  " if visible else "\u25b8  ") + title)
+
+    def set_expanded(self, expanded: bool):
+        self._content.setVisible(expanded)
+        title = self._arrow.text().split("  ", 1)[-1]
+        self._arrow.setText(("\u25be  " if expanded else "\u25b8  ") + title)
 
 
 def make_scrollable_page(title_str, page, add_to_stack=True):
@@ -52,7 +85,6 @@ def make_scrollable_page(title_str, page, add_to_stack=True):
     inner = QWidget()
     inner.setMinimumWidth(0)
     form = QVBoxLayout(inner)
-    form.setAlignment(Qt.AlignmentFlag.AlignTop)
     form.setContentsMargins(0, 0, 32, 0)
     form.setSpacing(16)
 
@@ -86,8 +118,8 @@ class ServerPage(QWidget):
         btn_s.clicked.connect(
             lambda: self.dialog._browse_file(
                 self.dialog.server_edit,
-                "Select llama-server",
-                "Executable (llama-server*);;All (*)",
+                "Select Stet backend server",
+                "Backend server (llama-server*);;All files (*)",
             )
         )
 
@@ -97,7 +129,23 @@ class ServerPage(QWidget):
         srv_row.addWidget(btn_s)
         srv_w = QWidget()
         srv_w.setLayout(srv_row)
-        form.addLayout(self.dialog._field_group("Server Binary Path", srv_w))
+
+        srv_desc = QLabel(
+            "This is the local AI engine that powers Stet. It is installed automatically. "
+            "Only change this if you moved the Stet files to a different folder."
+        )
+        srv_desc.setStyleSheet("color:#88898c; font-size:11px;")
+        srv_desc.setWordWrap(True)
+
+        srv_container = QVBoxLayout()
+        srv_container.setContentsMargins(0, 0, 0, 0)
+        srv_container.setSpacing(4)
+        srv_container.addWidget(srv_w)
+        srv_container.addWidget(srv_desc)
+        srv_group_w = QWidget()
+        srv_group_w.setLayout(srv_container)
+
+        form.addLayout(self.dialog._field_group("Server Binary Path", srv_group_w))
 
         self.dialog.model_edit = QLineEdit()
         self.dialog.model_edit.setReadOnly(True)
@@ -116,7 +164,23 @@ class ServerPage(QWidget):
         mod_row.addWidget(btn_m)
         mod_w = QWidget()
         mod_w.setLayout(mod_row)
-        form.addLayout(self.dialog._field_group("Model Weights (.gguf)", mod_w))
+
+        model_desc = QLabel(
+            "Stet requires a local GGUF model file. Google Gemma 4 is strongly recommended "
+            "as the minimum working model size for reliable prompt adherence — smaller models "
+            "will experience prompt adherence issues."
+        )
+        model_desc.setStyleSheet("color:#88898c; font-size:11px;")
+        model_desc.setWordWrap(True)
+
+        mod_container = QVBoxLayout()
+        mod_container.setContentsMargins(0, 0, 0, 0)
+        mod_container.setSpacing(4)
+        mod_container.addWidget(mod_w)
+        mod_container.addWidget(model_desc)
+        mod_group_w = QWidget()
+        mod_group_w.setLayout(mod_container)
+        form.addLayout(self.dialog._field_group("Model Weights (.gguf)", mod_group_w))
 
         self.dialog.recent_combo = QComboBox()
         self.dialog.recent_combo.setSizeAdjustPolicy(
@@ -134,6 +198,23 @@ class ServerPage(QWidget):
         self.dialog.port_spin.setRange(1024, 65535)
         self.dialog.port_spin.setFixedWidth(100)
         form.addLayout(self.dialog._field_group("Port", self.dialog.port_spin))
+
+        if MACOS:
+            self.dialog.backend_mode_combo = no_scroll(QComboBox())
+            self.dialog.backend_mode_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.dialog.backend_mode_combo.addItem("Automatic (recommended)", "auto")
+            self.dialog.backend_mode_combo.addItem("Metal acceleration", "metal")
+            self.dialog.backend_mode_combo.addItem("CPU only", "cpu")
+            form.addLayout(
+                self.dialog._field_group(
+                    "Mac inference backend",
+                    self.dialog.backend_mode_combo,
+                    "Automatic uses Metal on Apple Silicon and CPU on Intel Macs. "
+                    "Choose CPU only to troubleshoot a Metal driver or memory issue.",
+                )
+            )
 
         sep_updates = QFrame()
         sep_updates.setObjectName("sep")
@@ -196,17 +277,27 @@ class ServerPage(QWidget):
 
 def _apply_tooltips(dialog, prefix: str = ""):
     tooltips = {
-        "temp_spin": "Higher = more creative, lower = more precise",
-        "topk_spin": "Limits choices to the K most likely next words",
-        "topp_spin": "Only considers words whose probabilities sum to this value",
-        "minp_spin": "Filters out words less likely than this threshold",
-        "tfs_z_spin": "Tail Free Sampling \u2014 reduces unlikely word choices",
-        "mirostat_spin": "Dynamic sampling that targets a specific surprise level",
-        "mtp_cb": "Multi-Token Prediction \u2014 generates multiple tokens at once for speed",
-        "gpu_spin": "How many model layers run on GPU (more = faster, uses more VRAM)",
-        "ctx_spin": "How much text the model can 'see' at once (in tokens)",
-        "flash_attn_cb": "Faster attention computation \u2014 requires GPU support",
-        "batch_spin": "How many tokens are processed together (higher = faster, more RAM)",
+        "temp_spin": "Higher = more creative, lower = more precise. Default: 0.0 (deterministic). Only change for chat mode.",
+        "topk_spin": "Limits choices to the K most likely next words. Default: 1. Most users should leave this.",
+        "topp_spin": "Only considers words whose probabilities sum to this value. Default: 0.95. Most users should leave this.",
+        "minp_spin": "Filters out words less likely than this threshold. Default: 0.0. Most users should leave this.",
+        "typical_p_spin": "Typical P sampling. Default: 1.0. Most users should leave this.",
+        "tfs_z_spin": "Tail Free Sampling — reduces unlikely word choices. Default: 1.0. Most users should leave this.",
+        "mirostat_spin": "Dynamic sampling targeting surprise level. Default: 0 (disabled). Advanced sampling.",
+        "mirostat_tau_spin": "Mirostat target entropy (tau). Default: 5.0. Only relevant when Mirostat is enabled.",
+        "mirostat_eta_spin": "Mirostat learning rate (eta). Default: 0.1. Only relevant when Mirostat is enabled.",
+        "repeat_penalty_spin": "Penalty for repeating words. Default: 1.0. Increase to reduce word repetition.",
+        "freq_penalty_spin": "Frequency penalty. Default: 0.0. Positive values penalize frequent tokens.",
+        "pres_penalty_spin": "Presence penalty. Default: 0.0. Positive values encourage new topics.",
+        "mtp_cb": "Multi-Token Prediction — generates multiple tokens at once for speed. Default: off.",
+        "gpu_spin": "How many model layers run on GPU (more = faster, uses more VRAM). Default: Auto/Max.",
+        "ctx_spin": "How much text the model can 'see' at once (in tokens). Default: 4096.",
+        "parallel_spin": "Parallel request slots. Default: 4. Process more text at once.",
+        "flash_attn_cb": "Faster attention computation — requires GPU support. Default: on (when GPU available).",
+        "batch_spin": "How many tokens are processed together. Default: 512.",
+        "rope_base_spin": "RoPE base frequency. Default: Auto (0.0). Only change for specific models.",
+        "rope_scale_spin": "RoPE scale factor. Default: Auto (0.0). Only change for specific models.",
+        "seed_spin": "Random seed. Default: -1 (random). Set to a fixed number for reproducible results.",
     }
     for key, text in tooltips.items():
         widget = getattr(dialog, f"{prefix}{key}", None)
@@ -313,12 +404,7 @@ class ParametersPage(QWidget):
         arch_grid.setVerticalSpacing(12)
 
         arch_grid.addWidget(_grid_cell("Context size", self.dialog.ctx_spin), 0, 0)
-        arch_grid.addWidget(_grid_cell("RoPE Base", self.dialog.rope_base_spin), 0, 1)
-        arch_grid.addWidget(_grid_cell("RoPE Scale", self.dialog.rope_scale_spin), 0, 2)
         arch_grid.addWidget(self.dialog.flash_attn_cb, 1, 0)
-        arch_grid.addWidget(self.dialog.mtp_cb, 1, 1, 1, 2)
-        arch_grid.addWidget(self.dialog.mtp_max_cell, 2, 0)
-        arch_grid.addWidget(self.dialog.mtp_min_cell, 2, 1)
 
         form.addWidget(arch_grid_w)
         
@@ -495,6 +581,24 @@ class ParametersPage(QWidget):
         
         _apply_tooltips(self.dialog, "")
         
+        # Advanced: RoPE + MTP (collapsed by default)
+        sep_adv = QFrame()
+        sep_adv.setObjectName("sep")
+        sep_adv.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_adv)
+
+        adv_content = QWidget()
+        adv_grid = QGridLayout(adv_content)
+        adv_grid.setContentsMargins(0, 0, 0, 0)
+        adv_grid.setHorizontalSpacing(24)
+        adv_grid.setVerticalSpacing(12)
+        adv_grid.addWidget(_grid_cell("RoPE Base", self.dialog.rope_base_spin), 0, 0)
+        adv_grid.addWidget(_grid_cell("RoPE Scale", self.dialog.rope_scale_spin), 0, 1)
+        adv_grid.addWidget(self.dialog.mtp_cb, 1, 0, 1, 2)
+        adv_grid.addWidget(self.dialog.mtp_max_cell, 2, 0)
+        adv_grid.addWidget(self.dialog.mtp_min_cell, 2, 1)
+        form.addWidget(CollapsibleSection("Advanced", adv_content))
+
         form.addStretch()
 
         # Chat Parameters tab
@@ -543,6 +647,7 @@ class ProfilesPage(QWidget):
         form.addWidget(sep_hk)
 
         self.dialog.hotkeys_list_w = QListWidget()
+        self.dialog.hotkeys_list_w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.dialog.hotkeys_list_w.setObjectName("optionList")
         self.dialog.hotkeys_list_w.setSelectionMode(
             QListWidget.SelectionMode.SingleSelection
@@ -569,15 +674,17 @@ class TemplatesPage(QWidget):
     def _build_ui(self):
         form = make_scrollable_page("Templates & Profile", self)
 
+        # 1. Correction Settings section
         sub1 = QLabel("Correction Settings")
         sub1.setObjectName("pageSubtitle")
         form.addWidget(sub1)
 
         self.dialog.sysprompt_edit = QTextEdit()
+        self.dialog.sysprompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.dialog.sysprompt_edit.setPlaceholderText(
             "Leave blank to use the built-in correction prompt."
         )
-        self.dialog.sysprompt_edit.setFixedHeight(140)
+        self.dialog.sysprompt_edit.setMinimumHeight(120)
         self.dialog.sysprompt_edit.setObjectName("settingsPrompt")
         form.addLayout(
             self.dialog._field_group(
@@ -608,6 +715,7 @@ class TemplatesPage(QWidget):
         sep_sections.setFrameShape(QFrame.Shape.HLine)
         form.addWidget(sep_sections)
 
+        # 2. Model & Templates section
         sub2 = QLabel("Model & Templates")
         sub2.setObjectName("pageSubtitle")
         form.addWidget(sub2)
@@ -709,7 +817,108 @@ class TemplatesPage(QWidget):
         buttons_widget.setLayout(buttons_layout)
         form.addWidget(buttons_widget)
 
+        # 3. WRITE LIKE YOU section at the very bottom
+        sep_write = QFrame()
+        sep_write.setObjectName("sep")
+        sep_write.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_write)
+
+        sub_write = QLabel("Write Like You")
+        sub_write.setObjectName("pageSubtitle")
+        form.addWidget(sub_write)
+
+        g_body = QLabel(
+            "Stet can mirror your personal style without model fine-tuning. "
+            "Paste 2–3 short samples of text you've written below, then click Create Style Template."
+        )
+        g_body.setWordWrap(True)
+        g_body.setObjectName("settingsDescription")
+        form.addWidget(g_body)
+
+        self.sample1_edit = QPlainTextEdit()
+        self.sample1_edit.setMinimumHeight(40)
+        self.sample1_edit.setPlaceholderText(
+            "Sample 1: e.g. Hi team, quick update on the project status from yesterday..."
+        )
+        form.addWidget(self.sample1_edit)
+
+        self.sample2_edit = QPlainTextEdit()
+        self.sample2_edit.setMinimumHeight(40)
+        self.sample2_edit.setPlaceholderText(
+            "Sample 2: e.g. I looked into the issue and it turned out to be a race condition..."
+        )
+        form.addWidget(self.sample2_edit)
+
+        self.sample3_edit = QPlainTextEdit()
+        self.sample3_edit.setMinimumHeight(40)
+        self.sample3_edit.setPlaceholderText(
+            "Sample 3 (optional): e.g. Sounds great, let's schedule a call tomorrow afternoon."
+        )
+        form.addWidget(self.sample3_edit)
+
+        self.style_status_lbl = QLabel("")
+        self.style_status_lbl.setWordWrap(True)
+        form.addWidget(self.style_status_lbl)
+
+        btn_create = QPushButton("Create Style Template")
+        btn_create.setObjectName("primary")
+        btn_create.clicked.connect(self._create_style_template)
+        form.addWidget(btn_create)
+
         form.addStretch()
+
+    def _create_style_template(self):
+        """Build and select a customized style-mirroring template from user samples."""
+        s1 = self.sample1_edit.toPlainText().strip()
+        s2 = self.sample2_edit.toPlainText().strip()
+        s3 = self.sample3_edit.toPlainText().strip()
+
+        samples = [s for s in (s1, s2, s3) if s]
+
+        if not samples:
+            # Fallback if user clicked without typing: provide default placeholders
+            samples = [
+                "[paste a short paragraph you wrote]",
+                "[paste another paragraph]",
+            ]
+            self.style_status_lbl.setText("Inserted default style template. Add your writing samples in the editor below!")
+            self.style_status_lbl.setStyleSheet("QLabel{color:#d4a373;font-size:11px;font-weight:600;}")
+        else:
+            self.style_status_lbl.setText("✓ 'My Style' template created and selected in list below!")
+            self.style_status_lbl.setStyleSheet("QLabel{color:#4ade80;font-size:11px;font-weight:600;}")
+
+        sample_lines = "\n".join(f"{i+1}. {s}" for i, s in enumerate(samples))
+        prompt_text = (
+            "Rewrite the text to match my personal writing style.\n\n"
+            "RULES: Preserve every fact, name, and number. Match the tone, "
+            "sentence rhythm, and vocabulary of my samples below. Do not add "
+            "or remove ideas.\n\n"
+            f"MY STYLE SAMPLES:\n{sample_lines}"
+        )
+
+        existing_idx = -1
+        for idx, t in enumerate(self.dialog._temp_templates):
+            if t.get("name") == "My Style":
+                existing_idx = idx
+                break
+
+        if existing_idx >= 0:
+            self.dialog._temp_templates[existing_idx]["prompt"] = prompt_text
+            target_idx = existing_idx
+        else:
+            self.dialog._temp_templates.append({"name": "My Style", "prompt": prompt_text})
+            target_idx = len(self.dialog._temp_templates) - 1
+
+        self.dialog._refresh_settings_templates()
+        if hasattr(self.dialog, "templates_list_w") and self.dialog.templates_list_w.count() > target_idx:
+            self.dialog.templates_list_w.setCurrentRow(target_idx)
+            item = self.dialog.templates_list_w.item(target_idx)
+            if item:
+                self.dialog.templates_list_w.scrollToItem(item)
+
+    def _insert_style_template(self):
+        """Backward-compatible alias for _create_style_template."""
+        self._create_style_template()
 
 
 class CorrectionModesPage(QWidget):
@@ -752,7 +961,8 @@ class CorrectionModesPage(QWidget):
 
             prompt_edit = QTextEdit()
             prompt_edit.setObjectName("settingsPrompt")
-            prompt_edit.setFixedHeight(140)
+            prompt_edit.setMinimumHeight(120)
+            prompt_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
             self._form.addWidget(prompt_edit)
             self.dialog._mode_prompt_edits.append(prompt_edit)
 
@@ -869,7 +1079,7 @@ class CorrectionModesPage(QWidget):
 
         prompt_edit = QTextEdit()
         prompt_edit.setObjectName("settingsPrompt")
-        prompt_edit.setFixedHeight(140)
+        prompt_edit.setMinimumHeight(120)
         prompt_edit.setPlainText(prompt)
         prompt_edit.textChanged.connect(
             lambda gidx=global_idx: self._update_preview(gidx)
@@ -899,7 +1109,7 @@ class CorrectionModesPage(QWidget):
         preview_edit = QTextEdit()
         preview_edit.setObjectName("settingsPromptPreview")
         preview_edit.setReadOnly(True)
-        preview_edit.setFixedHeight(140)
+        preview_edit.setMinimumHeight(120)
         preview_edit.hide()
         container_lay.addWidget(preview_edit)
 
@@ -1062,12 +1272,7 @@ class ChatParametersPage(QWidget):
         arch_grid.setVerticalSpacing(12)
 
         arch_grid.addWidget(_grid_cell("Context size", self.dialog.chat_ctx_spin), 0, 0)
-        arch_grid.addWidget(_grid_cell("RoPE Base", self.dialog.chat_rope_base_spin), 0, 1)
-        arch_grid.addWidget(_grid_cell("RoPE Scale", self.dialog.chat_rope_scale_spin), 0, 2)
         arch_grid.addWidget(self.dialog.chat_flash_attn_cb, 1, 0)
-        arch_grid.addWidget(self.dialog.chat_mtp_cb, 1, 1, 1, 2)
-        arch_grid.addWidget(self.dialog.chat_mtp_max_cell, 2, 0)
-        arch_grid.addWidget(self.dialog.chat_mtp_min_cell, 2, 1)
 
         form.addWidget(arch_grid_w)
         
@@ -1230,6 +1435,61 @@ class ChatParametersPage(QWidget):
         form.addWidget(hw_grid_w)
         
         _apply_tooltips(self.dialog, "chat_")
-        
+
+        # Advanced: RoPE + MTP (collapsed by default)
+        sep_adv = QFrame()
+        sep_adv.setObjectName("sep")
+        sep_adv.setFrameShape(QFrame.Shape.HLine)
+        form.addWidget(sep_adv)
+
+        adv_content = QWidget()
+        adv_grid = QGridLayout(adv_content)
+        adv_grid.setContentsMargins(0, 0, 0, 0)
+        adv_grid.setHorizontalSpacing(24)
+        adv_grid.setVerticalSpacing(12)
+        adv_grid.addWidget(_grid_cell("RoPE Base", self.dialog.chat_rope_base_spin), 0, 0)
+        adv_grid.addWidget(_grid_cell("RoPE Scale", self.dialog.chat_rope_scale_spin), 0, 1)
+        adv_grid.addWidget(self.dialog.chat_mtp_cb, 1, 0, 1, 2)
+        adv_grid.addWidget(self.dialog.chat_mtp_max_cell, 2, 0)
+        adv_grid.addWidget(self.dialog.chat_mtp_min_cell, 2, 1)
+        form.addWidget(CollapsibleSection("Advanced", adv_content))
+
+        form.addStretch()
+
+
+class ProtectedTermsPage(QWidget):
+    def __init__(self, dialog):
+        super().__init__(dialog)
+        self.dialog = dialog
+        self._build_ui()
+
+    def _build_ui(self):
+        form = make_scrollable_page("Protected Terms", self)
+
+        explain = QLabel(
+            "Terms listed here are hidden from the AI model behind placeholders "
+            "and restored verbatim in the output — exactly like URLs and file paths. "
+            "Use this for names, brand spellings, and jargon the model keeps "
+            "\"correcting\". One term or phrase per line. Case-insensitive; "
+            "whole words only."
+        )
+        explain.setWordWrap(True)
+        explain.setStyleSheet(
+            "QLabel{color:#88898c;font-size:11px;"
+            "font-family:'IBM Plex Mono','Consolas',monospace;}"
+        )
+        form.addWidget(explain)
+
+        self.dialog.protected_terms_edit = QPlainTextEdit()
+        self.dialog.protected_terms_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.dialog.protected_terms_edit.setPlaceholderText(
+            "Stet\nYourCompanyName\nMegaCorp Inc.\nC++"
+        )
+        self.dialog.protected_terms_edit.setStyleSheet(
+            "QPlainTextEdit{background:#1a1b1e;border:1px solid #28292c;color:#ddddde;"
+            "font-size:12px;font-family:'IBM Plex Mono','Consolas',monospace;}"
+        )
+        form.addWidget(self.dialog.protected_terms_edit)
+
         form.addStretch()
 

@@ -51,7 +51,7 @@ from PyQt6.QtWidgets import (
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 ZIP_NAME = "stet_portable.zip"
-DEFAULT_INSTALL_DIR = os.path.expandvars(r"%LOCALAPPDATA%\Stet")
+DEFAULT_INSTALL_DIR = os.path.expandvars(r"%ProgramFiles%\Stet")
 CREATE_NO_WINDOW = 0x08000000
 
 # SHBrowseForFolder flags
@@ -84,14 +84,18 @@ def _find_zip_path() -> Path | None:
 
     Search order:
       1. Nuitka onefile temp folder (if zip was embedded)
-      2. Same directory as the installer exe
-      3. Current working directory
+      2. PyInstaller _MEIPASS folder (if zip was embedded in PyInstaller bundle)
+      3. Same directory as the installer exe
+      4. Current working directory
     For each directory, try the canonical name first, then any Stet*.zip.
     """
     candidate_dirs: list[Path] = []
     onefile_temp = os.environ.get("_NUITKA_ONEFILE_TEMP")
     if onefile_temp:
         candidate_dirs.append(Path(onefile_temp))
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate_dirs.append(Path(meipass))
     try:
         candidate_dirs.append(Path(sys.argv[0]).resolve().parent)
     except Exception:
@@ -132,7 +136,7 @@ def _safe_extract(
         if stat.S_ISLNK(mode):
             raise RuntimeError(f"Refusing symlink in ZIP: {member.filename}")
         target = (dest / member.filename).resolve()
-        if dest not in target.parents:
+        if dest not in target.parents and target != dest:
             raise RuntimeError(f"Unsafe path in ZIP: {member.filename}")
     zip_ref.extractall(dest, members=members)
 
@@ -627,23 +631,9 @@ class CompletionPage(QWizardPage):
         options_layout.addWidget(sep)
         options_layout.addSpacing(4)
 
-        self._download_backend_cb = QCheckBox(
-            "&Download llama.cpp Backend & CUDA Runtime (~652 MB)\n"
-            "Required for local model execution."
-        )
-        self._download_backend_cb.setChecked(True)
-        options_layout.addWidget(self._download_backend_cb)
-
-        options_layout.addSpacing(4)
-        sep_dl = QFrame()
-        sep_dl.setFrameShape(QFrame.Shape.HLine)
-        sep_dl.setFrameShadow(QFrame.Shadow.Sunken)
-        options_layout.addWidget(sep_dl)
-        options_layout.addSpacing(4)
-
         self._download_model_cb = QCheckBox(
-            "&Download the recommended AI model (~1.8 GB)\n"
-            "Required for grammar and spelling correction."
+            "&Download Google Gemma 4 model (recommended, ~1.8 GB)\n"
+            "Minimum working model size for reliable prompt adherence."
         )
         self._download_model_cb.setChecked(True)
         options_layout.addWidget(self._download_model_cb)
@@ -676,7 +666,7 @@ class CompletionPage(QWizardPage):
 
     @property
     def download_backend(self) -> bool:
-        return self._download_backend_cb.isChecked()
+        return True
 
     @property
     def download_model(self) -> bool:
@@ -704,10 +694,15 @@ class StetInstaller(QWizard):
         # Window icon
         _set_window_icon(self)
 
-        # Logo pixmap (shown on the right side of each page in ModernStyle)
+        # Logo pixmap (shown in upper right header of wizard pages)
         logo_pix = _load_logo_pixmap()
         if logo_pix:
-            self.setPixmap(QWizard.WizardPixmap.LogoPixmap, logo_pix)
+            scaled_logo = logo_pix.scaled(
+                48, 48,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self.setPixmap(QWizard.WizardPixmap.LogoPixmap, scaled_logo)
 
         # Options
         self.setOption(QWizard.WizardOption.NoBackButtonOnStartPage, True)
@@ -868,6 +863,7 @@ class StetInstaller(QWizard):
             try:
                 from stet.ui.downloader import DownloadProgressDialog
                 dialog = DownloadProgressDialog(downloads, parent=self)
+                _set_window_icon(dialog)
                 dialog.exec()
 
                 if self._completion_page.download_backend:
@@ -919,6 +915,9 @@ def _load_logo_pixmap() -> QPixmap | None:
 
 def _asset_search_dirs() -> list[Path]:
     dirs: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        dirs.append(Path(meipass))
     onefile_temp = os.environ.get("_NUITKA_ONEFILE_TEMP")
     if onefile_temp:
         dirs.append(Path(onefile_temp))

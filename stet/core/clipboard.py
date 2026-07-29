@@ -362,11 +362,12 @@ def _read_selection_uia() -> str | None:
             return None
 
         # 7. Get text from range
+        MAX_TEXT_LENGTH = 50000
         hr = call_com_method(
             p_range.value,
             12,  # GetText
             [ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(BSTR)],
-            -1,
+            MAX_TEXT_LENGTH,
             ctypes.pointer(bstr),
         )
         if hr >= 0 and bstr.value:

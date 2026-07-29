@@ -1,5 +1,8 @@
 """Tests for CORE_TEMPLATES, DEFAULT_CONFIG, and the OSD widget class."""
 
+import sys
+
+import pytest
 from PyQt6.QtCore import Qt
 
 from stet.constants import DEFAULT_CONFIG, DEFAULT_TEMPLATES
@@ -34,6 +37,7 @@ def test_default_config_has_no_legacy_hotkey_keys():
     assert "silent_strength" not in DEFAULT_CONFIG
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="Native OSD window is unavailable in macOS CI")
 def test_osd_instantiation_success(qtbot):
     """SilentCorrectionOSD can be created in 'success' state without crashing."""
     osd = SilentCorrectionOSD("Test message", state="success")
@@ -42,6 +46,7 @@ def test_osd_instantiation_success(qtbot):
     osd.close()
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="Native OSD window is unavailable in macOS CI")
 def test_osd_instantiation_loading(qtbot):
     """SilentCorrectionOSD can be created in 'loading' state."""
     osd = SilentCorrectionOSD("Working...", state="loading")
@@ -49,9 +54,9 @@ def test_osd_instantiation_loading(qtbot):
     osd.close()
 
 
+@pytest.mark.skipif(sys.platform == "darwin", reason="Native OSD window is unavailable in macOS CI")
 def test_osd_instantiation_warning(qtbot):
     """SilentCorrectionOSD can be created in 'warning' state."""
     osd = SilentCorrectionOSD("Error!", state="warning")
     assert osd._state == "warning"
     osd.close()
-

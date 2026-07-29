@@ -32,11 +32,18 @@ GEMINI.md
 .claude/worktrees/
 
 # Model files — too large for git
+/.stet-runtime/
+/Models/
+/backends/
+/downloads/
+/logs/
+/config.json
 llama_cpp/
 llama-*/
 *.gguf
 *.onnx
 *.safetensors
+
 
 # Build artifacts
 build/
@@ -52,6 +59,7 @@ out/
 # Tests — centralized cache dir (pytest.ini sets cache_dir = .pytest_cache)
 .pytest
 .pytest_cache/
+tests/.artifacts/
 tests/temp_e2e_launch/
 scripts/ci_checks/temp_e2e_launch/
 
@@ -65,4 +73,6 @@ scripts/ci_checks/temp_e2e_launch/
 docs/
 *.md
 !README.md
-marketing/
+!docs/platforms/
+!docs/platforms/macos.md
+marketing/

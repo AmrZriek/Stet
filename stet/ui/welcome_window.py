@@ -2,8 +2,13 @@ import difflib
 import html as _html
 import tempfile
 import threading
+import sys
+import ctypes
+if sys.platform == "win32":
+    import ctypes.wintypes
 from pathlib import Path
 
+from PyQt6 import sip
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, pyqtSignal, QSize
 from PyQt6.QtGui import QCursor, QIcon, QPixmap
 from PyQt6.QtWidgets import (
@@ -114,6 +119,7 @@ class WelcomeWindow(QWidget):
 
     settings_requested = pyqtSignal()
     correction_requested = pyqtSignal(str, str, str)  # (text, strength, template_name)
+    startup_toggled = pyqtSignal(bool)
     closed_signal = pyqtSignal()
 
     # Chat streaming signals
@@ -153,19 +159,21 @@ class WelcomeWindow(QWidget):
         # 4. Connect Signals and Check Model
         self._connect_signals()
         self._update_correct_button_state()
+        self._info_timer = QTimer(self)
+        self._info_timer.setSingleShot(True)
+        self._info_timer.timeout.connect(self._update_infographic)
+        self._ui_built = True
 
     def _position_window(self):
         self.setWindowFlags(
             Qt.WindowType.Window
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.FramelessWindowHint
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         # Set logo icon
-        logo_path = Path(__file__).parents[2] / "logo.png"
-        if logo_path.exists():
-            self.setWindowIcon(QIcon(str(logo_path)))
+        from stet.ui.utils import set_window_icon
+        set_window_icon(self)
 
         screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         sr = screen.availableGeometry() if screen else None
@@ -426,9 +434,13 @@ class WelcomeWindow(QWidget):
         chat_lbl.setStyleSheet("color:#88898c; font-size:11px;")
         self._chat_combo = QComboBox()
         self._chat_combo.setObjectName("welcomeChatCombo")
-        self._chat_combo.addItems(["Fresh", "Conversation"])
-        self._chat_combo.setCurrentText("Fresh")
-        self._chat_combo.setFixedWidth(120)
+        self._chat_combo.addItems(["Single Message", "Multi-turn Chat"])
+        self._chat_combo.setCurrentText("Single Message")
+        self._chat_combo.setToolTip(
+            "Single Message: Each prompt starts fresh with no conversation memory.\n"
+            "Multi-turn Chat: The AI remembers previous messages during this chat session."
+        )
+        self._chat_combo.setFixedWidth(160)
         chat_layout.addWidget(chat_lbl)
         chat_layout.addWidget(self._chat_combo)
         action_row.addLayout(chat_layout)
@@ -473,6 +485,8 @@ class WelcomeWindow(QWidget):
         self._result_output.setMinimumHeight(80)
         self._result_output.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self._result_output.setAcceptRichText(True)
+        self._result_output.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._result_output.customContextMenuRequested.connect(self._show_result_context_menu)
         rp_lay.addWidget(self._result_output)
 
         scroll_lay.addWidget(self._unified_output)
@@ -743,7 +757,7 @@ class WelcomeWindow(QWidget):
         self._output_title.setText("CHAT")
         self._unified_output.show()
 
-        conversation_mode = self._chat_combo.currentText() == "Conversation"
+        conversation_mode = self._chat_combo.currentText() == "Multi-turn Chat"
         if not conversation_mode:
             self._chat_history.clear()
 
@@ -884,7 +898,7 @@ class WelcomeWindow(QWidget):
             QApplication.clipboard().setText(self._corrected_text)
 
     def _on_startup_toggled(self, checked):
-        self.cfg.set("startup_on_login", checked)
+        self.startup_toggled.emit(checked)
 
     def _on_show_on_launch_toggled(self, checked):
         self.cfg.set("show_welcome_on_startup", checked)
@@ -904,9 +918,14 @@ class WelcomeWindow(QWidget):
         if self.ac_model is None or not self.ac_model.is_loaded():
             self._correct_btn.setEnabled(False)
             self._correct_btn.setText("Load model in Settings first")
+            self._correct_btn.setToolTip(
+                "No model loaded. Open Settings to select or download Google Gemma 4 "
+                "(strongly recommended minimum model size for reliable prompt adherence)."
+            )
         else:
             self._correct_btn.setEnabled(True)
             self._correct_btn.setText("Correct My Text")
+            self._correct_btn.setToolTip("")
 
     def _toggle_maximized(self):
         if self.isMaximized():
@@ -964,16 +983,164 @@ class WelcomeWindow(QWidget):
         self._scroll_lay.activate()
         self._scroll_content.updateGeometry()
         self._scroll.update()
+
+    def _show_result_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu, QApplication
+        menu = QMenu(self._result_output)
+        menu.setStyleSheet(
+            "QMenu{background:#121315; border:1px solid #28292c; color:#ededee; font-size:12px; font-family:'IBM Plex Mono','Consolas',monospace;}"
+            "QMenu::item{padding:6px 16px; background:transparent;}"
+            "QMenu::item:selected{background:#28292c; color:#d4a373;}"
+        )
+        act_copy = menu.addAction("Copy Selected")
+        act_copy_all = menu.addAction("Copy All")
+        tc = self._result_output.textCursor()
+        act_copy.setEnabled(tc.hasSelection())
+        chosen = menu.exec(self._result_output.mapToGlobal(pos))
+        if chosen == act_copy:
+            self._result_output.copy()
+        elif chosen == act_copy_all:
+            clean_text = (
+                getattr(self, "_last_assistant_response", "") if getattr(self, "_output_mode", "") == "chat"
+                else getattr(self, "_corrected_text", "")
+            ) or self._result_output.toPlainText()
+            QApplication.clipboard().setText(clean_text)
         self._scroll.ensureWidgetVisible(self._unified_output, 24, 24)
 
-    # --- Mouse Event Dragging & Resizing ---
+    # --- Native Windows Event Filter & Dragting/Resizing ---
+    def nativeEvent(self, eventType, message):
+        try:
+            if sip.isdeleted(self) or not getattr(self, "_ui_built", False):
+                return False, 0
+            if sys.platform == "win32" and (eventType == b"windows_generic_MSG" or eventType == b"windows_dispatcher_MSG"):
+                msg_ptr = int(message)
+                if not msg_ptr:
+                    return False, 0
+                msg = ctypes.wintypes.MSG.from_address(msg_ptr)
+                if msg.message == 0x0084:  # WM_NCHITTEST
+                    pos = self.mapFromGlobal(QCursor.pos())
+                    w, h = self.width(), self.height()
+                    x, y = pos.x(), pos.y()
+                    b = 6  # 6px unconditional outer border margin
+
+                    # Unconditional Border Hit Tests (when not maximized/fullscreen)
+                    if not (self.isMaximized() or self.isFullScreen()):
+                        if x < b and y < b:
+                            return True, 13  # HTTOPLEFT
+                        if x >= w - b and y < b:
+                            return True, 14  # HTTOPRIGHT
+                        if x < b and y >= h - b:
+                            return True, 16  # HTBOTTOMLEFT
+                        if x >= w - b and y >= h - b:
+                            return True, 17  # HTBOTTOMRIGHT
+                        if x < b:
+                            return True, 10  # HTLEFT
+                        if x >= w - b:
+                            return True, 11  # HTRIGHT
+                        if y < b:
+                            return True, 12  # HTTOP
+                        if y >= h - b:
+                            return True, 15  # HTBOTTOM
+
+                    # Check for Maximize Button hover (Windows 11 Snap Layouts)
+                    if hasattr(self, "_max_btn") and self._max_btn is not None and self._max_btn.isVisible():
+                        max_rect = self._max_btn.geometry()
+                        if max_rect.contains(pos):
+                            return True, 9  # HTMAXBUTTON
+
+                    # Title bar Area (top 48px)
+                    if y < 48 and not (self.isMaximized() or self.isFullScreen()):
+                        child = self.childAt(pos)
+                        block_list = (
+                            QTextEdit,
+                            QPlainTextEdit,
+                            QLineEdit,
+                            QComboBox,
+                            QScrollBar,
+                            QCheckBox,
+                            QRadioButton,
+                            QPushButton,
+                        )
+                        is_interactive = False
+                        curr = child
+                        while curr is not None and curr is not self:
+                            try:
+                                if sip.isdeleted(curr):
+                                    break
+                                if isinstance(curr, block_list):
+                                    is_interactive = True
+                                    break
+                                curr = curr.parentWidget()
+                            except Exception:
+                                break
+                        if not is_interactive:
+                            return True, 2  # HTCAPTION
+        except Exception:
+            pass
+        return False, 0
+
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton and e.position().y() < 48:
+            child = self.childAt(e.position().toPoint())
+            block_list = (
+                QTextEdit,
+                QPlainTextEdit,
+                QLineEdit,
+                QComboBox,
+                QScrollBar,
+                QCheckBox,
+                QRadioButton,
+                QPushButton,
+            )
+            is_interactive = False
+            curr = child
+            while curr is not None and curr is not self:
+                try:
+                    if sip.isdeleted(curr):
+                        break
+                    if isinstance(curr, block_list):
+                        is_interactive = True
+                        break
+                    curr = curr.parentWidget()
+                except Exception:
+                    break
+            if not is_interactive:
+                self._toggle_maximize()
+
     def mousePressEvent(self, e):
+        self.raise_()
+        self.activateWindow()
         if e.button() == Qt.MouseButton.LeftButton:
             pos = e.position().toPoint()
-            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
-                self._resize_start = e.globalPosition().toPoint()
-                self._resize_start_geometry = self.geometry()
-                return
+            if pos.y() < 48 and sys.platform != "win32":
+                ch = self.childAt(pos)
+                block_list = (
+                    QTextEdit,
+                    QPlainTextEdit,
+                    QLineEdit,
+                    QComboBox,
+                    QScrollBar,
+                    QCheckBox,
+                    QRadioButton,
+                    QPushButton,
+                )
+                is_interactive = False
+                curr = ch
+                while curr is not None and curr is not self:
+                    try:
+                        if sip.isdeleted(curr):
+                            break
+                        if isinstance(curr, block_list):
+                            is_interactive = True
+                            break
+                        curr = curr.parentWidget()
+                    except Exception:
+                        break
+                if not is_interactive:
+                    wh = self.windowHandle()
+                    if wh and hasattr(wh, "startSystemMove"):
+                        wh.startSystemMove()
+                        return
 
             ch = self.childAt(pos)
             block_list = (
@@ -988,33 +1155,25 @@ class WelcomeWindow(QWidget):
             )
             is_interactive = False
             curr = ch
-            while curr is not None:
-                if isinstance(curr, block_list):
-                    is_interactive = True
+            while curr is not None and curr is not self:
+                try:
+                    if sip.isdeleted(curr):
+                        break
+                    if isinstance(curr, block_list):
+                        is_interactive = True
+                        break
+                    curr = curr.parentWidget()
+                except Exception:
                     break
-                curr = curr.parentWidget()
             if not is_interactive:
                 self._drag_pos = e.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, e):
-        if not e.buttons():
-            pos = e.position().toPoint()
-            if pos.x() >= self.width() - 15 and pos.y() >= self.height() - 15:
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-            else:
-                self.unsetCursor()
-
-        if hasattr(self, "_resize_start") and self._resize_start:
-            delta = e.globalPosition().toPoint() - self._resize_start
-            new_w = max(self.minimumWidth(), self._resize_start_geometry.width() + delta.x())
-            new_h = max(self.minimumHeight(), self._resize_start_geometry.height() + delta.y())
-            self.resize(new_w, new_h)
-        elif hasattr(self, "_drag_pos") and self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
+        if hasattr(self, "_drag_pos") and self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
 
     def mouseReleaseEvent(self, e):
         self._drag_pos = None
-        self._resize_start = None
 
     # --- Infographic Scaling ---
     def showEvent(self, event):
@@ -1023,9 +1182,14 @@ class WelcomeWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._update_infographic()
+        if hasattr(self, "_info_timer") and self._info_timer is not None:
+            self._info_timer.start(50)
+        else:
+            self._update_infographic()
 
     def _update_infographic(self):
+        if sip.isdeleted(self):
+            return
         max_w = self.width() - 48
         max_h = int(self.height() * 0.40)
 
@@ -1064,6 +1228,13 @@ class WelcomeWindow(QWidget):
             self.info_lbl.setPixmap(scaled)
 
     def closeEvent(self, e):
+        if not getattr(self, "_app_is_quitting", False):
+            self.hide()
+            if hasattr(self, "_trigger_first_minimize_osd") and callable(self._trigger_first_minimize_osd):
+                self._trigger_first_minimize_osd()
+            e.ignore()
+            return
+
         if hasattr(self, "_stream_worker") and self._stream_worker and self._stream_worker.isRunning():
             try:
                 self._stream_worker.blockSignals(True)

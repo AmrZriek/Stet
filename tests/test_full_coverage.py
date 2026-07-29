@@ -39,6 +39,27 @@ def restore_real_load_model(monkeypatch):
     monkeypatch.setattr(ModelManager, "load_model", real_load_model)
 
 
+@pytest.fixture(autouse=True)
+def use_non_macos_backend_for_legacy_model_paths(monkeypatch):
+    """Keep legacy load-model tests on their explicitly non-macOS path."""
+    import stet.llm.model_manager as model_manager_module
+    from stet.llm.backend_manager import BackendManager as RealBackendManager
+
+    monkeypatch.setattr(
+        model_manager_module,
+        "BackendManager",
+        lambda: RealBackendManager(platform_name="win32"),
+    )
+    # The tests below mock process creation and exercise legacy launch
+    # behavior.  Do not let a host macOS bundle search decide whether their
+    # synthetic server exists.
+    monkeypatch.setattr(
+        model_manager_module,
+        "_find_shipped_llama_server",
+        lambda: "llama-server.exe",
+    )
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────────
 
 
@@ -162,6 +183,7 @@ class TestAppCoverage:
             )
             mock_open.assert_called_once()
 
+    @patch("stet.core.app.MACOS", False)
     @patch("stet.core.app.WINDOWS", True)
     @patch("stet.core.app.subprocess.run")
     @patch("stet.core.app.winreg", create=True)
@@ -264,6 +286,20 @@ class TestModelManagerCoverage:
         import traceback
 
         importlib.reload(stet.llm.model_manager)
+        from stet.llm.backend_manager import BackendManager as RealBackendManager
+
+        # Reload restores host-dependent imports, so reapply the synthetic
+        # Windows launch environment used by this CUDA fallback test.
+        monkeypatch.setattr(
+            stet.llm.model_manager,
+            "BackendManager",
+            lambda: RealBackendManager(platform_name="win32"),
+        )
+        monkeypatch.setattr(
+            stet.llm.model_manager,
+            "_find_shipped_llama_server",
+            lambda: "llama-server.exe",
+        )
         real_load_model = stet.llm.model_manager.ModelManager.load_model
 
         def wrap_load_model(*args, **kwargs):

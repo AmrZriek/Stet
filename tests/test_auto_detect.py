@@ -13,7 +13,7 @@ from stet.core.app import StetApp
 
 
 @pytest.fixture(autouse=True)
-def mock_app_dependencies(monkeypatch):
+def mock_app_dependencies(monkeypatch, tmp_path):
     """Stub out heavy win32/PyQt6 side effects of StetApp.__init__ to prevent crashes."""
     monkeypatch.setattr(StetApp, "_register_hotkey", lambda self: None)
     monkeypatch.setattr(StetApp, "_build_tray", lambda self: None)
@@ -24,6 +24,10 @@ def mock_app_dependencies(monkeypatch):
     else:
         mock_instance = MagicMock()
         monkeypatch.setattr(QApplication, "instance", lambda: mock_instance)
+
+    # The real macOS source runtime contains a multi-gigabyte baseline model.
+    # Auto-detection tests must inspect only their own tiny temporary fixture.
+    monkeypatch.setattr(config_mod, "MODELS_DIR", tmp_path)
 
 
 class TestConfigAutoDetect:
@@ -230,4 +234,3 @@ class TestAppDownloadMonitoring:
             cmd_args = mock_popen.call_args[0][0]
             assert cmd_args[:5] == ["cmd", "/c", "start", "/wait", ""]
             assert "download_model.bat" in str(cmd_args[5])
-

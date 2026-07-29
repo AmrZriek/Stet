@@ -10,12 +10,15 @@ Tests cover:
 from __future__ import annotations
 
 import sys
-import stet.uninstall
-sys.modules["uninstall"] = stet.uninstall
-
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+if sys.platform != "win32":
+    pytest.skip("Windows-only uninstaller", allow_module_level=True)
+
+import stet.uninstall
+sys.modules["uninstall"] = stet.uninstall
 
 
 @pytest.fixture
