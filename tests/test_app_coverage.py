@@ -924,6 +924,69 @@ class TestStetAppShowFirstRun:
             mock_mb.assert_not_called()
 
 
+class TestFirstRunDownloadDialog:
+    """Tests for StetApp._build_first_run_download_dialog.
+
+    Regression: unchecking the model box and clicking Download used to be a
+    silent no-op (or a pointless backend-only download), leaving Stet without
+    a model. The Download button must now disable while the box is unchecked.
+    """
+
+    def test_download_disabled_when_model_unchecked(self, qtbot):
+        dlg, cb_model, btn_dl = StetApp._build_first_run_download_dialog(
+            "Stet requires a model.", model_missing=True
+        )
+        qtbot.addWidget(dlg)
+
+        assert cb_model is not None
+        assert cb_model.isChecked() is True
+        assert btn_dl.isEnabled() is True
+
+        cb_model.setChecked(False)
+        assert btn_dl.isEnabled() is False
+
+        cb_model.setChecked(True)
+        assert btn_dl.isEnabled() is True
+
+    def test_download_enabled_when_backend_only(self, qtbot):
+        """No model prompt (model already installed) keeps Download enabled."""
+        dlg, cb_model, btn_dl = StetApp._build_first_run_download_dialog(
+            "Stet needs runtime dependencies.", model_missing=False
+        )
+        qtbot.addWidget(dlg)
+
+        assert cb_model is None
+        assert btn_dl.isEnabled() is True
+
+    def test_hint_visible_when_model_unchecked(self, qtbot):
+        """Regression: the 'select the model to enable Download' hint must be
+        visible exactly while the model checkbox is unchecked. It was inverted
+        — hiding the explanation at the very moment Download disabled."""
+        from PyQt6.QtWidgets import QLabel
+
+        dlg, cb_model, btn_dl = StetApp._build_first_run_download_dialog(
+            "Stet requires a model.", model_missing=True
+        )
+        qtbot.addWidget(dlg)
+
+        hint = next(
+            lbl
+            for lbl in dlg.findChildren(QLabel)
+            if "Select the model to enable" in lbl.text()
+        )
+
+        # Default state: box checked -> hint hidden.
+        assert cb_model.isChecked() is True
+        assert hint.isHidden() is True
+
+        cb_model.setChecked(False)
+        assert btn_dl.isEnabled() is False
+        assert hint.isHidden() is False  # shown to explain why Download is off
+
+        cb_model.setChecked(True)
+        assert hint.isHidden() is True  # no longer needed
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows download script")
 class TestStetAppRunDownloadScript:
     @patch("stet.core.app.QSystemTrayIcon")

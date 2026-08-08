@@ -1808,6 +1808,99 @@ class StetApp(QObject):
         else:
             self._welcome_window.set_corrected_text(text, result)
 
+    @staticmethod
+    def _build_first_run_download_dialog(msg: str, model_missing: bool) -> tuple:
+        """Build the 'Stet — Initial Setup' download prompt dialog.
+
+        Returns ``(dlg, cb_model, btn_dl)``.  ``cb_model`` is ``None`` when the
+        model is already installed (backend-only prompt).
+
+        When a model prompt is shown, the Download button is disabled while the
+        model checkbox is unchecked: Stet cannot correct text without a model,
+        so clicking Download in that state would be a silent no-op (or would
+        download a pointless ~652 MB backend).  Only re-checking the box or
+        Skip Setup remain valid actions.
+        """
+        from PyQt6.QtWidgets import (
+            QDialog,
+            QVBoxLayout,
+            QHBoxLayout,
+            QLabel,
+            QCheckBox,
+            QPushButton,
+        )
+        from PyQt6.QtCore import Qt
+        from stet.ui.utils import _checkbox_css, set_window_icon
+
+        dlg = QDialog()
+        dlg.setWindowTitle("Stet — Initial Setup")
+        set_window_icon(dlg)
+        dlg.setStyleSheet(f"""
+            QDialog {{ background-color: #121315; }}
+            QLabel {{ color: #ededee; font-size: 13px; }}
+            {_checkbox_css()}
+            QPushButton {{
+                background-color: #1c1d1f; color: #ededee; border: 1px solid #28292c;
+                padding: 6px 16px; font-size: 12px; min-width: 88px;
+            }}
+            QPushButton:hover {{ background-color: #28292c; border-color: #d4a373; }}
+            QPushButton:pressed {{ background-color: #121315; }}
+        """)
+        dlg.setWindowFlags(
+            Qt.WindowType.Dialog
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+        )
+        dlg.setFixedSize(440, 240)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        lbl = QLabel(msg)
+        lbl.setWordWrap(True)
+        layout.addWidget(lbl)
+
+        cb_model = None
+        if model_missing:
+            cb_model = QCheckBox("Download Google Gemma 4 model (~1.8 GB)")
+            cb_model.setChecked(True)
+            layout.addWidget(cb_model)
+
+        hint_lbl = QLabel(
+            "Stet needs a model to correct text. Select the model to enable "
+            "Download, or click Skip Setup to add a model later from Settings."
+        )
+        hint_lbl.setWordWrap(True)
+        hint_lbl.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        hint_lbl.setVisible(cb_model is not None and not cb_model.isChecked())
+        layout.addWidget(hint_lbl)
+
+        layout.addStretch()
+
+        btn_lay = QHBoxLayout()
+        btn_lay.addStretch()
+
+        btn_cancel = QPushButton("Skip Setup")
+        btn_cancel.clicked.connect(dlg.reject)
+        btn_lay.addWidget(btn_cancel)
+
+        btn_dl = QPushButton("Download")
+        btn_dl.clicked.connect(dlg.accept)
+        btn_dl.setDefault(True)
+        btn_lay.addWidget(btn_dl)
+
+        if cb_model is not None:
+            # Download is only meaningful when the model is selected.
+            btn_dl.setEnabled(cb_model.isChecked())
+            cb_model.toggled.connect(btn_dl.setEnabled)
+            # Hint is guidance for the unchecked state ("select the model to
+            # enable Download") — show it only while the box is unchecked.
+            cb_model.toggled.connect(lambda checked: hint_lbl.setVisible(not checked))
+
+        layout.addLayout(btn_lay)
+        return dlg, cb_model, btn_dl
+
     def _check_first_run_downloads(self):
         """Prompt user on portable mode/first run if backend or model are missing."""
         from stet.llm.utils import _find_shipped_llama_server
@@ -1824,8 +1917,7 @@ class StetApp(QObject):
             self._first_run_setup_active = True
             try:
                 # Prompt user to download
-                from PyQt6.QtWidgets import QDialog, QVBoxLayout, QHBoxLayout, QLabel, QCheckBox, QPushButton
-                from PyQt6.QtCore import Qt
+                from PyQt6.QtWidgets import QDialog
                 from stet.ui.downloader import DownloadProgressDialog
                 from stet.constants import (
                     BACKENDS_DIR,
@@ -1839,27 +1931,7 @@ class StetApp(QObject):
                     SCRIPT_DIR,
                     SERVER_EXE,
                 )
-                
-                dlg = QDialog()
-                dlg.setWindowTitle("Stet — Initial Setup")
-                dlg.setStyleSheet("""
-                    QDialog { background-color: #121315; }
-                    QLabel { color: #ededee; font-size: 13px; }
-                    QCheckBox { color: #ededee; font-size: 12px; }
-                    QPushButton {
-                        background-color: #1c1d1f; color: #ededee; border: 1px solid #28292c;
-                        padding: 6px 16px; font-size: 12px; min-width: 88px;
-                    }
-                    QPushButton:hover { background-color: #28292c; border-color: #d4a373; }
-                    QPushButton:pressed { background-color: #121315; }
-                """)
-                dlg.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
-                dlg.setFixedSize(440, 240)
-                
-                layout = QVBoxLayout(dlg)
-                layout.setContentsMargins(20, 20, 20, 20)
-                layout.setSpacing(12)
-                
+
                 if not model_exists:
                     msg = (
                         "Stet requires a local AI model to correct spelling, grammar, and style.\n\n"
@@ -1868,32 +1940,10 @@ class StetApp(QObject):
                 else:
                     msg = "Stet needs to download required runtime dependencies to run locally."
 
-                lbl = QLabel(msg)
-                lbl.setWordWrap(True)
-                layout.addWidget(lbl)
-                
-                cb_model = None
-                if not model_exists:
-                    cb_model = QCheckBox("Download Google Gemma 4 model (~1.8 GB)")
-                    cb_model.setChecked(True)
-                    layout.addWidget(cb_model)
-                
-                layout.addStretch()
-                
-                btn_lay = QHBoxLayout()
-                btn_lay.addStretch()
-                
-                btn_cancel = QPushButton("Skip Setup")
-                btn_cancel.clicked.connect(dlg.reject)
-                btn_lay.addWidget(btn_cancel)
-                
-                btn_dl = QPushButton("Download")
-                btn_dl.clicked.connect(dlg.accept)
-                btn_dl.setDefault(True)
-                btn_lay.addWidget(btn_dl)
-                
-                layout.addLayout(btn_lay)
-                
+                dlg, cb_model, _btn_dl = self._build_first_run_download_dialog(
+                    msg, model_missing=not model_exists
+                )
+
                 # Show dialog
                 if dlg.exec() == QDialog.DialogCode.Accepted:
                     downloads = []

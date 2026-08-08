@@ -17,7 +17,7 @@
 </p>
 
 <p align="center">
-  <strong>Latest release: v1.2.0</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.2.0">Download Installer</a>
+  <strong>Latest release: v1.2.1</strong> — <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.2.1">Download Installer</a>
 </p>
 
 <p align="center">
@@ -121,7 +121,10 @@ graph TD
    * Replaces text instantly in-place via native UI Automation without opening any window.
    * Supports immediate 1-key undo (`Ctrl+Z` / System Tray undo).
 2. **Interactive Diff & Chat Window (`F9` on Win / `⌘+⌥+F9` on Mac):**
-   * Opens a sleek dark-mode window with green/red diff highlights comparing original vs. corrected text.
+   * Opens a sleek dark-mode window with green/red/blue diff highlights comparing original vs. corrected text.
+   * Right-click any changed word to **keep your original**, **never change that word again** (blacklist), or **edit the fix** in a popover; "Undo all changes" reverts everything.
+   * **Edit text** button turns the window into a plain-text editor; Done re-diffs your edits.
+   * Rewrite mode shows deletions as subtle strikethrough with a **Show all changes / Clean view** toggle.
    * Edit output manually, rerun preset templates, or chat directly with the local AI model for custom adjustments.
 
 ---
@@ -153,7 +156,7 @@ graph TD
 ### Windows (Primary Supported Platform)
 
 #### Option 1: Standalone Installer (Recommended)
-1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.2.0).
+1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.2.1).
 2. Run the installer. If Windows SmartScreen displays a warning, click **More info** → **Run anyway** (installer is open-source and awaiting certificate reputation).
 3. The setup wizard automatically configures Stet and launches the native GUI model downloader.
 

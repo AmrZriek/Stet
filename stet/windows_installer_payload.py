@@ -21,6 +21,7 @@ import os
 import stat
 import subprocess
 import sys
+import tempfile
 import winreg
 import zipfile
 from datetime import datetime
@@ -866,17 +867,30 @@ class StetInstaller(QWizard):
                 _set_window_icon(dialog)
                 dialog.exec()
 
-                if self._completion_page.download_backend:
-                    # Update config.json with correct server path
-                    config_path = install_dir / "config.json"
-                    if config_path.exists():
-                        import json
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            cfg_data = json.load(f)
+                # Update config.json so first launch does not re-prompt for
+                # components that were just downloaded.
+                config_path = install_dir / "config.json"
+                if config_path.exists():
+                    import json
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cfg_data = json.load(f)
+
+                    if self._completion_page.download_backend:
                         from stet.constants import LLAMA_BACKEND_DIR, SERVER_EXE
-                        cfg_data["llama_server_path"] = str(install_dir / LLAMA_BACKEND_DIR / SERVER_EXE)
-                        with open(config_path, "w", encoding="utf-8") as f:
-                            json.dump(cfg_data, f, indent=2)
+                        cfg_data["llama_server_path"] = str(
+                            install_dir / LLAMA_BACKEND_DIR / SERVER_EXE
+                        )
+
+                    if self._completion_page.download_model:
+                        from stet.constants import RECOMMENDED_MODEL_FILE
+                        model_file = install_dir / RECOMMENDED_MODEL_FILE
+                        if model_file.exists():
+                            cfg_data["model_path"] = str(model_file)
+                            if not cfg_data.get("chat_use_separate_model", False):
+                                cfg_data["chat_model_path"] = str(model_file)
+
+                    with open(config_path, "w", encoding="utf-8") as f:
+                        json.dump(cfg_data, f, indent=2)
             except Exception as exc:
                 log(f"Native download/config update failed: {exc}")
 
@@ -953,6 +967,55 @@ def _load_license_text() -> str:
         "along with this program. If not, see <https://www.gnu.org/licenses/>.\n\n"
         "Source code: https://github.com/AmrZriek/Stet"
     )
+
+
+def _installer_checkbox_css() -> str:
+    svg_path = Path(tempfile.gettempdir()) / "stet_installer_checkmark.svg"
+    try:
+        if not svg_path.exists():
+            svg_path.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 12">'
+                '<path d="M2 6L5 9L10 3" stroke="#121212" stroke-width="2.2" '
+                'fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+                encoding="utf-8",
+            )
+        p = str(svg_path).replace("\\", "/")
+    except Exception:
+        p = ""
+
+    return f"""
+        QCheckBox, QRadioButton {{
+            color: #ededee;
+            font-size: 10pt;
+            spacing: 6px;
+            outline: none;
+        }}
+        QCheckBox::indicator, QRadioButton::indicator {{
+            width: 14px;
+            height: 14px;
+            border: 1.5px solid rgba(212, 163, 115, 0.35);
+            background: rgba(4, 10, 28, 0.8);
+            outline: none;
+        }}
+        QCheckBox::indicator {{
+            border-radius: 3px;
+        }}
+        QRadioButton::indicator {{
+            border-radius: 8px;
+        }}
+        QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+            border: 1.5px solid rgba(212, 163, 115, 0.65);
+        }}
+        QCheckBox::indicator:checked {{
+            background: #d4a373;
+            border: 1.5px solid #d4a373;
+            image: url("{p}");
+        }}
+        QRadioButton::indicator:checked {{
+            background: #d4a373;
+            border: 1.5px solid #d4a373;
+        }}
+    """
 
 
 def _apply_stylesheet(app: QApplication) -> None:
@@ -1044,11 +1107,7 @@ def _apply_stylesheet(app: QApplication) -> None:
             background-color: #C0B8A8;
             border-radius: 3px;
         }
-        QCheckBox, QRadioButton {
-            color: #ededee;
-            font-size: 10pt;
-            spacing: 6px;
-        }
+        """ + _installer_checkbox_css() + """
         QFrame[frameShape="4"] {
             background-color: #28292c;
             max-height: 1px;

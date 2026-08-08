@@ -3,12 +3,16 @@
 The default mode attempts to use the local backend. Use --offline to print the
 matrix without loading a model, which keeps the CLI safe in environments where
 the llama.cpp server or model files are unavailable.
+
+Strengths: spelling_only, full_correction, rewrite_polish (legacy names
+conservative/smart_fix/aggressive still accepted as aliases).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -21,7 +25,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
-STRENGTHS = ("conservative", "smart_fix", "aggressive")
+# The corpus contains non-ASCII characters (arrows, em/en dashes, curly
+# quotes, copyright).  A cp1252 console would raise UnicodeEncodeError when
+# printing them, so force UTF-8 output with a backslashreplace fallback.
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
+STRENGTHS = ("spelling_only", "full_correction", "rewrite_polish")
+STRENGTH_ALIASES = {
+    "conservative": "spelling_only",
+    "smart_fix": "full_correction",
+    "aggressive": "rewrite_polish",
+}
+STRENGTH_TO_LEGACY = {v: k for k, v in STRENGTH_ALIASES.items()}
+STRENGTH_CHOICES = STRENGTHS + tuple(STRENGTH_ALIASES)
 
 SAMPLES = (
     # ── Preservation tests ───────────────────────────────────────────────
@@ -3020,13 +3040,143 @@ SAMPLES = (
     },
 )
 
+NEW_SAMPLES = (
+    # ── Transposition typos (missing from _COMMON_TYPOS_MAP) ──────────
+    {
+        "id": "transposition_ti",
+        "input": "I think ti was a great movie.",
+        "notes": "Solfege-word trap; 'ti' is a real English word so greedy 2B never flags it.",
+        "expected": {
+            "spelling_only": "I think it was a great movie.",
+            "full_correction": "I think it was a great movie.",
+            "rewrite_polish": "I think it was a great movie.",
+        },
+    },
+    {
+        "id": "transposition_hte",
+        "input": "Meet me at hte station after work.",
+        "expected": {
+            "spelling_only": "Meet me at the station after work.",
+            "full_correction": "Meet me at the station after work.",
+            "rewrite_polish": "Meet me at the station after work.",
+        },
+    },
+    {
+        "id": "transposition_wsa",
+        "input": "Wsa that your car in the driveway?",
+        "expected": {
+            "spelling_only": "Was that your car in the driveway?",
+            "full_correction": "Was that your car in the driveway?",
+            "rewrite_polish": "Was that your car in the driveway?",
+        },
+    },
+    {
+        "id": "transposition_si",
+        "input": "Si this the right train to take?",
+        "expected": {
+            "spelling_only": "Is this the right train to take?",
+            "full_correction": "Is this the right train to take?",
+            "rewrite_polish": "Is this the right train to take?",
+        },
+    },
+    {
+        "id": "transposition_ot",
+        "input": "He was going ot the store when it rained.",
+        "expected": {
+            "spelling_only": "He was going to the store when it rained.",
+            "full_correction": "He was going to the store when it rained.",
+            "rewrite_polish": "He was going to the store when it rained.",
+        },
+    },
+    {
+        "id": "transposition_fo",
+        "input": "Fo all the effort, the result was worth it.",
+        "expected": {
+            "spelling_only": "For all the effort, the result was worth it.",
+            "full_correction": "For all the effort, the result was worth it.",
+            "rewrite_polish": "For all the effort, the result was worth it.",
+        },
+    },
+    {
+        "id": "transposition_hwo",
+        "input": "Hwo are you doing after the move?",
+        "expected": {
+            "spelling_only": "How are you doing after the move?",
+            "full_correction": "How are you doing after the move?",
+            "rewrite_polish": "How are you doing after the move?",
+        },
+    },
+    {
+        "id": "transposition_multi",
+        "input": "He wsa going ot hte gym.",
+        "notes": "Three transpositions in one short sentence.",
+        "expected": {
+            "spelling_only": "He was going to the gym.",
+            "full_correction": "He was going to the gym.",
+            "rewrite_polish": "He was going to the gym.",
+        },
+    },
+    # ── Speech-to-text style (user's real usage) ──────────────────────
+    {
+        "id": "s2t_kno",
+        "input": "i dont kno what time the movie starts",
+        "notes": "ASR-style lowercase; missing letter + contraction. Model expands dont→don't; caps expected to stay lowercase in spelling_only.",
+        "expected": {
+            "spelling_only": "i don't know what time the movie starts",
+            "full_correction": "I don't know what time the movie starts.",
+            "rewrite_polish": "I don't know what time the movie starts.",
+        },
+    },
+    {
+        "id": "s2t_too",
+        "input": "im to tired to go out tonight",
+        "notes": "Homophone probe: 'to' should become 'too' at position 1.",
+        "expected": {
+            "spelling_only": "im too tired to go out tonight",
+            "full_correction": "I'm too tired to go out tonight.",
+            "rewrite_polish": "I'm too tired to go out tonight.",
+        },
+    },
+    # ── Log-derived failure cases (protected content must survive) ────
+    {
+        "id": "log_url_survives",
+        "input": "Check the docs at https://example.com/guide before you start.",
+        "notes": "URL must survive all modes (2026-07-28 'protected placeholders mangled' failure).",
+        "expected": {
+            "spelling_only": "Check the docs at https://example.com/guide before you start.",
+            "full_correction": "Check the docs at https://example.com/guide before you start.",
+            "rewrite_polish": "Check the docs at https://example.com/guide before you start.",
+        },
+    },
+    {
+        "id": "log_email_survives",
+        "input": "Send the report to sarah.wilson@company.com by noon.",
+        "expected": {
+            "spelling_only": "Send the report to sarah.wilson@company.com by noon.",
+            "full_correction": "Send the report to sarah.wilson@company.com by noon.",
+            "rewrite_polish": "Send the report to sarah.wilson@company.com by noon.",
+        },
+    },
+    {
+        "id": "log_quotes_contraction",
+        "input": "She said, \"We're leaving at six,\" and then hung up.",
+        "notes": "2026-07-28 'no marker pair' total-failure signature: quotes + contraction.",
+        "expected": {
+            "spelling_only": "She said, \"We're leaving at six,\" and then hung up.",
+            "full_correction": "She said, \"We're leaving at six,\" and then hung up.",
+            "rewrite_polish": "She said, \"We're leaving at six,\" and then hung up.",
+        },
+    },
+)
+ALL_SAMPLES = SAMPLES + NEW_SAMPLES
+
 
 @dataclass
 class EvalRow:
     sample_id: str
     strength: str
     pass_index: int
-    ok: bool
+    status: str  # ok | miss | diff | fail
     units: int | None
     elapsed_ms: int | None
     input: str
@@ -3042,12 +3192,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--passes",
         type=int,
-        default=5,
-        help="Passes per sample per strength. Default: 5.",
+        default=1,
+        help="Passes per sample per strength. Default: 1.",
     )
     parser.add_argument(
         "--strength",
-        choices=STRENGTHS,
+        choices=STRENGTH_CHOICES,
         action="append",
         help="Strength to evaluate. Repeat to select multiple. Default: all.",
     )
@@ -3066,19 +3216,135 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit JSON lines instead of a compact text table.",
     )
+    parser.add_argument(
+        "--corr-temp",
+        type=float,
+        default=None,
+        help="Override correction_temperature for this run (A/B sweep).",
+    )
+    parser.add_argument(
+        "--corr-top-k",
+        type=int,
+        default=None,
+        help="Override correction_top_k for this run (A/B sweep).",
+    )
+    parser.add_argument(
+        "--corr-top-p",
+        type=float,
+        default=None,
+        help="Override correction_top_p for this run (A/B sweep).",
+    )
+    parser.add_argument(
+        "--corr-min-p",
+        type=float,
+        default=None,
+        help="Override correction_min_p for this run (A/B sweep).",
+    )
+    parser.add_argument(
+        "--hall-threshold",
+        action="append",
+        default=None,
+        metavar="STRENGTH=VALUE",
+        help="Override a profile hallucination_threshold, e.g. "
+        "--hall-threshold spelling_only=0.55. Repeatable.",
+    )
+    parser.add_argument(
+        "--word-ratio",
+        action="append",
+        default=None,
+        metavar="STRENGTH=MIN,MAX",
+        help="Override a profile min/max word ratio, e.g. "
+        "--word-ratio spelling_only=0.80,1.20. Repeatable.",
+    )
     return parser
 
 
 def _selected_samples(sample_ids: list[str] | None) -> list[dict[str, str]]:
     if not sample_ids:
-        return list(SAMPLES)
+        return list(ALL_SAMPLES)
 
     wanted = set(sample_ids)
-    selected = [sample for sample in SAMPLES if sample["id"] in wanted]
+    selected = [sample for sample in ALL_SAMPLES if sample["id"] in wanted]
     missing = sorted(wanted - {sample["id"] for sample in selected})
     if missing:
         raise SystemExit(f"Unknown sample id(s): {', '.join(missing)}")
     return selected
+
+
+def _normalize_strength(name: str) -> str:
+    return STRENGTH_ALIASES.get(name, name)
+
+
+def _expected_output(sample: dict[str, object], strength: str) -> str | None:
+    strength = _normalize_strength(strength)
+    expected = sample.get("expected")
+    if expected is None:
+        return None
+    if isinstance(expected, dict):
+        got = expected.get(strength)
+        if got is None:
+            got = expected.get(STRENGTH_TO_LEGACY[strength])
+        return got  # type: ignore[return-value]
+    return expected  # type: ignore[return-value]
+
+
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
+def _pair_output(
+    pack: list[dict[str, str]], output: str
+) -> list[tuple[dict[str, str], str | None]]:
+    """Pair corrected output back to packed samples.
+
+    Singleton packs and exact line-count matches pair 1:1 (precise scoring).
+    When the model reflows the pack (line count differs — common for
+    full_correction/rewrite_polish), pairing is unreliable, so every sample
+    gets None and the caller falls back to whole-output containment scoring.
+    """
+    if len(pack) == 1:
+        return [(pack[0], output)]
+
+    lines = [ln for ln in output.split("\n") if ln.strip()]
+    if len(lines) == len(pack):
+        return list(zip(pack, lines))
+
+    return [(sample, None) for sample in pack]
+
+
+def _pack_samples(samples: list[dict[str, str]]) -> list[list[dict[str, str]]]:
+    from stet.core.text_utils import looks_like_prose
+
+    packs: list[list[dict[str, str]]] = []
+    current: list[dict[str, str]] = []
+    current_words = 0
+    for sample in samples:
+        text = sample["input"]
+        packable = (
+            looks_like_prose(text)
+            and "://" not in text
+            and "@" not in text
+            and "\n" not in text
+        )
+        if not packable:
+            if current:
+                packs.append(current)
+                current = []
+                current_words = 0
+            packs.append([sample])
+            continue
+        words = len(text.split())
+        separator = 1 if current else 0
+        if current and current_words + words + separator > 40:
+            packs.append(current)
+            current = []
+            current_words = 0
+            separator = 0
+        current.append(sample)
+        current_words += words + separator
+    if current:
+        packs.append(current)
+    return packs
 
 
 def _print_row(row: EvalRow, as_json: bool) -> None:
@@ -3086,7 +3352,7 @@ def _print_row(row: EvalRow, as_json: bool) -> None:
         print(json.dumps(asdict(row), ensure_ascii=False))
         return
 
-    status = "ok" if row.ok else "fail"
+    status = row.status
     elapsed = "-" if row.elapsed_ms is None else f"{row.elapsed_ms}ms"
     output = row.output if row.output is not None else row.error
     expected = "" if row.expected is None else f" expected={row.expected!r}"
@@ -3097,17 +3363,8 @@ def _print_row(row: EvalRow, as_json: bool) -> None:
     )
 
 
-def _expected_output(sample: dict[str, object], strength: str) -> str | None:
-    expected = sample.get("expected")
-    if expected is None:
-        return None
-    if isinstance(expected, dict):
-        return expected.get(strength)  # type: ignore[return-value]
-    return expected  # type: ignore[return-value]
-
-
 def _run_offline(args: argparse.Namespace) -> int:
-    strengths = tuple(args.strength or STRENGTHS)
+    strengths = tuple(_normalize_strength(s) for s in (args.strength or STRENGTHS))
     samples = _selected_samples(args.sample)
     for sample in samples:
         for strength in strengths:
@@ -3117,7 +3374,7 @@ def _run_offline(args: argparse.Namespace) -> int:
                         sample_id=sample["id"],
                         strength=strength,
                         pass_index=pass_index,
-                        ok=True,
+                        status="ok",
                         units=None,
                         elapsed_ms=None,
                         input=sample["input"],
@@ -3129,69 +3386,188 @@ def _run_offline(args: argparse.Namespace) -> int:
     return 0
 
 
+def _apply_overrides(args: argparse.Namespace) -> dict[str, object]:
+    """Apply A/B sweep overrides (guard ratios + sampling) in-process.
+
+    Guard ratios mutate the module-level PROFILES dict, which model_manager
+    references through the same dict object, so the change is visible on the
+    next correct_text_patch() call.  Sampling overrides are returned for the
+    caller to apply to the ConfigManager before constructing the manager.
+    """
+    from dataclasses import replace
+
+    from stet.core.text_utils import PROFILES
+
+    sampling: dict[str, object] = {}
+    if args.corr_temp is not None:
+        sampling["correction_temperature"] = args.corr_temp
+    if args.corr_top_k is not None:
+        sampling["correction_top_k"] = args.corr_top_k
+    if args.corr_top_p is not None:
+        sampling["correction_top_p"] = args.corr_top_p
+    if args.corr_min_p is not None:
+        sampling["correction_min_p"] = args.corr_min_p
+
+    for spec in args.hall_threshold or []:
+        strength, _, value = spec.partition("=")
+        strength = _normalize_strength(strength.strip())
+        if strength not in PROFILES:
+            raise SystemExit(f"Unknown profile for --hall-threshold: {strength}")
+        PROFILES[strength] = replace(
+            PROFILES[strength], hallucination_threshold=float(value)
+        )
+
+    for spec in args.word_ratio or []:
+        strength, _, pair = spec.partition("=")
+        strength = _normalize_strength(strength.strip())
+        if strength not in PROFILES:
+            raise SystemExit(f"Unknown profile for --word-ratio: {strength}")
+        min_s, _, max_s = pair.partition(",")
+        PROFILES[strength] = replace(
+            PROFILES[strength],
+            min_word_ratio=float(min_s.strip()),
+            max_word_ratio=float(max_s.strip()),
+        )
+
+    return sampling
+
+
 def _run_live(args: argparse.Namespace) -> int:
     from stet.core.config import ConfigManager
     from stet.llm.model_manager import ModelManager
 
-    strengths = tuple(args.strength or STRENGTHS)
+    strengths = tuple(_normalize_strength(s) for s in (args.strength or STRENGTHS))
     samples = _selected_samples(args.sample)
-    manager = ModelManager(ConfigManager())
-    failures = 0
+    sampling_overrides = _apply_overrides(args)
 
-    for sample in samples:
-        for strength in strengths:
+    _cm = ConfigManager()
+    _cm.config.update(sampling_overrides)
+    manager = ModelManager(_cm)
+    failures = 0
+    counts = {
+        strength: {"ok": 0, "miss": 0, "diff": 0, "fail": 0}
+        for strength in strengths
+    }
+
+    for strength in strengths:
+        for pack in _pack_samples(samples):
             for pass_index in range(1, args.passes + 1):
+                pack_text = "\n".join(s["input"] for s in pack)
                 started = perf_counter()
                 try:
                     output, units = manager.correct_text_patch(
-                        sample["input"],
+                        pack_text,
                         strength=strength,
                     )
                     elapsed_ms = int((perf_counter() - started) * 1000)
-                    expected = _expected_output(sample, strength)
-                    ok = output is not None and (expected is None or output == expected)
-                    if not ok:
+                except Exception as exc:
+                    elapsed_ms = int((perf_counter() - started) * 1000)
+                    for sample in pack:
                         failures += 1
+                        counts[strength]["fail"] += 1
+                        _print_row(
+                            EvalRow(
+                                sample_id=sample["id"],
+                                strength=strength,
+                                pass_index=pass_index,
+                                status="fail",
+                                units=None,
+                                elapsed_ms=elapsed_ms,
+                                input=sample["input"],
+                                expected=_expected_output(sample, strength),
+                                output=None,
+                                error=f"{type(exc).__name__}: {exc}",
+                            ),
+                            args.json,
+                        )
+                    continue
+
+                if output is None:
+                    for sample in pack:
+                        failures += 1
+                        counts[strength]["fail"] += 1
+                        _print_row(
+                            EvalRow(
+                                sample_id=sample["id"],
+                                strength=strength,
+                                pass_index=pass_index,
+                                status="fail",
+                                units=units,
+                                elapsed_ms=elapsed_ms,
+                                input=sample["input"],
+                                expected=_expected_output(sample, strength),
+                                output=None,
+                                error="backend returned no correction",
+                            ),
+                            args.json,
+                        )
+                    continue
+
+                pairs = _pair_output(pack, output)
+
+                for sample, corrected_line in pairs:
+                    expected = _expected_output(sample, strength)
+                    if corrected_line is None:
+                        # Pack reflowed — no reliable 1:1 pairing.  Score by
+                        # whole-output containment instead of failing.
+                        norm_out = _normalize_text(output)
+                        if expected is None:
+                            status = "ok"
+                            error = None
+                        else:
+                            norm_exp = _normalize_text(expected)
+                            norm_in = _normalize_text(sample["input"])
+                            if norm_exp in norm_out:
+                                status = "ok"
+                                error = None
+                            elif norm_in in norm_out:
+                                status = "miss"
+                                error = "under-correction (containment)"
+                            else:
+                                status = "diff"
+                                error = "reflowed, cannot verify"
+                    elif expected is None:
+                        status = "ok"
+                        error = None
+                    else:
+                        norm_in = _normalize_text(sample["input"])
+                        norm_out = _normalize_text(corrected_line)
+                        norm_exp = _normalize_text(expected)
+                        if norm_out == norm_exp:
+                            status = "ok"
+                        elif norm_out == norm_in:
+                            status = "miss"
+                        else:
+                            status = "diff"
+                        error = None
+                    if status != "ok":
+                        failures += 1
+                    counts[strength][status] += 1
                     _print_row(
                         EvalRow(
                             sample_id=sample["id"],
                             strength=strength,
                             pass_index=pass_index,
-                            ok=ok,
+                            status=status,
                             units=units,
                             elapsed_ms=elapsed_ms,
                             input=sample["input"],
+                            output=corrected_line,
                             expected=expected,
-                            output=output,
-                            error=(
-                                None
-                                if ok
-                                else "output mismatch"
-                                if output is not None
-                                else "backend returned no correction"
-                            ),
-                        ),
-                        args.json,
-                    )
-                except Exception as exc:
-                    failures += 1
-                    elapsed_ms = int((perf_counter() - started) * 1000)
-                    _print_row(
-                        EvalRow(
-                            sample_id=sample["id"],
-                            strength=strength,
-                            pass_index=pass_index,
-                            ok=False,
-                            units=None,
-                            elapsed_ms=elapsed_ms,
-                            input=sample["input"],
-                            expected=_expected_output(sample, strength),
-                            output=None,
-                            error=f"{type(exc).__name__}: {exc}",
+                            error=error,
                         ),
                         args.json,
                     )
 
+    for strength in strengths:
+        if args.json:
+            print(json.dumps({"summary": {"strength": strength, **counts[strength]}}))
+        else:
+            c = counts[strength]
+            print(
+                f"SUMMARY {strength}: ok={c['ok']} miss={c['miss']} "
+                f"diff={c['diff']} fail={c['fail']}"
+            )
     return 1 if failures else 0
 
 

@@ -582,6 +582,52 @@ class TestPostInstallActions:
 
         mock_popen.assert_not_called()
 
+    def test_model_download_writes_model_path_to_config(
+        self, qapp, installer_zip, tmp_path
+    ):
+        """_run_post_install_actions writes model_path when the model downloads.
+
+        Regression: the installer downloaded the model but left model_path
+        blank in config.json, so first launch re-prompted to download the
+        model again.
+        """
+        import json as json_mod
+        from windows_installer_payload import StetInstaller
+        from stet.constants import (
+            RECOMMENDED_MODEL_FILE,
+            LLAMA_BACKEND_DIR,
+            SERVER_EXE,
+        )
+
+        # Simulate a successful model download inside the install directory
+        model_file = tmp_path / RECOMMENDED_MODEL_FILE
+        model_file.write_bytes(b"fake-model")
+
+        config = tmp_path / "config.json"
+        config.write_text(
+            '{"model_path": "", "llama_server_path": "", '
+            '"chat_use_separate_model": false}',
+            encoding="utf-8",
+        )
+
+        wizard = StetInstaller(installer_zip)
+        wizard.setField("installDir", str(tmp_path))
+        wizard._completion_page._desktop_cb.setChecked(False)
+        wizard._completion_page._startmenu_cb.setChecked(False)
+        wizard._completion_page._download_model_cb.setChecked(True)
+        wizard._completion_page._launch_cb.setChecked(False)
+
+        with patch("windows_installer_payload.create_shortcut"), \
+             patch.object(wizard, "_write_arp_registry"):
+            wizard._run_post_install_actions()
+
+        cfg = json_mod.loads(config.read_text(encoding="utf-8"))
+        assert cfg["model_path"] == str(model_file)
+        assert cfg["chat_model_path"] == str(model_file)
+        assert cfg["llama_server_path"] == str(
+            tmp_path / LLAMA_BACKEND_DIR / SERVER_EXE
+        )
+
 
 # ===========================================================================
 # main() entry point tests
@@ -671,6 +717,31 @@ class TestARPRegistry:
              patch("stet.ui.downloader.DownloadProgressDialog"):
             wizard._run_post_install_actions()
             mock_arp.assert_called_once_with(tmp_path)
+
+
+class TestStylesheetHelpers:
+    """Tests for _apply_stylesheet / _installer_checkbox_css.
+
+    Regression: a compiled StetSetup.exe crashed at startup with
+    ``NameError: name 'tempfile' is not defined`` because
+    _installer_checkbox_css() used tempfile.gettempdir() without importing
+    tempfile. These tests exercise the exact startup stylesheet path so any
+    future undefined-name regression is caught in CI.
+    """
+
+    def test_installer_checkbox_css_has_no_undefined_names(self, qapp):
+        """_installer_checkbox_css must not raise NameError (tempfile import)."""
+        from windows_installer_payload import _installer_checkbox_css
+
+        css = _installer_checkbox_css()
+        assert "QCheckBox" in css
+        assert "QRadioButton" in css
+
+    def test_apply_stylesheet_runs_without_crash(self, qapp):
+        """_apply_stylesheet must complete — startup path of the compiled installer."""
+        from windows_installer_payload import _apply_stylesheet
+
+        _apply_stylesheet(qapp)  # must not raise
 
 
 class TestZipDiscoveryAndContainment:

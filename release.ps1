@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [string]$Version,
-    [string]$Message = "feat: replace llama.cpp updater with full application auto-updater"
+    [string]$Message = "feat: release"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,7 +31,9 @@ Write-Host "==> Running tests (Chunk 2)" -ForegroundColor Cyan
 if ($LASTEXITCODE -ne 0) { throw "Tests failed in Chunk 2 (exit $LASTEXITCODE) - aborting release" }
 
 Write-Host "==> Staging files" -ForegroundColor Cyan
-git add stet/ build.py requirements.txt .gitignore release.ps1 tests/
+# Stage the full intended change set — README.md, scripts/, tests/, deletions
+# and new files — but never the stray history.jsonl app log at the repo root.
+git add -A -- . ':!history.jsonl'
 
 
 # Only commit if there are staged changes
@@ -128,18 +130,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 if (Test-Path $notesFile) { Remove-Item $notesFile }
 
-# Write-Host "==> Updating Gumroad Listing" -ForegroundColor Cyan
-# $grStatus = & gumroad auth status
-# if ($grStatus -like "*Not logged in*") {
-#     throw "Gumroad CLI is not authenticated. Please run 'gumroad auth login' in your terminal to authenticate."
-# }
-# 
-# $productId = "crcezg"
-# 
-# Write-Host "    Uploading portable ZIP to Gumroad..." -ForegroundColor Cyan
-# & gumroad products update $productId --file $zip.FullName --file-name "stet_portable.zip" --non-interactive
-# if ($LASTEXITCODE -ne 0) { throw "Gumroad product update failed (exit $LASTEXITCODE)" }
+Write-Host "==> Updating Gumroad Listing" -ForegroundColor Cyan
+$grStatus = & gumroad auth status
+if ($grStatus -like "*Not logged in*") {
+    throw "Gumroad CLI is not authenticated. Please run 'gumroad auth login' in your terminal to authenticate."
+}
+
+$productId = "crcezg"
+
+Write-Host "    Uploading portable ZIP to Gumroad..." -ForegroundColor Cyan
+& gumroad products update $productId --file $zip.FullName --file-name "stet_portable.zip" --non-interactive
+if ($LASTEXITCODE -ne 0) { throw "Gumroad product update failed (exit $LASTEXITCODE)" }
 
 Write-Host ""
 Write-Host "Done. https://github.com/AmrZriek/Stet/releases/tag/v$Version" -ForegroundColor Green
-# Write-Host "Gumroad listing updated successfully!" -ForegroundColor Green
+Write-Host "Gumroad listing updated successfully!" -ForegroundColor Green

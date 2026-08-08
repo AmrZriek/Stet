@@ -243,9 +243,15 @@ def artifact_hygiene(tmp_path_factory):
                 pass
 
 
-# TODO: Windows mock GC access violation in tests (Medium)
-# Root Cause: PyQt6 C++ destructor ordering during Python GC when StetApp instances are garbage-collected.
-# MagicMock objects that mock Qt widgets (e.g., QSystemTrayIcon, QTimer, signal connections) can be destroyed
-# in an order that triggers Qt's C++ destructor chain to access already-freed memory.
-# Proposed Fix: Add addFinalizer/addCleanup in test fixtures to explicitly call app.deleteLater() + QApplication.processEvents()
-# before GC runs to ensure clean C++ widget teardown before Python objects are garbage-collected.
+@pytest.fixture(autouse=True)
+def _cleanup_qt_events_and_gc():
+    yield
+    import gc
+    gc.collect()
+    try:
+        from PyQt6.QtWidgets import QApplication
+        qapp = QApplication.instance()
+        if qapp is not None:
+            qapp.processEvents()
+    except Exception:
+        pass

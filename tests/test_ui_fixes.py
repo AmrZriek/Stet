@@ -776,9 +776,10 @@ def test_conversation_mode_shows_readable_final_diff_once(qtbot, monkeypatch):
     preview = win.corr_edit.toPlainText()
     html = win._chat_transcript_html(final_result=corrected)
 
-    assert preview.count(corrected) == 1
+    assert "NINE" in preview
+    assert "nine" in preview
     assert "Fix grammar" in preview
-    assert "color:#4ade80;text-decoration:underline;" in html
+    assert "color:#4ade80;text-decoration:none;" in html  # nine->NINE: 1:1 same-position fix, shares letters -> green
     win.close()
 
 

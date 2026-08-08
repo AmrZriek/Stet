@@ -432,10 +432,12 @@ def _is_fewshot_echo(raw: str, original: str) -> bool:
 def _dict_prepass(text: str) -> tuple[str, int]:
     """Phase 0: deterministic typo replacement. Returns (fixed_text, n_fixes).
 
-    .. note:: Enabled for spelling_only mode only.  The dict prepass guarantees
-       that common typos are fixed before the LLM sees them, insurance for
-       smaller models that might miss well-known errors.  Other modes skip
-       the prepass — the LLM handles all corrections in a single pass.
+    .. note:: Applied for all built-in strengths, not just spelling_only.
+       The dict prepass guarantees that common typos are fixed before the LLM
+       sees them, insurance for smaller models that might miss well-known
+       errors.  It is only skipped when the user has taken control via a
+       custom system prompt or a custom mode prompt override — those paths
+       delegate all correction to the LLM.
 
     Uses word-boundary-aware substitution that preserves the original casing
     (lowercase, Capitalized, ALLCAPS). Skips replacement if the surrounding
@@ -666,6 +668,54 @@ def _post_splice_sanity(
     return True
 
 
+def _levenshtein_dist(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        return _levenshtein_dist(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def _normalize_typo_divergence(orig: str, corr: str) -> tuple[str, str]:
+    """Normalize typo-class differences between orig and corr prior to computing
+    character-level divergence ratio."""
+    orig_pre, _ = _dict_prepass(orig)
+    corr_pre, _ = _dict_prepass(corr)
+
+    o_words = orig_pre.split()
+    c_words = corr_pre.split()
+
+    if not o_words or not c_words:
+        return orig_pre, corr_pre
+
+    sm = difflib.SequenceMatcher(None, [w.lower() for w in o_words], [w.lower() for w in c_words])
+    opcodes = sm.get_opcodes()
+
+    new_o = list(o_words)
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "replace" and (i2 - i1 == 1) and (j2 - j1 == 1):
+            w1 = o_words[i1]
+            w2 = c_words[j1]
+            w1_clean = re.sub(r"^\W+|\W+$", "", w1).lower()
+            w2_clean = re.sub(r"^\W+|\W+$", "", w2).lower()
+            if w1_clean and w2_clean and len(w1_clean) >= 3 and len(w2_clean) >= 3:
+                if abs(len(w1_clean) - len(w2_clean)) <= 2:
+                    dist = _levenshtein_dist(w1_clean, w2_clean)
+                    if dist <= 2:
+                        new_o[i1] = w2
+
+    return " ".join(new_o), corr_pre
+
+
 def _hallucination_ratio(orig: str, corr: str, strength: str = "spelling_only") -> float:
     """Normalized divergence in [0, 1]. 0 = identical, 1 = completely different.
 
@@ -677,9 +727,11 @@ def _hallucination_ratio(orig: str, corr: str, strength: str = "spelling_only") 
     if not orig or not corr:
         return 1.0 if orig != corr else 0.0
 
+    orig_norm, corr_norm = _normalize_typo_divergence(orig, corr)
+
     # Character-based comparison ignoring spacing
-    o_chars = orig.replace(" ", "").replace("\n", "").lower()
-    c_chars = corr.replace(" ", "").replace("\n", "").lower()
+    o_chars = orig_norm.replace(" ", "").replace("\n", "").lower()
+    c_chars = corr_norm.replace(" ", "").replace("\n", "").lower()
 
     if not o_chars or not c_chars:
         return 1.0
@@ -1066,7 +1118,7 @@ def _extract_rewritten_sentence(
         return None
 
     # Reject obvious non-corrections (conversational preambles).
-    # Skip a prefix if the original text itself starts with the same word —
+    # Skip a prefix if the original text itself starts with the same word/synonym —
     # the model is echoing the user's real text, not adding filler.
     _PREAMBLE_PREFIXES = (
         "here is",
@@ -1079,8 +1131,20 @@ def _extract_rewritten_sentence(
     )
     low = candidate.lower()
     orig_low = original_text.lower() if original_text else ""
+
+    def _orig_matches_prefix(p: str) -> bool:
+        if not orig_low:
+            return False
+        if orig_low.startswith(p):
+            return True
+        if p in ("ok,", "okay", "ok"):
+            return orig_low.startswith("ok")
+        if p in ("here is", "here's"):
+            return orig_low.startswith("here")
+        return False
+
     if any(
-        low.startswith(p) and not orig_low.startswith(p)
+        low.startswith(p) and not _orig_matches_prefix(p)
         for p in _PREAMBLE_PREFIXES
     ):
         return None

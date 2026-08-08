@@ -14,6 +14,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtGui import QCloseEvent, QKeyEvent
+from PyQt6.QtTest import QSignalSpy
+from PyQt6.QtWidgets import QApplication
 
 from stet.core.config import ConfigManager
 from stet.ui.main_window import CorrectionWindow
@@ -90,6 +92,21 @@ def _make_cw(cfg, qtbot, text="Hello world"):
     cw = CorrectionWindow(text, ac_model, chat_model, cfg)
     qtbot.addWidget(cw)
     return cw
+
+
+def _make_accept_cw(cfg, text="Hello world"):
+    """Build a CorrectionWindow WITHOUT qtbot.addWidget.
+
+    _accept() now owns the full close -> deferred emit -> deleteLater
+    lifecycle (closeEvent blockSignals guard + explicit delete in
+    _emit_accepted). Registering with qtbot would make pytest-qt close()
+    and deleteLater() the window again at teardown, racing the deferred
+    deletion and raising RuntimeError. The caller must process events
+    after _accept() so the deferred emit fires before the test ends.
+    """
+    ac_model = MagicMock()
+    chat_model = MagicMock()
+    return CorrectionWindow(text, ac_model, chat_model, cfg)
 
 
 # ── Static method tests ───────────────────────────────────────────────────
@@ -283,13 +300,57 @@ class TestChatStreamHandlers:
 
 
 class TestAcceptCopy:
-    def test_accept_emits_signal(self, qtbot, cfg):
-        cw = _make_cw(cfg, qtbot)
+    def test_accept_emits_signal(self, cfg):
+        cw = _make_accept_cw(cfg)
         signals = []
         cw.accepted.connect(lambda t: signals.append(t))
         cw.corrected = "Fixed text"
         cw._accept()
+        QApplication.processEvents()  # emit is deferred one tick after close
         assert signals == ["Fixed text"]
+
+    def test_accept_signal_fires_after_close(self, cfg, qtbot):
+        """Regression: _accept must close the window BEFORE emitting accepted.
+
+        The old emit-then-close order ran app._paste_text while the panel
+        still had keyboard focus, so its SendInput Ctrl+V landed inside the
+        panel and the paste was lost. The emit is now deferred via
+        QTimer.singleShot(0, ...) after close(); this test proves the signal
+        fires only after the window is closed/hidden.
+        """
+        cw = _make_accept_cw(cfg)
+        cw.corrected = "Fixed text"
+        cw.show()
+        qtbot.waitUntil(lambda: cw.isVisible(), timeout=2000)
+
+        spy = QSignalSpy(cw.accepted)
+        # Capture visibility at the moment the signal fires. The deferred
+        # emit runs inside _emit_accepted BEFORE deleteLater(), so the C++
+        # object is still alive here — reading it later would race the
+        # delete and raise RuntimeError.
+        visible_at_emit = {}
+        cw.accepted.connect(lambda t: visible_at_emit.setdefault("visible", cw.isVisible()))
+
+        cw._accept()
+
+        # Window is closed synchronously, but the signal must NOT have fired
+        # yet — it is deferred until after close completes.
+        assert len(spy) == 0
+        assert cw.isVisible() is False
+
+        # Pump the event loop until the deferred emit fires (waitUntil, not a
+        # single processEvents tick, so the test is not timing-flaky).
+        qtbot.waitUntil(lambda: len(spy) == 1, timeout=2000)
+        assert spy[0][0] == "Fixed text"
+        # The window was already hidden when the signal fired (focus has
+        # returned to the source document).
+        assert visible_at_emit["visible"] is False
+
+        # Flush the deferred deleteLater so the C++ object is gone before
+        # QApplication teardown. plain processEvents() does NOT deliver
+        # DeferredDelete events, which left the widget pending deletion and
+        # made this test hang when run in isolation.
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     def test_copy_writes_clipboard(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
@@ -304,6 +365,34 @@ class TestAcceptCopy:
         with patch("stet.ui.main_window._clipboard_write_text"):
             cw._copy()
         assert cw.copy_btn.text() == "Copied"
+
+    def test_accept_syncs_manual_edits_in_edit_mode(self, cfg, qtbot):
+        """Regression: Accept during Edit-text mode must paste the user's
+        manual edits, not the stale pre-edit corrected text."""
+        cw = _make_accept_cw(cfg)
+        cw.corrected = "Hello beautiful world"
+        cw._toggle_edit_text_mode()
+        cw.corr_edit.setPlainText("Hello GORGEOUS world")
+
+        signals = []
+        cw.accepted.connect(lambda t: signals.append(t))
+        cw._accept()
+        qtbot.waitUntil(lambda: len(signals) == 1, timeout=2000)
+        assert signals[0] == "Hello GORGEOUS world"
+
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+    def test_copy_syncs_manual_edits_in_edit_mode(self, cfg, qtbot):
+        """Regression: Copy during Edit-text mode must capture the user's
+        manual edits, not the stale pre-edit corrected text."""
+        cw = _make_accept_cw(cfg)
+        cw.corrected = "Hello beautiful world"
+        cw._toggle_edit_text_mode()
+        cw.corr_edit.setPlainText("Hello GORGEOUS world")
+
+        with patch("stet.ui.main_window._clipboard_write_text") as mock_write:
+            cw._copy()
+            mock_write.assert_called_with("Hello GORGEOUS world")
 
 
 # ── _reset ────────────────────────────────────────────────────────────────

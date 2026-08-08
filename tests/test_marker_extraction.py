@@ -67,3 +67,21 @@ def test_extract_preamble_sure_with_matching_original():
         original_text="Sure, I can hlep with that.",
     )
     assert result == "Sure, I can help with that."
+
+
+def test_extract_preamble_ok_comma_with_okay_original():
+    """'Ok, ...' is NOT rejected when the original starts with 'okay'."""
+    result = _extract_rewritten_sentence(
+        "Ok, now please apply the changes by rerouting to antigravity; ensure it has all the research and information immediately accessible to it.",
+        original_text="okay now please apply the changes by rerouting to antigravity, ensure it has all the research an dinformation immedietly",
+    )
+    assert result == "Ok, now please apply the changes by rerouting to antigravity; ensure it has all the research and information immediately accessible to it."
+
+
+def test_extract_preamble_here_is_with_here_are_original():
+    """'Here is ...' is NOT rejected when the original starts with 'here'."""
+    result = _extract_rewritten_sentence(
+        "Here is the list of changes.",
+        original_text="here are the list of changes",
+    )
+    assert result == "Here is the list of changes."

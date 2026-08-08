@@ -1041,17 +1041,36 @@ class ModelManager(QObject):
         profile_name = "template_transform" if mode_prompt_override else strength
         profile = PROFILES.get(profile_name, PROFILES["full_correction"])
 
+        # ── Phase 0a: inline masking for URLs, emails, paths ──────────────
+        # Mask BEFORE the dict prepass so the prepass can never rewrite a
+        # protected atom (e.g. a URL path segment that matches a map word).
+        masked_entities = []
+
+        def mask_repl(match):
+            idx = len(masked_entities) + 1
+            masked_entities.append(match.group(0))
+            return f"__STET_PROTECTED_{idx}__"
+
+        working_text = _INLINE_HAZARD_RE.sub(mask_repl, text)
+
+        user_re = self._get_user_protection_re()
+        if user_re is not None:
+            working_text = user_re.sub(mask_repl, working_text)
+
         # ── Phase 0: deterministic dict pre-pass ─────────────────────────
-        # For spelling-only, apply the ~4300-entry typo dictionary before
-        # the LLM so that common typos are guaranteed fixed even when the
-        # model is too small to catch them all.  The LLM still runs
+        # For all built-in strengths, apply the ~4300-entry typo dictionary
+        # before the LLM so that common typos are guaranteed fixed even when
+        # the model is too small to catch them all.  The LLM still runs
         # afterwards to catch unknown typos the dictionary missed.
-        if strength == "spelling_only":
-            pre_corrected, dict_fixes = _dict_prepass(text)
+        # The dictionary is English-only and context-blind, so it is skipped
+        # whenever the user has taken control via a system prompt override
+        # or a custom mode prompt.
+        if not custom_sys and not mode_prompt_override:
+            pre_corrected, dict_fixes = _dict_prepass(working_text)
             if dict_fixes > 0:
                 log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
         else:
-            pre_corrected, dict_fixes = text, 0
+            pre_corrected, dict_fixes = working_text, 0
         total_words = len(pre_corrected.split())
 
 
@@ -1060,19 +1079,6 @@ class ModelManager(QObject):
         # Profile-driven chunking: each mode/template gets its own chunk size.
         # With --parallel 4 slots, up to 4 units run concurrently.  Separator
         # preserves inter-unit whitespace/newlines so reassembly is lossless.
-
-        # Inline masking for URLs, emails, and file paths.
-        masked_entities = []
-        def mask_repl(match):
-            idx = len(masked_entities) + 1
-            masked_entities.append(match.group(0))
-            return f"__STET_PROTECTED_{idx}__"
-
-        pre_corrected = _INLINE_HAZARD_RE.sub(mask_repl, pre_corrected)
-
-        user_re = self._get_user_protection_re()
-        if user_re is not None:
-            pre_corrected = user_re.sub(mask_repl, pre_corrected)
 
         chunks = _chunk_text_by_sentences(pre_corrected, profile.chunk_words)
         if len(chunks) > 1:
@@ -1281,7 +1287,7 @@ class ModelManager(QObject):
                                     continue
                                 else:
                                     log(f"[{self.label}] Patch unit {idx + 1}: span-only recovery failed — keeping original")
-                                    corrected_parts[idx] = (chunk_text, sep)
+                                    corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
                                     any_preserved = True
                                     continue
 
@@ -1291,7 +1297,7 @@ class ModelManager(QObject):
                         self.last_patch_error = err_msg
                         log(f"[{self.label}] Patch {err_msg}")
                         corrected = None
-                        corrected_parts[idx] = (chunk_text, sep)
+                        corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
                         continue
 
                     # Reject if the model refused or returned an empty edit
@@ -1303,7 +1309,7 @@ class ModelManager(QObject):
                         err_msg = f"Unit {idx + 1} rejected: model refused or returned empty edit"
                         self.last_patch_error = err_msg
                         log(f"[{self.label}] Patch {err_msg}")
-                        corrected_parts[idx] = (chunk_text, sep)
+                        corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
                         continue
 
                     # Phase 2: hunk-level hallucination guard
@@ -1325,7 +1331,7 @@ class ModelManager(QObject):
                             f"[{self.label}] Patch unit {idx + 1} rejected: "
                             "post-splice sanity check failed"
                         )
-                        corrected_parts[idx] = (chunk_text, sep)
+                        corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
                         continue
 
                     if strength in {

@@ -199,3 +199,91 @@ class TestOpcodesSplitting:
             ('replace', 2, 3, 2, 3),
             ('equal', 3, 4, 3, 4)
         ]
+
+
+import threading
+from PyQt6.QtWidgets import QApplication
+
+
+def _make_test_window(qtbot, monkeypatch, orig="Original text"):
+    class WindowCfg:
+        def get(self, key, default=None):
+            values = {
+                "streaming_strength": "full_correction",
+                "correction_modes": [],
+                "chat_mode": "conversation"
+            }
+            return values.get(key, default)
+
+    class MockModel:
+        def __init__(self):
+            from PyQt6.QtCore import pyqtSignal, QObject
+            class Signals(QObject):
+                status_changed = pyqtSignal(str)
+            self.signals = Signals()
+            self.status_changed = self.signals.status_changed
+            self.label = "Mock"
+
+        def is_loaded(self):
+            return True
+        def make_stream_worker(self, *args, **kwargs):
+            from PyQt6.QtCore import QThread, pyqtSignal
+            class DummyWorker(QThread):
+                token = pyqtSignal(str)
+                done = pyqtSignal(str)
+                error = pyqtSignal(str)
+                def run(self): pass
+            return DummyWorker()
+        def mark_used(self):
+            pass
+
+    monkeypatch.setattr(CorrectionWindow, "_do_correction", lambda self: None)
+    win = CorrectionWindow(orig, MockModel(), MockModel(), WindowCfg())
+    qtbot.addWidget(win)
+    return win
+
+
+def test_close_marks_closed_and_blocks_signals(qtbot, monkeypatch):
+    win = _make_test_window(qtbot, monkeypatch, "Initial text")
+    win.close()
+    assert win._is_closed is True
+
+    win._correction_ready_sig.emit("New text", "patch")
+    win._correction_failed_sig.emit("")
+    QApplication.processEvents()
+
+    assert win.corrected == "Initial text"
+
+
+def test_completion_off_thread_is_queued(qtbot, monkeypatch):
+    win = _make_test_window(qtbot, monkeypatch, "Initial text")
+
+    def off_thread_call():
+        win._on_correction_ready("fixed text", "patch")
+
+    t = threading.Thread(target=off_thread_call)
+    t.start()
+    t.join()
+
+    assert "fixed text" not in win.corr_edit.toPlainText()
+
+    QApplication.processEvents()
+    assert win.corrected == "fixed text"
+
+
+def test_closed_completion_is_noop(qtbot, monkeypatch):
+    win = _make_test_window(qtbot, monkeypatch, "Initial text")
+    win.close()
+    assert win._is_closed is True
+
+    win._on_correction_failed()
+    QApplication.processEvents()
+    assert win.corrected == "Initial text"
+
+
+def test_window_lifecycle_stress(qtbot, monkeypatch):
+    for i in range(20):
+        win = _make_test_window(qtbot, monkeypatch, f"Text {i}")
+        win.close()
+        QApplication.processEvents()
+        assert win._is_closed is True

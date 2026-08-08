@@ -6,6 +6,13 @@ QWidget {
     font-size: 13px;
     color: #ededee;
 }
+QDialog, QMessageBox {
+    background-color: #121315;
+    color: #ededee;
+}
+QMessageBox QLabel {
+    color: #ededee;
+}
 
 /* ── Tooltip ────────────────────────────────────────────────────────── */
 QToolTip {
@@ -143,6 +150,28 @@ QPushButton#danger {
 QPushButton#danger:hover {
     background: rgba(248, 113, 113, 0.1);
     border: 1px solid #f87171;
+}
+
+QPushButton#viewModeBtn, QPushButton#editTextBtn {
+    background: transparent;
+    border: 1px solid #28292c;
+    border-radius: 0px;
+    padding: 6px 16px;
+    color: #ededee;
+    font-family: 'IBM Plex Mono', 'Consolas', monospace;
+    font-size: 12px;
+}
+
+QPushButton#viewModeBtn:hover, QPushButton#editTextBtn:hover {
+    background: #1c1d1f;
+    border-color: #d4a373;
+    color: #d4a373;
+}
+
+QPushButton#viewModeBtn:checked, QPushButton#editTextBtn:checked {
+    background: #28292c;
+    color: #d4a373;
+    border-color: #d4a373;
 }
 
 /* ── Labels ─────────────────────────────────────────────────────────── */
@@ -426,6 +455,13 @@ QLabel#settingsDescription {
     line-height: 1.5;
 }
 
+QLabel#settingsWarning {
+    color: #d4a373;
+    font-size: 12px;
+    line-height: 1.5;
+    margin-top: 2px;
+}
+
 QPushButton#addButton {
     font-size: 12px;
     padding: 8px 16px;
@@ -562,11 +598,12 @@ QLabel#shortcutValueLabel {
     color: #88898c;
 }
 QLabel#methodBadge {
-    font-size: 11px;
+    font-size: 10px;
     font-weight: 500;
     color: #d4a373;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     border: none;
+    padding: 2px 8px;
     text-transform: uppercase;
 }
 QLabel#statusLabel {
@@ -574,7 +611,7 @@ QLabel#statusLabel {
     font-size: 11px;
     border: none;
     background: transparent;
-    padding: 0;
+    padding: 0 12px;
 }
 QLabel#statusLabel[state="idle"] {
     color: #88898c;

@@ -954,6 +954,27 @@ class CorrectionModesPage(QWidget):
             desc.setWordWrap(True)
             self._form.addWidget(desc)
 
+            if i == 0:
+                warn = QLabel(
+                    "English dictionary pre-pass: all built-in modes first apply a "
+                    "built-in English typo dictionary before the model runs, so common "
+                    "typos are fixed even if the model misses them. It may rewrite valid "
+                    "words from other languages (e.g. Spanish \u201csi\u201d becomes "
+                    "\u201cis\u201d). It is skipped when a system prompt override or "
+                    "custom mode prompt is active."
+                )
+                warn.setObjectName("settingsWarning")
+                warn.setWordWrap(True)
+                self._form.addWidget(warn)
+            elif i in (1, 2):
+                warn = QLabel(
+                    "Uses the built-in English typo dictionary before the model runs — "
+                    "see the note under Spelling Only."
+                )
+                warn.setObjectName("settingsWarning")
+                warn.setWordWrap(True)
+                self._form.addWidget(warn)
+
             instr_label = QLabel("Prompt sent to the LLM for this mode:")
             instr_label.setObjectName("settingsSublabel")
             instr_label.setWordWrap(True)

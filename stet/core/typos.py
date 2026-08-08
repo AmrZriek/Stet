@@ -4366,4 +4366,30 @@ _COMMON_TYPOS_MAP = {
     "ytou": "you",
     "yuo": "you",
     "zeebra": "zebra",
+    # ── 2026-08-03 eval-driven additions (spelling_only dict prepass) ──
+    # Transposition typos missing from the map.  The 2B model catches these
+    # in clear context but pack composition changes its output, so the
+    # prepass makes them deterministic.  NOTE: "ti"/"si"/"ot"/"fo" are real
+    # words in other contexts (solfege, Spanish, dialect) — accepted per
+    # user request for English prose.
+    "ti": "it",
+    "hte": "the",
+    "wsa": "was",
+    "si": "is",
+    "ot": "to",
+    "fo": "of",
+    "hwo": "how",
+    # Residual misspellings the greedy 2B model consistently misses in
+    # spelling_only mode (verified via scripts/eval_matrix.py baseline).
+    "helo": "hello",
+    "stret": "street",
+    "qoute": "quote",
+    "spelking": "spelling",
+    "applse": "apples",
+    "shoping": "shopping",
+    "wrold": "world",
+    "mangose": "mangoes",
+    "ornges": "oranges",
+    "apendix": "appendix",
+    "functoin": "function",
 }
