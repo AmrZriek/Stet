@@ -11,7 +11,7 @@ Usage
     python build.py                     # full release build
     python build.py --version 1.0.0     # override version tag
     python build.py --keep-folder       # keep intermediate build dir
-    python build.py --skip-installer    # skip StetSetup.exe (Windows only)
+    python build.py --skip-installer    # skip installer build (Windows only)
 
 Requirements
 ------------
@@ -695,8 +695,9 @@ def _installer_pyinstaller_cmd(version: str, artifacts_dir: Path, portable_zip: 
         if src.exists():
             extra.append(f"--add-data={src}{sep}.")
 
+    installer_base = f"StetSetup_v{version}"
     cmd = _base_pyinstaller_cmd(
-        "StetSetup", artifacts_dir, version=version,
+        installer_base, artifacts_dir, version=version,
         mode="onefile", console="disable",
         product_name="Stet Setup",
         description="Stet desktop writing assistant installer",
@@ -1564,8 +1565,11 @@ open "$SCRIPT_DIR/Stet.app"
         if PLATFORM != "Windows" or self.skip_installer:
             return
 
+        installer_filename = f"StetSetup_v{self.version}.exe"
+        output_base_filename = f"StetSetup_v{self.version}"
+
         total = self._total_steps()
-        banner(f"Step 6 / {total} — Compile self-contained StetSetup.exe")
+        banner(f"Step 6 / {total} — Compile self-contained {installer_filename}")
 
         # Check if Inno Setup compiler (ISCC) is available
         iscc = shutil.which("ISCC.exe") or shutil.which("iscc")
@@ -1596,7 +1600,7 @@ UninstallDisplayIcon={{app}}\\Stet.exe
 Compression=lzma2/max
 SolidCompression=yes
 OutputDir="{DIST.resolve()}"
-OutputBaseFilename=StetSetup
+OutputBaseFilename={output_base_filename}
 {icon_line}
 PrivilegesRequired=admin
 ArchitecturesInstallIn64BitMode=x64
@@ -1620,7 +1624,7 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
             try:
                 # Run the Inno Setup compiler
                 run([iscc, str(iss_path)])
-                print("  ✓ Native Inno Setup installer compiled successfully.")
+                print(f"  ✓ Native Inno Setup installer compiled successfully: dist/{installer_filename}")
                 return
             except subprocess.CalledProcessError as e:
                 print(f"  WARNING: Inno Setup compilation failed (exit {e.returncode}) — falling back to PyInstaller...")
@@ -1649,14 +1653,20 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
             print("  The portable ZIP is still available.")
             return
 
-        installer_exe = self.artifacts_dir / "StetSetup.exe"
+        installer_exe = self.artifacts_dir / installer_filename
+        if not installer_exe.exists():
+            # Check for legacy StetSetup.exe if PyInstaller output name varied
+            fallback_exe = self.artifacts_dir / "StetSetup.exe"
+            if fallback_exe.exists():
+                installer_exe = fallback_exe
+
         if installer_exe.exists():
-            final_path = DIST / "StetSetup.exe"
+            final_path = DIST / installer_filename
             shutil.copy2(installer_exe, final_path)
             size_mb = final_path.stat().st_size / 1_048_576
-            print(f"  Created: dist/StetSetup.exe (PyInstaller fallback)  ({size_mb:.1f} MB)")
+            print(f"  Created: dist/{installer_filename} (PyInstaller fallback)  ({size_mb:.1f} MB)")
         else:
-            print("  WARNING: StetSetup.exe not found in build output")
+            print(f"  WARNING: {installer_filename} not found in build output")
 
     # ── Step 7: SHA-256 checksums ────────────────────────────────────────
 

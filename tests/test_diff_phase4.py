@@ -295,6 +295,28 @@ def test_whole_document_edit_mode_toggle_done_reset_chat(qtbot, dummy_cfg, mock_
     assert win3.edit_text_btn.isHidden() is True
 
 
+def test_accept_without_clicking_done_applies_edits(qtbot, dummy_cfg, mock_model):
+    """Calling _accept() directly while in edit mode (without clicking Done first) commits edits and emits edited text."""
+    win = make_window("Original text", dummy_cfg, mock_model)
+    win._render_diff("Initial corrected text")
+
+    # Enter edit mode
+    win._toggle_edit_text_mode()
+    assert win._edit_text_mode is True
+    win.corr_edit.setPlainText("Newly edited text by user")
+
+    # Directly accept without clicking Done first
+    accepted_texts = []
+    win.accepted.connect(accepted_texts.append)
+    win._accept()
+    QApplication.processEvents()
+
+    assert win._edit_text_mode is False
+    assert len(accepted_texts) == 1
+    assert accepted_texts[0] == "Newly edited text by user"
+
+
+
 def test_clean_view_toggle_noop_while_in_flight(qtbot, dummy_cfg, mock_model):
     win = make_window("Original text", dummy_cfg, mock_model)
     qtbot.addWidget(win)

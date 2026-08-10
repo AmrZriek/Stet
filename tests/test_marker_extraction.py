@@ -85,3 +85,57 @@ def test_extract_preamble_here_is_with_here_are_original():
         original_text="here are the list of changes",
     )
     assert result == "Here is the list of changes."
+
+
+# ── Reported bug (2026-08-11): preamble-strip deleted real leading text ─────
+# A chunk whose FIRST sentence starts with a preamble phrase ("The corrected
+# version …", "Here is the corrected version …") had that real content stripped
+# by strip_meta_commentary, because it treats the phrase as model commentary.
+# The original-aware fix preserves it when the original itself starts with it.
+
+
+def test_extract_preamble_the_corrected_version_with_matching_original():
+    """Chunk first sentence legitimately starts with 'The corrected version' —
+    must be preserved, not stripped."""
+    sentence = "The corrected version was released on Friday. Send it out immediately."
+    result = _extract_rewritten_sentence(sentence, original_text=sentence)
+    assert result == sentence
+
+
+def test_extract_preamble_the_corrected_version_without_matching_original():
+    """A model-added 'The corrected version …' lead-in IS commentary when the
+    original does NOT start with it — still stripped."""
+    result = _extract_rewritten_sentence(
+        "The corrected version was released on Friday.",
+        original_text="Please fix this sentence.",
+    )
+    assert result == "was released on Friday."
+
+
+def test_extract_preamble_here_is_corrected_version_with_matching_original():
+    """The long-phrase repro from the reported bug: 'Here is the corrected
+    version of the final quarterly report …' must survive intact."""
+    sentence = (
+        "Here is the corrected version of the final quarterly report that the "
+        "board reviewed and approved yesterday. Send it out immediately."
+    )
+    result = _extract_rewritten_sentence(sentence, original_text=sentence)
+    assert result == sentence
+
+
+def test_extract_preamble_here_is_corrected_version_without_matching_original():
+    """Without a matching original the model-added lead-in is stripped — only
+    the tail survives (pre-fix behaviour for genuine commentary)."""
+    result = _extract_rewritten_sentence(
+        "Here is the corrected version of the final report. Send it out.",
+        original_text="Please fix this sentence.",
+    )
+    assert result == "of the final report. Send it out."
+
+
+def test_extract_hrule_preserved_when_original_matches():
+    """A leading '---' divider that the original starts with is echoed content,
+    not a model separator — must survive extraction."""
+    chunk = "---\nActual body text that must survive."
+    result = _extract_rewritten_sentence(chunk, original_text=chunk)
+    assert result == chunk

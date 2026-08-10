@@ -69,7 +69,7 @@ if (-not $zip) {
 if (-not $zip) { throw "Portable ZIP not found in dist/" }
 $artifacts += $zip.FullName
 
-$installer = Get-ChildItem dist -Filter "StetSetup.exe" | Select-Object -First 1
+$installer = Get-ChildItem dist -Filter "StetSetup*.exe" | Select-Object -First 1
 if ($installer) {
     $artifacts += $installer.FullName
     $installerSizeMb = [math]::Round($installer.Length / 1MB, 1)
@@ -138,8 +138,10 @@ if ($grStatus -like "*Not logged in*") {
 
 $productId = "crcezg"
 
-Write-Host "    Uploading portable ZIP to Gumroad..." -ForegroundColor Cyan
-& gumroad products update $productId --file $zip.FullName --file-name "stet_portable.zip" --non-interactive
+# Gumroad lists the Windows installer, not the portable ZIP.
+if (-not $installer) { throw "Gumroad upload requires the installer (StetSetup*.exe), which was not built." }
+Write-Host "    Uploading installer to Gumroad..." -ForegroundColor Cyan
+& gumroad products update $productId --file $installer.FullName --file-name $installer.Name --non-interactive
 if ($LASTEXITCODE -ne 0) { throw "Gumroad product update failed (exit $LASTEXITCODE)" }
 
 Write-Host ""

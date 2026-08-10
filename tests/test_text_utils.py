@@ -120,4 +120,74 @@ def test_extract_rewritten_content_candidate_length_ceiling():
     text_3001 = "c" * (_MAX_REWRITTEN_CANDIDATE_CHARS + 1)
     assert _extract_rewritten_sentence(text_3001) is None
 
+
+# ── strip_meta_commentary original-awareness (2026-08-11 bug) ──────────────
+# Root cause: preamble patterns are ^-anchored, so a chunk whose FIRST
+# sentence legitimately starts with "The corrected version …" had that real
+# content stripped. Fix: when *original* is provided, a pattern that the
+# original itself starts with is skipped (it is echoed content, not commentary).
+
+
+def test_strip_meta_commentary_strips_preamble_without_original():
+    """Without an original, preamble-like lead-ins must still be stripped."""
+    from stet.core.text_utils import strip_meta_commentary
+
+    assert strip_meta_commentary("The corrected text: Hello world.") == "Hello world."
+    assert (
+        strip_meta_commentary("Here is the corrected version: Hello world.")
+        == "Hello world."
+    )
+    assert strip_meta_commentary("---\nHello world.") == "Hello world."
+
+
+def test_strip_meta_commentary_preserves_preamble_when_original_matches():
+    """A real lead-in echoed from the original must be preserved."""
+    from stet.core.text_utils import strip_meta_commentary
+
+    orig = "The corrected version was released on Friday."
+    assert strip_meta_commentary(orig, original=orig) == orig
+
+
+def test_strip_meta_commentary_still_strips_when_original_differs():
+    """Preamble strip must still fire when the original does NOT itself start
+    with the phrase (genuine model commentary, not echoed content)."""
+    from stet.core.text_utils import strip_meta_commentary
+
+    assert strip_meta_commentary(
+        "The corrected version was released on Friday.",
+        original="Please fix this sentence.",
+    ) == "was released on Friday."
+
+
+def test_strip_meta_commentary_here_is_corrected_version_matching_original():
+    """'Here is the corrected version …' is echoed real content when the
+    original starts with it — must be preserved."""
+    from stet.core.text_utils import strip_meta_commentary
+
+    orig = (
+        "Here is the corrected version of the final quarterly report that the "
+        "board reviewed and approved yesterday."
+    )
+    assert strip_meta_commentary(orig, original=orig) == orig
+
+
+def test_strip_meta_commentary_hrule_preserved_when_original_matches():
+    """A leading '---' divider in the original (real content) must survive."""
+    from stet.core.text_utils import strip_meta_commentary
+
+    orig = "---\nActual body text."
+    assert strip_meta_commentary(orig, original=orig) == orig
+
+
+def test_chunk_text_by_sentences_preserves_version_numbers():
+    """Gemini's (disproven) claim: chunking truncates 1.2.2 -> 1.2.
+    The chunker only splits after [.!?] followed by whitespace, which never
+    happens inside a version number — pin that the full value survives."""
+    from stet.core.text_utils import _chunk_text_by_sentences
+
+    text = "This will be 1.2.2. Also, there's a tiny commit for the release."
+    chunks = _chunk_text_by_sentences(text, max_words=60)
+    joined = "".join(c + s for c, s in chunks)
+    assert "1.2.2" in joined
+
 

@@ -817,7 +817,12 @@ class WelcomeWindow(QWidget):
     def _on_chat_done(self, full: str):
         if self._stream_backend is not None:
             self._stream_backend.mark_used()
-        full = strip_preamble(strip_think(full), "")
+        # Pass the real source text so preamble-stripping doesn't delete a
+        # legitimate lead-in the model is echoing from the sample/user message.
+        _sample_orig = self._sample_input.toPlainText().strip()
+        if not _sample_orig and self._chat_history:
+            _sample_orig = self._chat_history[-1].get("content", "")
+        full = strip_preamble(strip_think(full), _sample_orig)
         self._chat_history.append({"role": "assistant", "content": full})
         if len(self._chat_history) > 40:
             self._chat_history = self._chat_history[-40:]

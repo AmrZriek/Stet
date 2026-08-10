@@ -170,9 +170,9 @@ PROFILES: dict[str, CorrectionProfile] = {
         chunk_words=60,
         allow_new_newlines=False,
         hunk_guard_mode=0,
-        hallucination_threshold=0.45,
-        min_word_ratio=0.85,
-        max_word_ratio=1.15,
+        hallucination_threshold=0.65,
+        min_word_ratio=0.75,
+        max_word_ratio=1.25,
     ),
     "full_correction": CorrectionProfile(
         task_type="correction",
@@ -233,11 +233,19 @@ def strip_thinking_tokens(text: str) -> str:
 
 
 def strip_meta_commentary(text: str, original: str = "") -> str:
-    """Strip common meta-commentary prefixes that models add."""
+    """Strip common meta-commentary prefixes that models add.
+
+    *original* (optional) is the text the model was asked to correct.  When it
+    is provided, any preamble pattern that the original text itself matches at
+    its start is skipped: that phrase is real user content being echoed by the
+    model, not commentary, so it must be preserved.
+    """
     if not text:
         return text
     cleaned = text
     for pattern in _COMPILED_PREAMBLES:
+        if original and pattern.match(original):
+            continue
         cleaned = pattern.sub("", cleaned)
     # Strip wrapping quotes if the entire output is quoted
     cleaned = cleaned.strip()
@@ -558,25 +566,25 @@ def apply_hunk_guard(orig: str, corr: str, mode_index: int, threshold: float | N
             else: # Full Correction (Index 1)
                 result.append(corr_hunk)
         elif tag == 'delete':
-            if mode_index == 0:
-                result.append(orig_hunk) # Reject delete ops
-            elif _INLINE_SENTINEL_RE.search(orig_hunk):
+            if _INLINE_SENTINEL_RE.search(orig_hunk):
                 result.append(orig_hunk)  # Never delete sentinel-containing hunks
             else:
                 deleted_words = [t for t in orig_hunk_tokens if t.isalnum()]
-                if len(deleted_words) <= 1:
-                    pass # Delete accepted
+                if mode_index == 0:
+                    if len(deleted_words) == 1:
+                        pass  # Delete 1 word accepted (e.g. duplicate word removal like "and and" -> "and")
+                    else:
+                        result.append(orig_hunk)  # Punctuation/whitespace-only or multi-word deletes rejected
+                elif len(deleted_words) <= 1:
+                    pass  # Delete accepted
                 else:
                     result.append(orig_hunk)
         elif tag == 'insert':
-            if mode_index == 0:
-                pass # Reject insert ops
+            inserted_words = [t for t in corr_hunk_tokens if t.isalnum()]
+            if len(inserted_words) <= 1:
+                result.append(corr_hunk)
             else:
-                inserted_words = [t for t in corr_hunk_tokens if t.isalnum()]
-                if len(inserted_words) <= 1:
-                    result.append(corr_hunk)
-                else:
-                    pass # Reject multi-word inserts
+                pass # Reject multi-word inserts
                     
     return "".join(result)
 
@@ -1113,7 +1121,9 @@ def _extract_rewritten_sentence(
         return raw[:end_match.start()].strip()
 
     # Primary path: raw output — strip thinking tokens and meta-commentary.
-    candidate = strip_meta_commentary(strip_thinking_tokens(raw)).strip()
+    candidate = strip_meta_commentary(
+        strip_thinking_tokens(raw), original=original_text
+    ).strip()
     if not candidate:
         return None
 

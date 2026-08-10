@@ -1602,7 +1602,9 @@ class CorrectionWindow(QWidget):
             log("[CW] stream done arrived after Reset — ignored")
             return
         self.ac_model.mark_used()
-        cleaned = strip_meta_commentary(strip_thinking_tokens(full))
+        cleaned = strip_meta_commentary(
+            strip_thinking_tokens(full), original=self.original
+        )
         # Strip the delimiter markers the streaming prompt wraps the input in,
         # in case the model echoes them in its output.
         # Strip legacy markers if present (backward compat), or CONTENT_BEGIN/END
@@ -2077,12 +2079,16 @@ class CorrectionWindow(QWidget):
             self._exit_edit_text_mode(apply_changes=True)
 
     def _exit_edit_text_mode(self, apply_changes: bool = True):
-        if not getattr(self, "_edit_text_mode", False):
+        is_editing = getattr(self, "_edit_text_mode", False) or (
+            hasattr(self, "corr_edit") and not self.corr_edit.isReadOnly()
+        )
+        if not is_editing:
             return
-        if apply_changes:
+        if apply_changes and hasattr(self, "corr_edit"):
             self.corrected = self.corr_edit.toPlainText()
         self._edit_text_mode = False
-        self.corr_edit.setReadOnly(True)
+        if hasattr(self, "corr_edit"):
+            self.corr_edit.setReadOnly(True)
         if hasattr(self, "edit_text_btn"):
             self.edit_text_btn.setChecked(False)
             self.edit_text_btn.setText("Edit text")
@@ -2264,9 +2270,12 @@ class CorrectionWindow(QWidget):
         if backend is not None:
             backend.mark_used()
         full = strip_think(full)
-        full = strip_preamble(full, self.corrected)
+        # Pass the original the chat started from (not the already-corrected
+        # text) so preamble-stripping doesn't delete a real echoed lead-in.
+        _chat_orig = getattr(self, "_chat_start_text", None) or self.original
+        full = strip_preamble(full, _chat_orig)
         if not full and self._stream_buf:
-            full = strip_preamble(strip_think(self._stream_buf), self.corrected)
+            full = strip_preamble(strip_think(self._stream_buf), _chat_orig)
         full = self._match_original_newlines(full)
         self.chat_history.append({"role": "assistant", "content": full})
         # Cap history to prevent unbounded growth over long chat sessions
@@ -2304,10 +2313,15 @@ class CorrectionWindow(QWidget):
 
     # ── actions ──────────────────────────────────────────────────────────
     def _accept(self):
-        if getattr(self, "_edit_text_mode", False):
+        is_editing = getattr(self, "_edit_text_mode", False) or (
+            hasattr(self, "corr_edit") and not self.corr_edit.isReadOnly()
+        )
+        if is_editing:
             # Manual edits live in corr_edit, not self.corrected — sync them
             # first so Accept pastes what the user actually wrote, not the
             # stale pre-edit text.
+            if hasattr(self, "corr_edit"):
+                self.corrected = self.corr_edit.toPlainText()
             self._exit_edit_text_mode(apply_changes=True)
         text = self.corrected
         # WA_DeleteOnClose (set in __init__) would destroy the C++ object
@@ -2442,9 +2456,14 @@ class CorrectionWindow(QWidget):
             _clipboard_write_text(getattr(self, "corrected", "") or self.corr_edit.toPlainText())
 
     def _copy(self):
-        if getattr(self, "_edit_text_mode", False):
+        is_editing = getattr(self, "_edit_text_mode", False) or (
+            hasattr(self, "corr_edit") and not self.corr_edit.isReadOnly()
+        )
+        if is_editing:
             # Same as _accept: sync the editor's plain text so Copy captures
             # the user's manual edits rather than the stale corrected text.
+            if hasattr(self, "corr_edit"):
+                self.corrected = self.corr_edit.toPlainText()
             self._exit_edit_text_mode(apply_changes=True)
         _clipboard_write_text(self.corrected)
         self.copy_btn.setText("Copied")

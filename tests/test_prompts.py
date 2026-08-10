@@ -73,10 +73,14 @@ def test_apply_hunk_guard():
     assert apply_hunk_guard("yesterday.", "yesterday", 0) == "yesterday."
     # Large replacements rejected (keeps original)
     assert apply_hunk_guard("hello", "goodbye", 0) == "hello"
-    # Deletes rejected (keeps original)
-    assert apply_hunk_guard("hello world", "hello", 0) == "hello world"
-    # Inserts rejected
-    assert apply_hunk_guard("hello", "hello world", 0) == "hello"
+    # Single-word delete accepted in mode 0 (e.g. duplicate word removal like "and and" -> "and")
+    assert apply_hunk_guard("and and", "and", 0) == "and"
+    # Multi-word delete rejected
+    assert apply_hunk_guard("hello beautiful green world", "hello", 0) == "hello beautiful green world"
+    # Single-word insert accepted in mode 0 (e.g. missing apostrophe/letter insertion)
+    assert apply_hunk_guard("hello", "hello world", 0) == "hello world"
+    # Multi-word insert rejected
+    assert apply_hunk_guard("hello", "hello beautiful world", 0) == "hello"
 
     # Mode 1: Full correction. Small deletes/inserts accepted.
     # Single-word delete accepted

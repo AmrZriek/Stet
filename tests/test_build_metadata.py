@@ -109,6 +109,18 @@ def test_updater_pyinstaller_cmd_construction(tmp_path):
         assert str(build.UPDATER_SCRIPT) in cmd
 
 
+def test_installer_pyinstaller_cmd_construction(tmp_path):
+    """Verify installer compilation command includes versioned output name."""
+    art = tmp_path / "artifacts"
+    zip_path = tmp_path / "stet_portable.zip"
+    zip_path.touch()
+    with patch("build.PLATFORM", "Windows"):
+        cmd = build._installer_pyinstaller_cmd("1.2.1", art, zip_path)
+        assert "--noconsole" in cmd
+        assert "--name=StetSetup_v1.2.1" in cmd
+        assert str(build.INSTALLER_SCRIPT) in cmd
+
+
 def test_uninstaller_pyinstaller_cmd_construction(tmp_path):
     """Verify uninstaller compilation commands are correct."""
     art = tmp_path / "artifacts"

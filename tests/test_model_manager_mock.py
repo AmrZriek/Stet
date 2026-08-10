@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from stet.core.config import ConfigManager
+from stet.core.text_utils import _extract_rewritten_sentence
 from stet.llm.model_manager import (
     _STRENGTH_TO_MODE_INDEX,
     _detect_loaded_backend,
@@ -925,4 +926,111 @@ class TestGpuOomFallback:
 
         res = mgr.load_model()
         assert res is False
+
+
+class TestSentenceChunkLosslessness:
+    """Regression tests for the 2026-08-11 'chunking deletes text' bug.
+
+    Root cause: _extract_rewritten_sentence stripped ^-anchored preamble
+    patterns ("The corrected version …", "Here is the corrected version …",
+    "---") from the first sentence of every chunk.  When that sentence
+    legitimately started with such a phrase, real content was deleted, and the
+    permissive guard chain (template_transform thr=1.0) accepted the lossy
+    output.  Fix: strip_meta_commentary is original-aware — a preamble pattern
+    is skipped when the original text itself starts with that phrase.
+    """
+
+    # 25 filler sentences x 10 words = 250 words, which is exactly
+    # template_transform's chunk_words, so the vulnerable sentence lands as
+    # the FIRST sentence of chunk 1 (preamble-strip only fires at the start
+    # of a chunk's model output).
+    _FILLER = "The quarterly report was submitted to the board on time. " * 25
+    _MORE = "The finance team will review the final numbers next week. " * 5
+
+    def _assert_vulnerable_leads_chunk(self, text, lead):
+        """Calibration guard: if this fails the filler/profile math changed and
+        the regression test would pass vacuously."""
+        from stet.core.text_utils import _chunk_text_by_sentences
+
+        chunks = _chunk_text_by_sentences(text, 250)
+        assert len(chunks) > 1, "filler must force a second chunk"
+        assert chunks[1][0].startswith(lead), (
+            f"vulnerable sentence must lead chunk 1, got {chunks[1][0][:40]!r}"
+        )
+
+    def test_verbatim_echo_is_lossless(self, manager, monkeypatch):
+        """Chunking -> parallel rewrite -> join must never delete text when
+        each chunk is echoed back verbatim (the model made no edits)."""
+        vulnerable = "The corrected version was released on Friday. Send it out immediately."
+        text = (self._FILLER + vulnerable + " " + self._MORE).rstrip()
+        self._assert_vulnerable_leads_chunk(text, "The corrected version")
+
+        def echo(chunk_text, custom_sys, idx, total, strength,
+                 cancel_event=None, mode_prompt_override=None, session=None, profile=None):
+            return chunk_text
+
+        monkeypatch.setattr(manager, "_rewrite_sentence_chunk", MagicMock(side_effect=echo))
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        result, units = manager.correct_text_patch(text, strength="template_transform")
+        assert result is not None
+        assert units > 1
+        assert result == text
+
+    def test_preamble_phrase_preserved_through_full_pipeline(self, manager, monkeypatch):
+        """The reported bug, end-to-end: the first sentence of chunk 1 starts
+        with a preamble phrase.  The real extraction runs inside the per-chunk
+        worker; the whole pipeline must preserve the phrase."""
+        vulnerable = (
+            "Here is the corrected version of the final quarterly report that the "
+            "board reviewed and approved yesterday. Send it out immediately."
+        )
+        text = (self._FILLER + vulnerable + " " + self._MORE).rstrip()
+        self._assert_vulnerable_leads_chunk(text, "Here is the corrected version")
+
+        def echo(chunk_text, custom_sys, idx, total, strength,
+                 cancel_event=None, mode_prompt_override=None, session=None, profile=None):
+            # Run the REAL extraction the pipeline applies to the model's raw
+            # output. Without the original-aware fix this strips the echoed
+            # lead-in ("Here is the corrected version …") and the guard chain
+            # accepts the lossy text; with it the phrase is preserved.
+            return _extract_rewritten_sentence(chunk_text, original_text=chunk_text)
+
+        monkeypatch.setattr(manager, "_rewrite_sentence_chunk", MagicMock(side_effect=echo))
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        result, units = manager.correct_text_patch(text, strength="template_transform")
+        assert result is not None
+        assert units > 1
+        assert "Here is the corrected version of the final quarterly report" in result
+        assert "Send it out immediately." in result
+
+    def test_version_numbers_survive_pipeline(self, manager, monkeypatch):
+        """Pin the invariant behind Gemini's (disproven) claim that chunking
+        truncates version numbers: 1.2.2 must survive the full pipeline."""
+        text = (
+            "Stet 1.2.2 was released today. Version 3.1.4 of the SDK is out. "
+            "Fixes were applied to 2.0.1 as well. The 1.2.2 build fixed the crash. "
+            "Next up is 4.0.0 beta. " * 12
+        ).rstrip()
+
+        def echo(chunk_text, custom_sys, idx, total, strength,
+                 cancel_event=None, mode_prompt_override=None, session=None, profile=None):
+            return chunk_text
+
+        monkeypatch.setattr(manager, "_rewrite_sentence_chunk", MagicMock(side_effect=echo))
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        result, units = manager.correct_text_patch(text, strength="template_transform")
+        assert result is not None
+        assert units > 1
+        assert result == text
+        for v in ("1.2.2", "3.1.4", "2.0.1", "4.0.0"):
+            assert v in result
 
