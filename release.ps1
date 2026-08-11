@@ -76,6 +76,15 @@ if ($installer) {
     Write-Host "    Found: $($installer.Name) ($installerSizeMb MB)" -ForegroundColor Green
 }
 
+# The updater (stet/update.py, F-1) refuses to install a release without its
+# SHA-256 checksum asset, so SHA256SUMS.txt must ship with every release.
+$checksumFile = Get-ChildItem dist -Filter "SHA256SUMS.txt" | Select-Object -First 1
+if (-not $checksumFile) {
+    throw "SHA256SUMS.txt not found in dist/ - re-run build.py. A release without its checksum file is unverifiable and breaks auto-update for every user."
+}
+$artifacts += $checksumFile.FullName  # SHA256SUMS.txt release asset
+Write-Host "    Found: SHA256SUMS.txt" -ForegroundColor Green
+
 $zipSizeMb = [math]::Round($zip.Length / 1MB, 1)
 Write-Host "    Found: $($zip.Name) ($zipSizeMb MB)" -ForegroundColor Green
 

@@ -257,7 +257,13 @@ def update_app(
     wait_pid: int | None = None,
     restart: bool = False,
     allow_unsigned: bool = False,
-):
+) -> bool:
+    """Update the Stet app to the latest GitHub release.
+
+    Returns True on success (including the already-latest no-op) and False
+    on every failure path. Raises RuntimeError only for the SHA-256 mismatch
+    (a verified-integrity abort the caller must surface as fatal).
+    """
     root = root.resolve()
     banner("Updating Stet app")
     print(f"  Install dir     : {root}")
@@ -273,7 +279,7 @@ def update_app(
         # F-7: log full traceback for support, show friendly message to user.
         _LOG.error("GitHub API request failed: %s", traceback.format_exc())
         print("  ERROR: Could not reach GitHub API.")
-        return
+        return False
 
     # F-5: validate tag_name before any further processing.
     try:
@@ -281,7 +287,7 @@ def update_app(
     except RuntimeError as e:
         _LOG.error("Invalid tag from API: %s", e)
         print("  ERROR: Release has invalid tag_name; aborting update.")
-        return
+        return False
     assets = data.get("assets", [])
 
     remote_ver = tag.lstrip("vV")
@@ -291,7 +297,7 @@ def update_app(
 
     if remote_tuple <= local_tuple:
         print("  You already have the latest version.")
-        return
+        return True
 
     # Find the main binary asset for the current OS
     os_kw = (
@@ -314,7 +320,7 @@ def update_app(
 
     if not main_asset:
         print(f"  No suitable ZIP asset found in release {tag}.")
-        return
+        return False
 
     # F-2: validate asset URL through the same HTTPS chokepoint.
     url = main_asset["browser_download_url"]
@@ -357,7 +363,7 @@ def update_app(
         _LOG.error("Download failed: %s", traceback.format_exc())
         print("\n  ERROR downloading update.")
         shutil.rmtree(work_dir, ignore_errors=True)
-        return
+        return False
 
     # F-1: mandatory SHA-256 verification.  If SHA256SUMS.txt is missing
     # for a release that should have one, REFUSE to extract — unless the
@@ -380,11 +386,13 @@ def update_app(
         else:
             print(
                 "  ERROR: No SHA256SUMS.txt in release; refusing to install "
-                "an unverifiable update. Re-run with --allow-unsigned to override."
+                "an unverifiable update. Re-run with --allow-unsigned to override.\n"
+                "         This release is missing its checksum file — please retry "
+                "later or report the issue."
             )
             tmp_path.unlink(missing_ok=True)
             shutil.rmtree(work_dir, ignore_errors=True)
-            return
+            return False
     else:
         expected_hash = None
         for line in sha_data.strip().splitlines():
@@ -407,7 +415,7 @@ def update_app(
                 )
                 tmp_path.unlink(missing_ok=True)
                 shutil.rmtree(work_dir, ignore_errors=True)
-                return
+                return False
         else:
             actual_hash = hashlib.sha256(tmp_path.read_bytes()).hexdigest()
             if actual_hash.lower() != expected_hash.lower():
@@ -434,7 +442,7 @@ def update_app(
         print("  ERROR: Downloaded update is unsafe; aborting.")
         tmp_path.unlink(missing_ok=True)
         shutil.rmtree(work_dir, ignore_errors=True)
-        return
+        return False
 
     tmp_path.unlink()
 
@@ -450,7 +458,7 @@ def update_app(
         else:
             print("  ERROR: Stet.exe not found in downloaded ZIP")
             shutil.rmtree(work_dir, ignore_errors=True)
-            return
+            return False
 
     print("  Applying update...")
 
@@ -470,7 +478,7 @@ def update_app(
             print(f"  ERROR: Permission denied replacing {rel_path}.")
             print("         Please ensure Stet is completely closed before updating.")
             shutil.rmtree(work_dir, ignore_errors=True)
-            return
+            return False
 
     shutil.rmtree(work_dir, ignore_errors=True)
     suffix = "" if sha_verified else " (unverified)"
@@ -481,6 +489,8 @@ def update_app(
         if exe.exists():
             print("  Restarting Stet...")
             subprocess.Popen([str(exe)], cwd=str(root), shell=False)
+
+    return True
 
 
 
@@ -520,12 +530,20 @@ if __name__ == "__main__":
         update_python_deps()
 
     if args.app or args.all:
-        update_app(
-            Path(args.install_dir),
-            wait_pid=args.wait_pid,
-            restart=args.restart,
-            allow_unsigned=args.allow_unsigned,
-        )
+        try:
+            ok = update_app(
+                Path(args.install_dir),
+                wait_pid=args.wait_pid,
+                restart=args.restart,
+                allow_unsigned=args.allow_unsigned,
+            )
+        except RuntimeError as e:
+            print(f"  ERROR: {e}")
+            sys.exit(1)
+
+        if not ok:
+            print("  Update FAILED — see messages above.")
+            sys.exit(1)
 
     banner("Update complete!")
     print("  Restart Stet to use the new versions.\n")

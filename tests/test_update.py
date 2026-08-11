@@ -622,10 +622,11 @@ def test_f1_refuses_when_sha256sums_missing(monkeypatch, tmp_path, capsys):
     _wire_network(monkeypatch, upd, payload=payload, sha_status=404)
     monkeypatch.setattr(upd, "get_local_version", lambda root=None: "1.0.0")
 
-    upd.update_app(root=tmp_path, wait_pid=None, restart=False)
+    result = upd.update_app(root=tmp_path, wait_pid=None, restart=False)
     out = capsys.readouterr().out
     assert "refusing" in out.lower(), out
     assert "--allow-unsigned" in out
+    assert result is False
 
 
 def test_f1_refuses_when_asset_not_listed(monkeypatch, tmp_path, capsys):
@@ -642,9 +643,10 @@ def test_f1_refuses_when_asset_not_listed(monkeypatch, tmp_path, capsys):
     _wire_network(monkeypatch, upd, payload=payload, sha_body=sha_body)
     monkeypatch.setattr(upd, "get_local_version", lambda root=None: "1.0.0")
 
-    upd.update_app(root=tmp_path, wait_pid=None, restart=False)
+    result = upd.update_app(root=tmp_path, wait_pid=None, restart=False)
     out = capsys.readouterr().out
     assert "refusing" in out.lower(), out
+    assert result is False
 
 
 def test_f1_refuses_on_sha_mismatch(monkeypatch, tmp_path, capsys):

@@ -53,3 +53,46 @@ def make_left_arrow_icon() -> QIcon:
     icon.addPixmap(draw_arrow("#ededee"), QIcon.Mode.Active, QIcon.State.On)
     return icon
 
+
+def make_download_icon(accent: str | None = None) -> QIcon:
+    """Download-arrow glyph for the tray 'Check for Updates' action.
+
+    Idle state (``accent=None``) uses the standard menu colors like
+    ``make_left_arrow_icon``.  Passing an accent color (e.g. the update
+    cyan) renders the glyph in that color for all modes so the pending
+    update stands out in the tray menu.
+    """
+    def draw_arrow(color_str: str) -> QPixmap:
+        pixmap = QPixmap(12, 12)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pixmap)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(color_str))
+        pen.setWidthF(1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        # Shaft down into the arrow head, then the tray baseline
+        p.drawLine(6, 2, 6, 8)
+        p.drawLine(9, 5, 6, 9)
+        p.drawLine(3, 5, 6, 9)
+        p.drawLine(2, 10, 10, 10)
+        p.end()
+        return pixmap
+
+    if accent is not None:
+        icon = QIcon()
+        for mode in (QIcon.Mode.Normal, QIcon.Mode.Selected, QIcon.Mode.Active):
+            icon.addPixmap(draw_arrow(accent), mode, QIcon.State.Off)
+            icon.addPixmap(draw_arrow(accent), mode, QIcon.State.On)
+        return icon
+
+    icon = QIcon()
+    icon.addPixmap(draw_arrow("#88898c"), QIcon.Mode.Normal, QIcon.State.Off)
+    icon.addPixmap(draw_arrow("#88898c"), QIcon.Mode.Normal, QIcon.State.On)
+    icon.addPixmap(draw_arrow("#ededee"), QIcon.Mode.Selected, QIcon.State.Off)
+    icon.addPixmap(draw_arrow("#ededee"), QIcon.Mode.Selected, QIcon.State.On)
+    icon.addPixmap(draw_arrow("#ededee"), QIcon.Mode.Active, QIcon.State.Off)
+    icon.addPixmap(draw_arrow("#ededee"), QIcon.Mode.Active, QIcon.State.On)
+    return icon
+

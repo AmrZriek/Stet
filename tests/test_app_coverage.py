@@ -24,6 +24,13 @@ from stet.core.app import (
 from stet.core.config import ConfigManager
 from stet.llm.model_manager import ModelManager
 
+import stet.core.app as _app_module
+
+# Captured at import time, BEFORE the autouse conftest fixture
+# ``suppress_first_run_and_update`` swaps in a no-op.  Tests that exercise
+# the real throttling/checker logic restore it in-test via monkeypatch.
+_REAL_CHECK_APP_UPDATE = _app_module.StetApp._check_app_update
+
 
 # ── Helpers & fixtures ────────────────────────────────────────────────────
 
@@ -1619,3 +1626,253 @@ class TestStetAppRegisterHotkey:
         app._last_register_ts = time.monotonic()
         app._register_hotkey(force=False)
         mock_register.assert_not_called()
+
+
+# ── Update-available UX (tray menu entry, dot, popup, throttle, toast) ─────
+
+
+class TestStetAppTrayUpdateAction:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_update_action_added_to_tray_menu(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        assert app._update_action in app._tray_menu.actions()
+        assert "Check for Updates" in app._update_action.text()
+        assert not app._update_action.icon().isNull()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_update_action_triggered_installs_when_available(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._available_update = ("v9.9.9", "https://example.com")
+        app._start_app_update = MagicMock()
+        app._update_action.triggered.emit(False)
+        app._start_app_update.assert_called_once_with(
+            "https://example.com", "v9.9.9"
+        )
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_update_action_triggered_checks_manually_when_idle(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        monkeypatch.setattr(
+            _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
+        )
+        app = StetApp()
+        with patch("stet.core.app.AppUpdateChecker") as mock_cls:
+            mock_cls.return_value.isRunning.return_value = False
+            app._update_action.triggered.emit(False)
+            mock_cls.assert_called_once()
+
+
+class TestStetAppUpdateAvailableState:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_action_becomes_prominent(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._on_update_available("v9.9.9", "https://example.com", "notes")
+        assert "Update available" in app._update_action.text()
+        assert "v9.9.9" in app._update_action.text()
+        assert app._update_action.font().bold()
+        assert not app._update_action.icon().isNull()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_settings_label_updated(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._settings_dlg = MagicMock()
+        app._on_update_available("v9.9.9", "https://example.com", "notes")
+        app._settings_dlg.set_update_action_text.assert_called_with(
+            "Install Stet v9.9.9"
+        )
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_tray_dot_uses_update_color(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        with patch("stet.core.app.make_tray_icon") as mock_mti:
+            app._on_update_available("v9.9.9", "https://example.com", "notes")
+            mock_mti.assert_called_with(StetApp.UPDATE_DOT_COLOR)
+
+
+class TestStetAppUpdateDot:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_model_status_change_keeps_update_dot(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._available_update = ("v9.9.9", "https://example.com")
+        app.tray.setIcon.reset_mock()
+        app._set_tray_icon("#475569")
+        assert app._tray_status_color == "#475569"
+        app.tray.setIcon.assert_not_called()  # dot stays in the update color
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_dot_restored_after_update_resolved(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._available_update = ("v9.9.9", "https://example.com")
+        app._tray_status_color = "#a78bfa"
+        with patch("stet.core.app.make_tray_icon") as mock_mti:
+            app._clear_available_update()
+            mock_mti.assert_called_with("#a78bfa")
+        assert app._available_update is None
+        assert app._update_action.text() == "Check for Updates"
+        assert not app._update_action.font().bold()
+
+
+class TestStetAppUpdatePopup:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_popup_shown_once_for_automatic_check(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._available_update = ("v9.9.9", "https://example.com")
+        app._start_app_update = MagicMock()
+        install_btn = MagicMock()
+        later_btn = MagicMock()
+        with patch("stet.core.app.QMessageBox") as mock_mb:
+            instance = mock_mb.return_value
+            instance.addButton.side_effect = [install_btn, later_btn]
+            instance.clickedButton.return_value = later_btn
+            instance.exec.return_value = None
+            app._maybe_show_update_popup(False)
+            app._maybe_show_update_popup(False)
+            instance.exec.assert_called_once()  # shown exactly once per run
+        app._start_app_update.assert_not_called()  # dismissed via "Later"
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_popup_not_shown_for_manual_check(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._available_update = ("v9.9.9", "https://example.com")
+        with patch("stet.core.app.QMessageBox") as mock_mb:
+            app._maybe_show_update_popup(True)
+            mock_mb.assert_not_called()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_popup_install_now_starts_update(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._available_update = ("v9.9.9", "https://example.com")
+        app._start_app_update = MagicMock()
+        install_btn = MagicMock()
+        later_btn = MagicMock()
+        with patch("stet.core.app.QMessageBox") as mock_mb:
+            instance = mock_mb.return_value
+            instance.addButton.side_effect = [install_btn, later_btn]
+            instance.clickedButton.return_value = install_btn
+            instance.exec.return_value = None
+            app._maybe_show_update_popup(False)
+        app._start_app_update.assert_called_once_with(
+            "https://example.com", "v9.9.9"
+        )
+
+
+class TestStetAppUpdateCheckThrottle:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_throttled_within_interval(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        monkeypatch.setattr(
+            _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
+        )
+        app = StetApp()
+        with patch("stet.core.app.AppUpdateChecker") as mock_cls:
+            mock_cls.return_value.isRunning.return_value = False
+            app._check_app_update()
+            app._check_app_update()
+            mock_cls.assert_called_once()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_manual_check_bypasses_throttle(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        monkeypatch.setattr(
+            _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
+        )
+        app = StetApp()
+        with patch("stet.core.app.AppUpdateChecker") as mock_cls:
+            mock_cls.return_value.isRunning.return_value = False
+            app._check_app_update()  # auto — runs, records timestamp
+            app._check_app_update()  # auto — throttled
+            app._check_app_update(manual=True)  # manual — always runs
+            assert mock_cls.call_count == 2
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_recheck_timer_wired(self, mock_tray_cls, qtbot, monkeypatch):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        assert app._update_recheck_timer.isActive()
+        assert (
+            app._update_recheck_timer.interval()
+            == StetApp.UPDATE_RECHECK_INTERVAL_MS
+        )
+
+
+class TestStetAppUpdateCheckSignals:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_auto_check_pops_update_once_via_signals(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        monkeypatch.setattr(
+            _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
+        )
+        app = StetApp()
+        checker = AppUpdateChecker()
+        checker.start = MagicMock()
+        monkeypatch.setattr("stet.core.app.AppUpdateChecker", lambda: checker)
+
+        install_btn = MagicMock()
+        later_btn = MagicMock()
+        with patch("stet.core.app.QMessageBox") as mock_mb:
+            instance = mock_mb.return_value
+            instance.addButton.side_effect = [install_btn, later_btn]
+            instance.clickedButton.return_value = later_btn
+            instance.exec.return_value = None
+            app._check_app_update()  # automatic
+            checker.update_available.emit("v9.9.9", "https://example.com", "notes")
+            checker.check_done.emit()
+            instance.exec.assert_called_once()
+            # A second completion with the same pending update must not nag.
+            checker.check_done.emit()
+            instance.exec.assert_called_once()
+        assert app._available_update == ("v9.9.9", "https://example.com")
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_manual_check_never_pops_via_signals(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        monkeypatch.setattr(
+            _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
+        )
+        app = StetApp()
+        checker = AppUpdateChecker()
+        checker.start = MagicMock()
+        monkeypatch.setattr("stet.core.app.AppUpdateChecker", lambda: checker)
+        with patch("stet.core.app.QMessageBox") as mock_mb:
+            app._run_settings_update_action()  # manual check
+            checker.update_available.emit("v9.9.9", "https://example.com", "notes")
+            checker.check_done.emit()
+            mock_mb.assert_not_called()
+        assert app._available_update == ("v9.9.9", "https://example.com")
+
+
+class TestStetAppToastClick:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_message_clicked_connected_to_settings(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        assert app._tray_msg_clicked is True  # guard flag set after connect
+        app.tray.messageClicked.connect.assert_called_once()
+        slot = app.tray.messageClicked.connect.call_args[0][0]
+        with patch("stet.core.app.SettingsDialog") as mock_dlg:
+            slot()  # clicking the toast opens Settings
+            mock_dlg.assert_called_once()

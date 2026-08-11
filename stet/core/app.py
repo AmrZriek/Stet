@@ -62,8 +62,8 @@ else:
 
 from stet.ui.main_window import CorrectionWindow
 from stet.ui.osd import SilentCorrectionOSD
-from stet.ui.settings import SettingsDialog
-from stet.ui.tray import make_tray_icon, make_left_arrow_icon
+from stet.ui.settings import SettingsDialog, THEME
+from stet.ui.tray import make_download_icon, make_left_arrow_icon, make_tray_icon
 from stet.ui.welcome_window import WelcomeWindow
 
 
@@ -362,6 +362,14 @@ class StetApp(QObject):
     _large_doc_warning_signal = pyqtSignal(str)  # text that is too large
     _welcome_corr_finished = pyqtSignal(str, object)  # (original_text, result)
 
+    # Update-available UX ----------------------------------------------------
+    # Cyan is distinct from every model-status dot color (blue, violet, slate,
+    # amber, red), so a pending update reads clearly in the tray at a glance.
+    UPDATE_DOT_COLOR = "#06b6d4"
+    UPDATE_ICON_ACCENT = "#06b6d4"
+    UPDATE_RECHECK_INTERVAL_MS = 24 * 60 * 60 * 1000  # once per day
+    UPDATE_THROTTLE_SECONDS = 60 * 60  # GitHub API: at most one hit per hour
+
     def __init__(self):
         super().__init__()
 
@@ -455,6 +463,12 @@ class StetApp(QObject):
             self._hotkey_filter = WinHotkeyFilter()
             QApplication.instance().installNativeEventFilter(self._hotkey_filter)
 
+        # Tray update-available state. _available_update must exist before
+        # _build_tray runs so _set_tray_icon can consult it.
+        self._available_update: tuple[str, str] | None = None
+        self._tray_status_color = "#475569"
+        self._tray_msg_clicked = False
+
         self._build_tray()
         self._register_hotkey()
 
@@ -494,10 +508,14 @@ class StetApp(QObject):
         # Check if first run download is needed (backend or model missing)
         QTimer.singleShot(100, self._check_first_run_downloads)
 
-        # Check for Stet updates 5 s after boot (non-blocking)
+        # Check for Stet updates 5 s after boot (non-blocking), then every 24 h.
         self._update_checker: AppUpdateChecker | None = None
-        self._available_update: tuple[str, str] | None = None
+        self._last_update_check_ts: float | None = None
+        self._update_popup_shown = False
         QTimer.singleShot(5000, self._check_app_update)
+        self._update_recheck_timer = QTimer(self)
+        self._update_recheck_timer.timeout.connect(self._check_app_update)
+        self._update_recheck_timer.start(StetApp.UPDATE_RECHECK_INTERVAL_MS)
 
         self._welcome_poll_timer = QTimer(self)
         self._welcome_poll_timer.timeout.connect(self._check_welcome_flag)
@@ -589,6 +607,11 @@ class StetApp(QObject):
         self.tray = QSystemTrayIcon(make_tray_icon("#475569"), self)
         self.tray.setToolTip("Stet")
         self.tray.activated.connect(self._tray_activated)
+        if not self._tray_msg_clicked:
+            # Clicking a tray toast opens Settings (same as double-clicking the
+            # icon). Guard against double-connect if the tray is ever rebuilt.
+            self.tray.messageClicked.connect(self._open_settings)
+            self._tray_msg_clicked = True
 
         menu = QMenu()
         menu.setStyleSheet(
@@ -664,6 +687,9 @@ class StetApp(QObject):
         menu.addAction(act_history)
 
         self._update_action = QAction("Check for Updates", self)
+        self._update_action.setIcon(make_download_icon())
+        self._update_action.triggered.connect(self._run_settings_update_action)
+        menu.addAction(self._update_action)
 
         if WINDOWS or MACOS:
             self._act_startup = QAction("Run at Startup", self)
@@ -721,7 +747,23 @@ class StetApp(QObject):
             self._tray_retry_timer.stop()
 
     def _set_tray_icon(self, color: str):
+        """Set the tray dot to a model-status color.
+
+        The current model color is always remembered so it can be restored
+        after a pending update is resolved.  While ``_available_update`` is
+        set the dot stays in the update color instead of following model
+        status changes.
+        """
+        self._tray_status_color = color
+        if self._available_update:
+            return
         self.tray.setIcon(make_tray_icon(color))
+
+    def _set_update_dot(self):
+        self.tray.setIcon(make_tray_icon(StetApp.UPDATE_DOT_COLOR))
+
+    def _restore_tray_status_color(self):
+        self.tray.setIcon(make_tray_icon(self._tray_status_color))
 
     def _open_log_folder(self):
         from PyQt6.QtCore import QUrl
@@ -2236,22 +2278,46 @@ class StetApp(QObject):
             ww._startup_cb.setChecked(checked)
             ww._startup_cb.blockSignals(False)
 
-    def _check_app_update(self):
-        """Start background update check. Safe to call multiple times."""
+    def _check_app_update(self, manual: bool = False):
+        """Start background update check. Safe to call multiple times.
+
+        Automatic checks (boot, 24 h timer) are throttled to one GitHub API
+        hit per hour; manual checks from Settings or the tray menu always
+        run.  ``manual`` also suppresses the one-time install popup — the
+        user already knows an update may be pending.
+        """
         if self._update_checker and self._update_checker.isRunning():
             return
+        now = time.monotonic()
+        # None means "never checked" — monotonic() is since boot on Windows,
+        # so 0.0 could wrongly throttle the very first check.
+        if (
+            not manual
+            and self._last_update_check_ts is not None
+            and now - self._last_update_check_ts < StetApp.UPDATE_THROTTLE_SECONDS
+        ):
+            return
+        self._last_update_check_ts = now
         self._set_settings_update_action_text("Checking...")
         self._update_checker = AppUpdateChecker()
         self._update_checker.finished.connect(self._update_checker.deleteLater)
         self._update_checker.finished.connect(self._on_update_check_finished)
         self._update_checker.update_available.connect(self._on_update_available)
+        self._update_checker.check_done.connect(
+            lambda: self._maybe_show_update_popup(manual)
+        )
         self._update_checker.start()
 
     def _on_update_available(self, tag: str, url: str, notes: str):
         log(f"[Update] New Stet available: {tag}")
         self._available_update = (tag, url)
-        self._update_action.setText(f"Install Stet {tag}")
+        self._update_action.setText(f"Update available — Install Stet {tag}")
+        font = self._update_action.font()
+        font.setBold(True)
+        self._update_action.setFont(font)
+        self._update_action.setIcon(make_download_icon(StetApp.UPDATE_ICON_ACCENT))
         self._set_settings_update_action_text(f"Install Stet {tag}")
+        self._set_update_dot()
 
         self.tray.showMessage(
             "Stet - Update available",
@@ -2259,6 +2325,46 @@ class StetApp(QObject):
             QSystemTrayIcon.MessageIcon.Information,
             8000,
         )
+
+    def _maybe_show_update_popup(self, manual: bool = False):
+        """Show the install prompt once per app run, for automatic checks only.
+
+        Manual checks never popup — the user triggered them and already knows
+        the result.  'Later' dismisses the popup but keeps the tray menu entry
+        and the colored dot so the update stays discoverable.
+        """
+        if manual or self._update_popup_shown or not self._available_update:
+            return
+        self._update_popup_shown = True
+        tag, url = self._available_update
+        box = QMessageBox()
+        box.setWindowTitle("Stet update available")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setText(f"Stet {tag} is available.")
+        box.setInformativeText("Install it now, or later from the tray menu.")
+        install_btn = box.addButton("Install now", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(install_btn)
+        # A parentless message box inherits no window stylesheet, so it would
+        # render in the light Fusion palette instead of the dark theme. Apply
+        # the unified theme and give the default action the app's primary
+        # button treatment so the two options keep a clear hierarchy.
+        install_btn.setObjectName("primary")
+        box.setStyleSheet(THEME.replace('image: url("{checkmark_url}");', ""))
+        box.exec()
+        if box.clickedButton() is install_btn:
+            self._start_app_update(url, tag)
+
+    def _clear_available_update(self):
+        """Clear the pending-update state and restore the tray to idle."""
+        self._available_update = None
+        self._update_action.setText("Check for Updates")
+        font = self._update_action.font()
+        font.setBold(False)
+        self._update_action.setFont(font)
+        self._update_action.setIcon(make_download_icon())
+        self._set_settings_update_action_text("Check for Updates")
+        self._restore_tray_status_color()
 
     def _settings_update_action_text(self) -> str:
         if self._available_update:
@@ -2283,7 +2389,9 @@ class StetApp(QObject):
             tag, url = self._available_update
             self._start_app_update(url, tag)
             return
-        self._check_app_update()
+        # User-initiated (settings button or tray menu): always runs and never
+        # pops the install prompt — they already know they asked for a check.
+        self._check_app_update(manual=True)
 
     def _updater_command(self) -> list[str]:
         """Return a command that runs the external updater outside this process."""
@@ -2368,9 +2476,29 @@ class StetApp(QObject):
             )
             return
 
+        self._clear_available_update()
         self._quit()
 
     def _quit(self):
+        # Wind down any in-flight update check so queued signals cannot fire
+        # into a dying app, and restore the tray dot if an update was pending.
+        checker = getattr(self, "_update_checker", None)
+        if checker is not None:
+            for sig in (
+                checker.update_available,
+                checker.check_done,
+                checker.finished,
+            ):
+                try:
+                    sig.disconnect()
+                except (TypeError, RuntimeError):
+                    pass
+            if checker.isRunning():
+                checker.requestInterruption()
+                checker.wait(2000)
+            self._update_checker = None
+        if self._available_update:
+            self._restore_tray_status_color()
         if MACOS:
             if self._mac_input is not None:
                 self._mac_input.close()
