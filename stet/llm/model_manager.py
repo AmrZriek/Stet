@@ -29,6 +29,7 @@ from stet.core.text_utils import (
     _hallucination_ratio,
     _is_corrupt_output,
     _is_fewshot_echo,
+    _is_no_change_declaration,
     _is_refusal_or_empty,
     _loses_meaningful_repetition,
     _normalize_chunk_newlines,
@@ -611,6 +612,19 @@ class ModelManager(QObject):
             str(self._get_param("parallel", 4)),
             "--reasoning",
             "off",
+            # Some thinking templates (e.g. Liquid LFM 2.5) hard-prime <think>
+            # in the generation prompt and ignore --reasoning off / payload
+            # "think" flags, so every request burns all max_tokens on reasoning
+            # with empty content. --reasoning-budget arms the budget sampler:
+            # once N reasoning tokens are spent it forces the </think> end tag,
+            # guaranteeing real content follows. No-op for models without
+            # <think> tags, so it is safe to pass unconditionally. Budget is
+            # deliberately small (50): with a 4k GGUF at parallel=4 the per-slot
+            # budget is ~1024 tokens, and a 256-token reasoning budget left only
+            # ~150 tokens of answer room — enough to starve a rewrite and hit
+            # finish=length. 50 tokens is ample for the forced </think> close.
+            "--reasoning-budget",
+            "50",
             "--no-warmup",
             "--cache-reuse",
             "64",
@@ -625,6 +639,32 @@ class ModelManager(QObject):
             "--repeat-penalty",
             str(self._get_param("repeat_penalty", 1.0)),
         ]
+
+        # Liquid LFM 2.5 is a pure reasoning model: its chat template ALWAYS
+        # primes <think> at the generation prompt and ignores --reasoning off
+        # and payload think flags, so reasoning spills into content. Point
+        # llama-server at a byte-exact copy of the official template with the
+        # <think> priming removed (stet/llm/chat_templates/lfm25_no_think.jinja).
+        # The model then answers directly and the --reasoning-budget sampler
+        # above disarms automatically (no think tags to budget). The path
+        # resolves relative to this module so it works in both source runs and
+        # PyInstaller bundles (build.py ships the template beside the module,
+        # mirroring how stet.qss is bundled).
+        if "lfm-2.5" in model_path.lower() or "lfm2.5" in model_path.lower():
+            template_path = (
+                Path(__file__).resolve().parent / "chat_templates" / "lfm25_no_think.jinja"
+            )
+            if template_path.exists():
+                cmd.extend(["--chat-template", str(template_path)])
+                log(
+                    f"[{self.label}] LFM 2.5 detected — using no-think chat template: "
+                    f"{template_path}"
+                )
+            else:
+                log(
+                    f"[{self.label}] LFM 2.5 detected but no-think chat template "
+                    f"missing: {template_path}"
+                )
 
         if self._get_param("seed", -1) != -1:
             cmd.extend(["--seed", str(self._get_param("seed", -1))])
@@ -1058,14 +1098,17 @@ class ModelManager(QObject):
             working_text = user_re.sub(mask_repl, working_text)
 
         # ── Phase 0: deterministic dict pre-pass ─────────────────────────
-        # For all built-in strengths, apply the ~4300-entry typo dictionary
-        # before the LLM so that common typos are guaranteed fixed even when
-        # the model is too small to catch them all.  The LLM still runs
-        # afterwards to catch unknown typos the dictionary missed.
-        # The dictionary is English-only and context-blind, so it is skipped
-        # whenever the user has taken control via a system prompt override
-        # or a custom mode prompt.
-        if not custom_sys and not mode_prompt_override:
+        # Applies ONLY in spelling_only mode. The ~4300-entry typo dictionary
+        # is English-only and context-blind, so in full_correction / rewrite
+        # modes it can mangle proper nouns and unusual-but-valid words the
+        # LLM would have kept (Decision 5 / locked constraint #6). spelling_only
+        # keeps the deterministic guarantee for common typos even when the
+        # model is too small to catch them all; the LLM still runs afterwards
+        # to catch unknown typos the dictionary missed. Skipped whenever the
+        # user has taken control via a system prompt override or a custom
+        # mode prompt. Rejection-fallback dict usage (_dict_prepass on failed
+        # units) and typo-aware divergence normalization are unchanged.
+        if strength == "spelling_only" and not custom_sys and not mode_prompt_override:
             pre_corrected, dict_fixes = _dict_prepass(working_text)
             if dict_fixes > 0:
                 log(f"[{self.label}] Dict prepass applied {dict_fixes} fixes before LLM")
@@ -1079,12 +1122,30 @@ class ModelManager(QObject):
         # Profile-driven chunking: each mode/template gets its own chunk size.
         # With --parallel 4 slots, up to 4 units run concurrently.  Separator
         # preserves inter-unit whitespace/newlines so reassembly is lossless.
+        #
+        # Adaptive cap: small-context models (e.g. 4k GGUFs at parallel=4)
+        # can't fit a 250-word rewrite plus thinking budget plus answer in one
+        # slot; sentence-boundary chunking already guarantees cohesion at
+        # 120 words. Mirrors the per-unit slot_limit computation below.
+        slot_tokens = (
+            self.actual_ctx_size or self._get_param("context_size", 12800)
+        ) // self._get_param("parallel", 4)
+        chunk_word_cap = (
+            min(profile.chunk_words, 120) if slot_tokens < 2048 else profile.chunk_words
+        )
 
-        chunks = _chunk_text_by_sentences(pre_corrected, profile.chunk_words)
+        chunks = _chunk_text_by_sentences(pre_corrected, chunk_word_cap)
         if len(chunks) > 1:
             log(
                 f"[{self.label}] Patch: {len(chunks)} sentence units "
-                f"({total_words} words) profile={profile_name}"
+                f"({total_words} words) profile={profile_name} "
+                f"chunk_words={chunk_word_cap}"
+            )
+        elif slot_tokens < 2048 and chunk_word_cap < profile.chunk_words:
+            log(
+                f"[{self.label}] Patch: slot budget {slot_tokens} tokens — "
+                f"rewrite chunk cap reduced {profile.chunk_words} -> "
+                f"{chunk_word_cap} words"
             )
 
         corrected_parts: list[tuple[str, str]] = [("", "")] * len(chunks)
@@ -1095,9 +1156,19 @@ class ModelManager(QObject):
 
         from stet.core.text_utils import looks_like_prose
 
-        # Profile-driven threshold — the profile is the single source of truth
-        # for how much divergence each mode permits.
-        threshold = profile.hallucination_threshold
+        # Config-driven threshold — single source of truth, mirroring the
+        # streaming fallback in main_window.py. The correction_modes row for
+        # this strength is authoritative; fall back to the profile value when
+        # the config row/field is missing.
+        _modes = self.cfg.get("correction_modes", [])
+        _mi = _resolve_mode_index(strength, _modes)
+        threshold = (
+            _modes[_mi].get("hallucination_threshold")
+            if 0 <= _mi < len(_modes) and isinstance(_modes[_mi], dict)
+            else None
+        )
+        if threshold is None:
+            threshold = profile.hallucination_threshold
 
         max_workers = min(len(chunks), self._get_param("parallel", 4)) if chunks else 1
 
@@ -1291,8 +1362,18 @@ class ModelManager(QObject):
                                     any_preserved = True
                                     continue
 
-                    # Reject if raw output exceeds the (config-driven) hallucination threshold
-                    if _hallucination_ratio(chunk_text, corrected, strength) > threshold:
+                    # Reject if raw output exceeds the (config-driven) hallucination
+                    # threshold. Skipped for rewrite task types: char-level divergence
+                    # is the point of a rewrite, so legitimate rewrites routinely
+                    # diverge >97% — the raw ratio gate is miscalibrated for them and
+                    # silently reverted whole units to the original text (partial
+                    # corrections with no user warning). Rewrites remain protected by
+                    # the refusal/empty detector below and the post-splice word-ratio
+                    # sanity check (min/max_word_ratio from the profile).
+                    if (
+                        profile.task_type != "rewrite"
+                        and _hallucination_ratio(chunk_text, corrected, strength) > threshold
+                    ):
                         err_msg = f"Unit {idx + 1} rejected: raw hallucination ratio exceeded threshold ({threshold})"
                         self.last_patch_error = err_msg
                         log(f"[{self.label}] Patch {err_msg}")
@@ -1307,6 +1388,34 @@ class ModelManager(QObject):
                     # legit max ~0.687) — so use a dedicated detector.
                     if _is_refusal_or_empty(corrected, chunk_text):
                         err_msg = f"Unit {idx + 1} rejected: model refused or returned empty edit"
+                        self.last_patch_error = err_msg
+                        log(f"[{self.label}] Patch {err_msg}")
+                        corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
+                        continue
+
+                    # Reject no-change declarations and spilled reasoning
+                    # commentary (e.g. LFM 2.5 "The text appears to be already
+                    # correct...", "I need to fix errors, improve flow..."
+                    # task restatements, "Original text issues:" analysis
+                    # lists). These are not edits — treat them like a refusal
+                    # and keep the original. Applied to all strengths: it also
+                    # catches full_correction's spliced-commentary case.
+                    if _is_no_change_declaration(corrected):
+                        err_msg = f"Unit {idx + 1} rejected: no-change declaration/commentary"
+                        self.last_patch_error = err_msg
+                        log(f"[{self.label}] Patch {err_msg}")
+                        corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
+                        continue
+
+                    # Reject agentic tool-call output: agentic finetunes (e.g.
+                    # LFM 2.5) occasionally emit <|tool_call_start|>[edit_text(
+                    # input='...'...)</...> instead of the corrected sentence.
+                    # The tool-call envelope is not a correction and its inner
+                    # content is not trusted — keep the original text like the
+                    # other rejections. Only the <|tool_call_start|> marker is
+                    # checked; nothing is extracted from inside the call.
+                    if "<|tool_call_start|>" in corrected:
+                        err_msg = f"Unit {idx + 1} rejected: agentic tool-call output"
                         self.last_patch_error = err_msg
                         log(f"[{self.label}] Patch {err_msg}")
                         corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
@@ -1327,9 +1436,12 @@ class ModelManager(QObject):
                     corrected = guarded_corrected
 
                     if not _post_splice_sanity(chunk_text, corrected, min_ratio=profile.min_word_ratio, max_ratio=profile.max_word_ratio):
+                        _word_ratio = len(corrected.split()) / max(1, len(chunk_text.split()))
                         log(
                             f"[{self.label}] Patch unit {idx + 1} rejected: "
-                            "post-splice sanity check failed"
+                            f"post-splice sanity check failed (word ratio "
+                            f"{_word_ratio:.2f} outside "
+                            f"[{profile.min_word_ratio}, {profile.max_word_ratio}])"
                         )
                         corrected_parts[idx] = (_dict_prepass(chunk_text)[0], sep)
                         continue
@@ -1558,7 +1670,18 @@ class ModelManager(QObject):
         corrected_segments = [text for text, _ in segments]
         session = session or self._get_session()
         profile = profile or PROFILES.get(strength, PROFILES["full_correction"])
-        threshold = profile.hallucination_threshold
+        # Config-driven threshold — same resolution as the streaming path and
+        # the main patch path (correct_text_patch): the correction_modes row
+        # for this strength is authoritative, profile value is the fallback.
+        _modes = self.cfg.get("correction_modes", [])
+        _mi = _resolve_mode_index(strength, _modes)
+        threshold = (
+            _modes[_mi].get("hallucination_threshold")
+            if 0 <= _mi < len(_modes) and isinstance(_modes[_mi], dict)
+            else None
+        )
+        if threshold is None:
+            threshold = profile.hallucination_threshold
 
         for seg_idx, span_text in editable_spans:
             if cancel_event is not None and cancel_event.is_set():

@@ -182,8 +182,6 @@ class CorrectionWindow(QWidget):
         self._drag_pos = None
         self._is_closed: bool = False
         self._correction_in_flight: bool = False
-        self._clean_view: bool = False
-        self._force_diff_view: bool = False
         self._diff_nl = "\x00NL\x00"
         self._diff_orig_words: list[str] = []
         self._diff_corr_words: list[str] = []
@@ -207,8 +205,6 @@ class CorrectionWindow(QWidget):
         self.send_btn.setEnabled(False)
         if hasattr(self, "edit_text_btn"):
             self.edit_text_btn.setEnabled(False)
-        if hasattr(self, "view_mode_btn"):
-            self.view_mode_btn.setEnabled(False)
 
         if self.original:
             threading.Thread(target=self._do_correction, daemon=True).start()
@@ -701,16 +697,6 @@ class CorrectionWindow(QWidget):
         self.edit_text_btn.clicked.connect(self._toggle_edit_text_mode)
         hdr.addWidget(self.edit_text_btn)
 
-        # "Clean view" toggle — switch the diff pane between redline markup
-        # and a clean copy of the corrected text (strikethrough in rewrite
-        # mode). Styled via QPushButton#viewModeBtn in stet.qss.
-        self.view_mode_btn = QPushButton("Clean view")
-        self.view_mode_btn.setObjectName("viewModeBtn")
-        self.view_mode_btn.setCheckable(True)
-        self.view_mode_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.view_mode_btn.clicked.connect(self._toggle_clean_view)
-        hdr.addWidget(self.view_mode_btn)
-
         self.strength_combo = QComboBox()
         self.strength_combo.setAccessibleName("Correction strength")
         self.strength_combo.setObjectName("strengthCombo")
@@ -1004,7 +990,7 @@ class CorrectionWindow(QWidget):
         if final_result is not None:
             final_text = _html.escape(final_result).replace("\n", "<br>")
             readable = self._final_result_diff_is_readable(final_result)
-            if readable or getattr(self, "_force_diff_view", False):
+            if readable:
                 final_result_html = self._final_result_html(final_result)
             else:
                 final_result_html = final_text
@@ -1396,9 +1382,21 @@ class CorrectionWindow(QWidget):
                 else:
                     self._correction_ready.emit(text, "Already correct")
             else:
-                self._correction_ready.emit(
-                    result_text, f"Patch ({label_strength}{unit_suffix})"
-                )
+                if cr.units_corrected < cr.units_processed:
+                    _kept = cr.units_processed - cr.units_corrected
+                    _warn_label = (
+                        f"Patch ({label_strength}{unit_suffix}) "
+                        f"\u26a0 {_kept} of {cr.units_processed} sections left unchanged"
+                    )
+                    log(
+                        f"[CW] Partial patch: {_kept}/{cr.units_processed} "
+                        f"sections left unchanged ({label_strength})"
+                    )
+                    self._correction_ready.emit(result_text, _warn_label)
+                else:
+                    self._correction_ready.emit(
+                        result_text, f"Patch ({label_strength}{unit_suffix})"
+                    )
 
         except Exception as e:
             log(f"[CW] _do_correction CRASHED: {e}\n{traceback.format_exc()}")
@@ -1435,7 +1433,17 @@ class CorrectionWindow(QWidget):
         corrected = self._match_original_newlines(corrected)
         self.corrected = corrected
         self._render_diff(corrected)
-        if method.startswith("\u26a0"):
+        if "\u26a0" in method and "left unchanged" in method:
+            # Partial correction: some units were preserved but the text did
+            # change, so "Correction unchanged" would be wrong and contradict
+            # the badge label. The partial label carries the warning marker
+            # mid-label ("Patch (...) ⚠ N of M sections left unchanged"), so
+            # it is matched by containment, not startswith.
+            self._update_status(
+                "\u26a0  Partially corrected — some sections left unchanged",
+                "warning",
+            )
+        elif method.startswith("\u26a0"):
             self._update_status("\u26a0  Correction unchanged", "warning")
         else:
             self._update_status("\u2713  Done", "done")
@@ -1446,8 +1454,6 @@ class CorrectionWindow(QWidget):
         self.send_btn.setEnabled(True)
         if hasattr(self, "edit_text_btn") and not getattr(self, "_is_chat_mode", False):
             self.edit_text_btn.setEnabled(True)
-        if hasattr(self, "view_mode_btn"):
-            self.view_mode_btn.setEnabled(True)
 
     def _on_correction_failed(self):
         if getattr(self, "_is_closed", False):
@@ -2021,10 +2027,10 @@ class CorrectionWindow(QWidget):
         )
 
     def _render_current_view(self):
-        if getattr(self, "_clean_view", False):
-            html = self._final_result_html(self.corrected)
-        else:
-            html = self._diff_html(self.corrected)
+        # The diff pane always renders the redline markup (changed words
+        # colored + highlighted). The former "Clean view" toggle was removed —
+        # see Decision 20 note; there is no alternate view to switch to.
+        html = self._diff_html(self.corrected)
         self.corr_edit.setHtml(
             '<style>a { color: inherit; text-decoration: none; }</style>'
             '<body style="color:#e2e8f0;font-family:\'IBM Plex Mono\',\'Consolas\',monospace;font-size:13px;">'
@@ -2034,28 +2040,6 @@ class CorrectionWindow(QWidget):
     def _render_diff(self, corrected: str):
         self.corrected = corrected
         self._render_current_view()
-
-    def _toggle_clean_view(self):
-        if getattr(self, "_correction_in_flight", False):
-            return
-        if getattr(self, "_is_chat_mode", False):
-            self._force_diff_view = not getattr(self, "_force_diff_view", False)
-            if hasattr(self, "_render_chat_transcript"):
-                self._render_chat_transcript(final_result=getattr(self, "corrected", None))
-        else:
-            self._clean_view = not getattr(self, "_clean_view", False)
-            self._render_current_view()
-
-        # Keep the header toggle's checked state in sync for programmatic
-        # calls (a checkable QPushButton flips its own state on click, but
-        # direct calls to this method bypass that).
-        if hasattr(self, "view_mode_btn"):
-            active = (
-                getattr(self, "_force_diff_view", False)
-                if getattr(self, "_is_chat_mode", False)
-                else getattr(self, "_clean_view", False)
-            )
-            self.view_mode_btn.setChecked(active)
 
     def _toggle_edit_text_mode(self):
         if getattr(self, "_correction_in_flight", False):

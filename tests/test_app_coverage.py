@@ -15,7 +15,8 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtCore import QEvent, QObject
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from stet.core.app import (
     StetApp,
@@ -679,13 +680,42 @@ class TestStetAppWindowDestroyed:
     def test_clears_reference(self, mock_tray_cls, qtbot, monkeypatch):
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
-        app._window = MagicMock()
-        app._on_window_destroyed()
+        win = QObject()
+        app._window = win
+        # Mirror the production connection in _show_window: capture the exact
+        # wrapper, ignoring the fresh wrapper PyQt6 passes to `destroyed`.
+        win.destroyed.connect(lambda *_, w=win: app._on_window_destroyed(w))
+        win.deleteLater()
+        # Unit tests have no running event loop, so force-deliver the posted
+        # deferred-delete event (processEvents/qWait do NOT dispatch it).
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         assert app._window is None
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_old_destroyed_does_not_clobber_new_window(self, mock_tray_cls, qtbot, monkeypatch):
+        """A late `destroyed` signal from an old window must not clear a
+        freshly created _window reference (captured-wrapper guard)."""
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        old_win = QObject()
+        new_win = QObject()
+        old_win.destroyed.connect(lambda *_, w=old_win: app._on_window_destroyed(w))
+        app._window = new_win
+        old_win.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert app._window is new_win
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Win32 clipboard path")
 class TestStetAppPasteText:
+    @staticmethod
+    def _wait_for_safe_copy(app, timeout=2.0):
+        """_paste_text now runs the paste sequence on a worker thread; wait
+        until that thread has invoked the (mocked) _safe_copy."""
+        deadline = time.monotonic() + timeout
+        while not app._safe_copy.called and time.monotonic() < deadline:
+            time.sleep(0.005)
+
     @patch("stet.core.app.QSystemTrayIcon")
     @patch("stet.core.app._send_ctrl_chord")
     @patch("stet.core.app.QTimer")
@@ -697,6 +727,7 @@ class TestStetAppPasteText:
         app._old_clip = ""
         app._safe_copy = MagicMock()
         app._paste_text("new text")
+        self._wait_for_safe_copy(app)
         app._safe_copy.assert_called_with("new text")
 
     @patch("stet.core.app.QSystemTrayIcon")
@@ -710,6 +741,7 @@ class TestStetAppPasteText:
         app._old_clip = "original"
         app._safe_copy = MagicMock()
         app._paste_text("corrected")
+        self._wait_for_safe_copy(app)
         app._safe_copy.assert_called_with("corrected")
         mock_timer.singleShot.assert_called()
 
@@ -918,6 +950,58 @@ class TestStetAppQuit:
         assert len(app._hotkey_handles) == 0
         app.ac_model.unload_model.assert_called()
         app.chat_model.unload_model.assert_called()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_quit_with_deleted_update_checker_does_not_crash(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        """Regression: tray Quit must not raise RuntimeError when the update
+        checker's C++ QThread object was deleted while ``_update_checker``
+        still referenced the stale Python wrapper (the production crash was
+        ``wrapped C/C++ object of type AppUpdateChecker has been deleted``,
+        which aborted _quit() before QApplication.quit)."""
+        from PyQt6 import sip
+
+        import stet.core.app as app_module
+
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app.ac_model.unload_model = MagicMock()
+        app.chat_model.unload_model = MagicMock()
+        # Reproduce the stale-wrapper state: the checker thread finished and
+        # deleteLater ran (C++ object gone) but nothing cleared the reference.
+        checker = AppUpdateChecker()
+        app._update_checker = checker
+        sip.delete(checker)
+        # Sanity: the C++ object is now deleted, so the wrapper must be stale.
+        with pytest.raises(RuntimeError):
+            checker.isRunning()
+
+        quit_calls = []
+
+        class DummyQApplication:
+            @staticmethod
+            def instance():
+                return type(
+                    "DummyApp", (), {"quit": lambda self: quit_calls.append(True)}
+                )()
+
+        monkeypatch.setattr(app_module, "QApplication", DummyQApplication)
+        app._quit()  # must not raise
+        assert app._update_checker is None
+        assert quit_calls == [True]
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_on_update_check_finished_clears_checker(
+        self, mock_tray_cls, qtbot, monkeypatch
+    ):
+        """The finished handler must drop the checker reference so a later
+        _quit() never touches a deleted C++ QThread."""
+        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+        app = StetApp()
+        app._update_checker = AppUpdateChecker()
+        app._on_update_check_finished()
+        assert app._update_checker is None
 
 
 class TestStetAppShowFirstRun:

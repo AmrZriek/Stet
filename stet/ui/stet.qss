@@ -152,7 +152,7 @@ QPushButton#danger:hover {
     border: 1px solid #f87171;
 }
 
-QPushButton#viewModeBtn, QPushButton#editTextBtn {
+QPushButton#editTextBtn {
     background: transparent;
     border: 1px solid #28292c;
     border-radius: 0px;
@@ -162,13 +162,13 @@ QPushButton#viewModeBtn, QPushButton#editTextBtn {
     font-size: 12px;
 }
 
-QPushButton#viewModeBtn:hover, QPushButton#editTextBtn:hover {
+QPushButton#editTextBtn:hover {
     background: #1c1d1f;
     border-color: #d4a373;
     color: #d4a373;
 }
 
-QPushButton#viewModeBtn:checked, QPushButton#editTextBtn:checked {
+QPushButton#editTextBtn:checked {
     background: #28292c;
     color: #d4a373;
     border-color: #d4a373;

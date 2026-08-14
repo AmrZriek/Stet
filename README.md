@@ -5,11 +5,12 @@
 </p>
 
 <p align="center">
-  <strong>Stet — Zero-Clipboard, Local-First AI Autocorrect & Text Rewriting Utility for Windows and macOS.</strong>
+  <strong>Stet: Zero-Clipboard, Local-First AI Autocorrect & Text Rewriting Utility for Windows and macOS.</strong>
 </p>
 
 <p align="center">
   <a href="https://amrzriek.gumroad.com/l/stet"><img src="https://img.shields.io/badge/Gumroad-Get%20Stet-ff90e8?style=for-the-badge&logo=gumroad&logoColor=black" alt="Get Stet on Gumroad"></a>
+  <a href="https://ko-fi.com/amrzriek"><img src="https://img.shields.io/badge/Ko--fi-Support%20Stet-ff5e5b?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support Stet on Ko-fi"></a>
   <a href="https://github.com/AmrZriek/Stet/releases"><img src="https://img.shields.io/github/v/release/AmrZriek/Stet?style=for-the-badge&color=blue" alt="Latest Release"></a>
   <img src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue?style=flat-square&logo=python" alt="Python Version">
   <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011%20%7C%20macOS%2014%2B-lightgrey?style=flat-square" alt="Platform">
@@ -18,15 +19,11 @@
 </p>
 
 <p align="center">
-  🛒 <strong>Gumroad:</strong> <a href="https://amrzriek.gumroad.com/l/stet">amrzriek.gumroad.com/l/stet</a> &nbsp;|&nbsp; 🚀 <strong>Latest Release:</strong> <a href="https://github.com/AmrZriek/Stet/releases/tag/v1.2.2">v1.2.2 Installer</a>
+  🛒 <strong>Gumroad:</strong> <a href="https://amrzriek.gumroad.com/l/stet">amrzriek.gumroad.com/l/stet</a> &nbsp;|&nbsp; ☕ <strong>Ko-fi:</strong> <a href="https://ko-fi.com/amrzriek">ko-fi.com/amrzriek</a> &nbsp;|&nbsp; 🚀 <strong>Latest Release:</strong> <a href="https://github.com/AmrZriek/Stet/releases/latest">Latest Installer</a>
 </p>
 
 <p align="center">
-  <img src="assets/img/cover.png" alt="Stet Cover Banner — Private Local AI Autocorrect" width="900">
-</p>
-
-<p align="center">
-  <img src="assets/img/stet_showcase.gif" alt="Stet Motion Showcase — Instant In-Place Local AI Autocorrect" width="900">
+  <img src="assets/img/stet_showcase.gif" alt="Stet Showcase: Instant In-Place Local AI Autocorrect & Text Refinement" width="900">
 </p>
 
 ---
@@ -50,16 +47,12 @@ Most AI writing assistants force users into browser extensions, cloud web apps, 
 * **Terminal & IDE Protection:** Heuristically detects console windows (cmd, PowerShell, Windows Terminal, VS Code terminal, mintty) to prevent sending destructive `Ctrl+C` interrupt signals during text capture.
 
 <p align="center">
-  <img src="assets/img/scene_zero_clipboard.png" alt="Zero Clipboard Touch Architecture" width="850">
+  <img src="assets/img/app_screenshot.png" alt="Stet Interactive Diff & Chat Window" width="850">
 </p>
 
 ---
 
 ## Comparison Matrix
-
-<p align="center">
-  <img src="assets/img/scene_comparison.png" alt="Cloud AI vs Local Stet Comparison" width="850">
-</p>
 
 | Feature / Metric | Stet (Local AI) | Cloud AI (Grammarly / Copilot) | Naive Open-Source Hotkey Scripts |
 | :--- | :--- | :--- | :--- |
@@ -68,44 +61,18 @@ Most AI writing assistants force users into browser extensions, cloud web apps, 
 | **Link & Code Preservation** | ✅ Sub-ms Sentinel Masking (0% mangling) | ⚠️ Partial formatting loss | ❌ Scrambles URLs, backticks, & syntax |
 | **App Compatibility** | ✅ Universal (VS Code, Slack, Word, Terminal, Chrome) | ❌ Limited to supported browser/apps | ⚠️ Unreliable focus handling |
 | **Speed & Overhead** | ⚡ ~50ms parallel stream chunks | ⚠️ Network latency dependent | ⚠️ Slow macro key delays |
-| **Subscription Cost** | 💰 One-time / Free Open Source | 💳 Monthly recurring fee | 💰 Free open source |
+| **Subscription Cost** | 💰 Free & Open Source | 💳 Monthly recurring fee | 💰 Free open source |
 
 ---
 
 ## Refinement Levels
 
-<p align="center">
-  <img src="assets/img/scene_four_modes.png" alt="4 Preset Refinement Levels" width="850">
-</p>
+Stet provides four strength profiles to match your writing requirements:
 
-* **Level 1 — Spelling Only:** Surgical typo and spelling cleanup. Preserves 100% of your original phrasing, word choice, and sentence structure.
-* **Level 2 — Full Correction:** Corrects grammar errors, verb tenses, prepositions, and punctuation while maintaining your personal tone.
-* **Level 3 — Rewrite & Polish:** Re-architects sentence flow, vocabulary, and readability for maximum clarity and impact.
-* **Level 4 — Custom Patch & Chat:** Applies custom system prompts (e.g., *"translate to Spanish"*, *"format as bullet points"*, *"make formal"*) or opens an interactive chat dialog with the local LLM.
-
----
-
-## Key Features & User Experience
-
-### Interactive Diff & Chat Interface
-
-<p align="center">
-  <img src="assets/img/app_screenshot.png" alt="Stet Interactive Diff & Chat Window Screenshot" width="850">
-</p>
-
-* **Side-by-Side Diff Highlights:** Red, green, and blue inline diff markers compare original text vs. corrected text.
-* **Word-Level Context Menu:** Right-click any changed word to *Keep my original*, *Never change this word again* (blacklist), or *Edit fix* in a popover.
-* **Plain-Text Editor Mode:** Click **Edit text** to turn the window into a full plain-text editor; Done recalculates the diffs automatically.
-* **Clean View Toggle:** Toggle between clean preview text and deletion strikethroughs.
-* **Interactive Chat:** Chat directly with the local LLM to request custom revisions or alternative phrasings.
-
-### Universal Compatibility
-
-<p align="center">
-  <img src="assets/img/scene_works_everywhere.png" alt="Universal App Compatibility — One Hotkey Every App" width="850">
-</p>
-
-Works seamlessly across VS Code, Microsoft Word, Gmail, Slack, Notepad, Windows Terminal, and any native desktop application.
+* **Level 1: Spelling Only:** Surgical typo and spelling cleanup. Preserves 100% of your original phrasing, word choice, and sentence structure.
+* **Level 2: Full Correction:** Corrects grammar errors, verb tenses, prepositions, and punctuation while maintaining your personal tone.
+* **Level 3: Rewrite & Polish:** Re-architects sentence flow, vocabulary, and readability for maximum clarity and impact.
+* **Level 4: Custom Patch & Chat:** Applies custom system prompts (e.g., *"translate to Spanish"*, *"format as bullet points"*, *"make formal"*) or opens an interactive chat dialog with the local LLM.
 
 ---
 
@@ -114,7 +81,7 @@ Works seamlessly across VS Code, Microsoft Word, Gmail, Slack, Notepad, Windows 
 ### Windows
 
 #### Option 1: Standalone Installer (Recommended)
-1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/tag/v1.2.2).
+1. Download `StetSetup.exe` from the [Latest Release](https://github.com/AmrZriek/Stet/releases/latest).
 2. Launch the installer. If Windows SmartScreen appears, click **More info** → **Run anyway**.
 3. Stet installs automatically and launches the native model downloader wizard on first run.
 
@@ -135,7 +102,22 @@ Works seamlessly across VS Code, Microsoft Word, Gmail, Slack, Notepad, Windows 
 
 ---
 
-## System Tray & Desktop Utilities
+## Key Features & Workflows
+
+### Dual Workflow Modes
+
+1. **Instant Silent Mode (`F10` on Win / `⌘+⌥+F10` on Mac):**
+   * Highlight text and press `F10` to trigger a non-intrusive, frameless On-Screen Display indicator (`Correcting...` → `Done ✨`).
+   * Replaces text instantly in-place via UI Automation without opening any window or stealing focus.
+   * Supports immediate 1-key undo (`Ctrl+Z` or via the System Tray menu).
+
+2. **Interactive Diff Window (`F9` on Win / `⌘+⌥+F9` on Mac):**
+   * Opens a dark-mode window with color-coded green/red/blue diff highlights comparing original vs. corrected text.
+   * **Word-Level Controls:** Right-click any changed word to *Keep my original*, *Never change this word again* (blacklist), or *Edit fix* in a popover.
+   * **Plain-Text Editor:** Click **Edit text** to convert the window into an editable editor; clicking Done recalculates the diffs.
+   * **Interactive Chat:** Chat directly with the local LLM to request iterative revisions or alternative phrasings.
+
+### System Tray & Desktop Utilities
 
 * **Model & Weight Management:** View model status and load or unload GGUF weights on demand directly from the system tray menu to free up GPU VRAM and RAM. Supports setting an automatic idle timer or unloading immediately after each use. *(Note: Detailed system-wide memory metrics can be monitored via Windows Task Manager or Activity Monitor).*
 * **Correction History Viewer:** Open the built-in audit log window to search past corrections, inspect side-by-side diffs, and restore previous versions with one click.
@@ -158,10 +140,6 @@ Works seamlessly across VS Code, Microsoft Word, Gmail, Slack, Notepad, Windows 
 
 ## Core Architecture Pipeline
 
-<p align="center">
-  <img src="assets/img/scene_stack.png" alt="6-Stage Architecture Stack" width="850">
-</p>
-
 ```mermaid
 graph TD
     A["Highlight Text in Any App"] -->|Global Hotkey F9 / F10| B["Native Win32 / macOS Text Capture<br>(IUIAutomationTextPattern / Accessibility)"]
@@ -183,7 +161,7 @@ graph TD
 
 * **Operating System:** Windows 10 or 11 (64-bit) / macOS 14+ (Sonoma or newer; Apple Silicon recommended).
 * **Hardware Acceleration:** CUDA-compatible NVIDIA GPU (recommended for ~50ms near-instant inference) or Apple Silicon Metal GPU. CPU fallback is supported.
-* **Recommended Model:** Gemma4 E2B-Instruct-Q4_K_XL or Gemma4 12B if possible.
+* **Recommended Model:** Gemma 4 E2B (Q4_K_XL UD), downloaded automatically on first launch.
 
 ---
 

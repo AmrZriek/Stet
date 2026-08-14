@@ -1507,8 +1507,26 @@ class StetApp(QObject):
             action_callback = _emit_undo
         osd = SilentCorrectionOSD(message, state=state, action_text=action_text, action_callback=action_callback)
         self._osd_widget = osd
+        # Clear the reference when the OSD's C++ object is destroyed so the
+        # next call doesn't try to close a dead wrapper (auto-dismiss path).
+        # Capture the exact wrapper: PyQt6 emits `destroyed` with a fresh
+        # wrapper of the dying object, so identity is checked against the
+        # captured instance.
+        osd.destroyed.connect(lambda *_, w=osd: self._on_osd_destroyed(w))
         # Loading state stays visible until replaced; others auto-dismiss
         osd.show_animated(auto_dismiss=(state != "loading"))
+
+    def _on_osd_destroyed(self, osd):
+        """Clear _osd_widget when the OSD's C++ object is destroyed.
+
+        The OSD auto-dismisses via WA_DeleteOnClose on its own timer, so
+        _osd_widget would otherwise keep a dead wrapper; the captured-wrapper
+        guard prevents an old OSD's late `destroyed` signal from clobbering a
+        freshly created reference. The try/except around prev.close() in
+        _show_silent_osd remains as belt-and-braces.
+        """
+        if self._osd_widget is osd:
+            self._osd_widget = None
 
     def _show_model_warning(self, msg: str):
         # Longer duration (6s) than standard notifications — this is a sticky
@@ -1577,8 +1595,12 @@ class StetApp(QObject):
             self._window._history = self._history
             self._window.accepted.connect(self._paste_text)
             # Clear stale reference when the user closes the window,
-            # preventing RuntimeError on next hotkey press.
-            self._window.destroyed.connect(self._on_window_destroyed)
+            # preventing RuntimeError on next hotkey press. Capture the exact
+            # wrapper: PyQt6 emits `destroyed` with a fresh wrapper of the
+            # dying object (the old wrapper is already a deleted shell), so
+            # identity is checked against the captured instance.
+            win = self._window
+            win.destroyed.connect(lambda *_, w=win: self._on_window_destroyed(w))
             self._window.show()
             self._window.raise_()
             self._window.activateWindow()
@@ -1586,10 +1608,16 @@ class StetApp(QObject):
         except Exception as e:
             log(f"[Window] CRASH in _show_window: {e}\n{traceback.format_exc()}")
 
-    def _on_window_destroyed(self):
-        """Slot called when CorrectionWindow's C++ object is destroyed."""
-        self._window = None
-        log("[Window] CorrectionWindow destroyed — reference cleared")
+    def _on_window_destroyed(self, window):
+        """Slot called when CorrectionWindow's C++ object is destroyed.
+
+        `window` is the exact wrapper captured when the connection was made —
+        an old window's late `destroyed` signal can't clobber a freshly
+        created _window reference.
+        """
+        if self._window is window:
+            self._window = None
+            log("[Window] CorrectionWindow destroyed — reference cleared")
 
     def _paste_text(self, text: str):
         if self._window is not None:
@@ -1617,10 +1645,15 @@ class StetApp(QObject):
 
             threading.Thread(target=_paste_macos, name="StetMacPaste", daemon=True).start()
             return
-        self._safe_copy(text)
-        time.sleep(0.15)
-        _send_ctrl_chord(VK_V)
-        time.sleep(0.1)
+        def _paste_worker():
+            # We're in a background thread — just sleep instead of
+            # QTimer.singleShot, which would crash from a non-Qt thread.
+            self._safe_copy(text)
+            time.sleep(0.15)
+            _send_ctrl_chord(VK_V)
+            time.sleep(0.1)
+
+        threading.Thread(target=_paste_worker, name="StetPaste", daemon=True).start()
         if self._old_clip and self._old_clip != text:
             clip_to_restore = self._old_clip
             def _restore_if_unchanged():
@@ -2381,6 +2414,10 @@ class StetApp(QObject):
                 self._settings_dlg = None
 
     def _on_update_check_finished(self):
+        # Drop the reference to the checker thread. Its C++ object is already
+        # scheduled for deletion via the ``deleteLater`` connection; keeping
+        # the Python wrapper would leave _quit() touching a deleted QThread.
+        self._update_checker = None
         if not self._available_update:
             self._set_settings_update_action_text("Check for Updates")
 
@@ -2484,18 +2521,24 @@ class StetApp(QObject):
         # into a dying app, and restore the tray dot if an update was pending.
         checker = getattr(self, "_update_checker", None)
         if checker is not None:
-            for sig in (
-                checker.update_available,
-                checker.check_done,
-                checker.finished,
-            ):
-                try:
-                    sig.disconnect()
-                except (TypeError, RuntimeError):
-                    pass
-            if checker.isRunning():
-                checker.requestInterruption()
-                checker.wait(2000)
+            try:
+                for sig in (
+                    checker.update_available,
+                    checker.check_done,
+                    checker.finished,
+                ):
+                    try:
+                        sig.disconnect()
+                    except (TypeError, RuntimeError):
+                        pass
+                if checker.isRunning():
+                    checker.requestInterruption()
+                    checker.wait(2000)
+            except RuntimeError:
+                # The checker's C++ QThread object was already deleted (its
+                # ``deleteLater`` ran) while the Python wrapper was still
+                # referenced. Nothing left to wind down — quit must proceed.
+                pass
             self._update_checker = None
         if self._available_update:
             self._restore_tray_status_color()

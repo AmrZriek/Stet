@@ -190,7 +190,7 @@ PROFILES: dict[str, CorrectionProfile] = {
         hunk_guard_mode=None,
         hallucination_threshold=0.97,
         min_word_ratio=0.45,
-        max_word_ratio=1.60,
+        max_word_ratio=1.75,
     ),
     "template_transform": CorrectionProfile(
         task_type="transform",
@@ -440,12 +440,16 @@ def _is_fewshot_echo(raw: str, original: str) -> bool:
 def _dict_prepass(text: str) -> tuple[str, int]:
     """Phase 0: deterministic typo replacement. Returns (fixed_text, n_fixes).
 
-    .. note:: Applied for all built-in strengths, not just spelling_only.
-       The dict prepass guarantees that common typos are fixed before the LLM
-       sees them, insurance for smaller models that might miss well-known
-       errors.  It is only skipped when the user has taken control via a
-       custom system prompt or a custom mode prompt override — those paths
-       delegate all correction to the LLM.
+    .. note:: As an INPUT pre-pass this applies to spelling_only mode only
+       (owner-approved revert, Decision 24 — restoring locked constraint #6 /
+       Decision 5). The context-blind English map can mangle proper nouns in
+       full_correction / rewrite modes, where the LLM decides instead. It is
+       also skipped when the user has taken control via a custom system
+       prompt or a custom mode prompt override — those paths delegate all
+       correction to the LLM. Internal uses stay scope-independent: the
+       rejection-fallback (_dict_prepass on units the model failed to
+       correct) and typo-aware divergence normalization (_hallucination_ratio)
+       still apply it for every strength.
 
     Uses word-boundary-aware substitution that preserves the original casing
     (lowercase, Capitalized, ALLCAPS). Skips replacement if the surrounding
@@ -1025,8 +1029,10 @@ def _chunk_text_by_sentences(text: str, max_words: int) -> list[tuple[str, str]]
         candidate = cur_text + cur_sep + sent if cur_text else sent
         candidate_words = cur_words + wc
 
-        # Force a chunk boundary on any newline.
-        # This prevents the LLM from merging lines or rearranging words across lines.
+        # Force a chunk boundary on any blank line (two consecutive newlines).
+        # This prevents the LLM from merging paragraphs or rearranging words
+        # across them. Single \n line breaks within lists or prose do NOT
+        # force a split — those pack together up to the word budget.
         force_split = cur_text and "\n\n" in cur_sep
         if (candidate_words > max_words and cur_text) or force_split:
             # Finalize current chunk; the separator between it and the next chunk
@@ -1424,4 +1430,42 @@ def _is_refusal_or_empty(corrected: str, original: str) -> bool:
     if _REFUSAL_RE.search(inner) and len(inner) < 60:
         return True
     return False
+
+
+# ── No-change declaration / commentary detection ────────────────────────────
+# Thinking models (e.g. Liquid LFM 2.5) spill reasoning into content even
+# when asked to correct: task restatements ("I need to fix errors, improve
+# flow..."), analysis lists ("Original text issues: 1. ..."), "already
+# correct" declarations, and spliced commentary ("The text appears to be
+# already correct... This is grammatically correct"). None of these are
+# edits, so they are rejected like refusals and the original text is kept.
+# Conservative by design: only the start of the output is inspected (first
+# line, capped at 40 chars), so a legitimate rewrite that merely contains a
+# similar phrase later in the text is never caught.
+_NO_CHANGE_PHRASES = (
+    "the text appears to be already correct",
+    "this text is grammatically correct",
+    "the text is already correct",
+    "no errors found",
+    "i need to fix errors, improve flow",
+    "original text issues:",
+    "let me review it carefully",
+)
+_NO_CHANGE_RE = re.compile(
+    "|".join(re.escape(p) for p in _NO_CHANGE_PHRASES), re.IGNORECASE
+)
+
+
+def _is_no_change_declaration(text: str) -> bool:
+    """Return True when *text* is meta-declaration/commentary, not a correction.
+
+    Matches the observed thinking-model commentary patterns only at the
+    start of the output (first line, capped at 40 chars) so real rewrites
+    that merely contain a similar phrase later are left alone.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    first_line = stripped.splitlines()[0] if stripped.splitlines() else stripped
+    return bool(_NO_CHANGE_RE.search(first_line[:40]))
 

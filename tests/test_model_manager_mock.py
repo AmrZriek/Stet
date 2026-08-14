@@ -1,6 +1,7 @@
 """Tests for stet.llm.model_manager -- subprocess management, Job Object, health checks."""
 
 import json
+import re
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -758,7 +759,12 @@ class TestTerminalPunctuationGuard:
         assert res == "Hello world"  # period stays dropped
 
     def test_rewrite_polish_paragraph_chunking_exceeding_max_words(self, manager):
-        """If a paragraph exceeds 250 words in rewrite_polish mode, it gets split at sentence boundaries."""
+        """If a paragraph exceeds 250 words in rewrite_polish mode, it gets split at sentence boundaries.
+
+        Note: the fixture's context_size is 4096, so the per-slot budget is
+        1024 tokens (< 2048) and the adaptive chunk cap applies — the split
+        still happens (cap 120 words), and the assertions below hold either way.
+        """
         proc = MagicMock()
         proc.poll.return_value = None
         manager.server_process = proc
@@ -780,6 +786,105 @@ class TestTerminalPunctuationGuard:
         assert len(captured_chunks) > 1
         # The reconstructed result should match the original text
         assert result.strip() == long_paragraph.strip()
+
+    def test_rewrite_chunk_cap_drops_to_120_words_on_small_slot_budget(self, manager):
+        """With a small per-slot budget (<2048 tokens) the rewrite chunk cap
+        falls to min(profile.chunk_words, 120): a 250-word rewrite plus thinking
+        budget plus answer can't fit in one 4k-GGUF/parallel=4 slot."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+        manager.actual_ctx_size = 1024  # 1024 // 4 = 256 tokens/slot < 2048
+
+        captured_chunks = []
+        def mock_rewrite(chunk_text, *args, **kwargs):
+            captured_chunks.append(chunk_text)
+            return chunk_text
+
+        manager._rewrite_sentence_chunk = mock_rewrite
+
+        sentence = "This is a sentence of ten words for testing this. "
+        long_paragraph = sentence * 30  # 300 words
+
+        result, units = manager.correct_text_patch(long_paragraph, strength="rewrite_polish")
+        assert units > 1
+        assert len(captured_chunks) > 1
+        assert all(len(c.split()) <= 120 for c in captured_chunks)
+        assert result.strip() == long_paragraph.strip()
+
+    def test_rewrite_chunk_cap_keeps_profile_words_on_roomy_slot_budget(self, manager):
+        """When the per-slot budget is >=2048 tokens the profile cap (250 words)
+        stays — at least one chunk must exceed 120 words."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+        manager.actual_ctx_size = 8192  # 8192 // 4 = 2048 tokens/slot — not < 2048
+
+        captured_chunks = []
+        def mock_rewrite(chunk_text, *args, **kwargs):
+            captured_chunks.append(chunk_text)
+            return chunk_text
+
+        manager._rewrite_sentence_chunk = mock_rewrite
+
+        sentence = "This is a sentence of ten words for testing this. "
+        long_paragraph = sentence * 30  # 300 words
+
+        result, units = manager.correct_text_patch(long_paragraph, strength="rewrite_polish")
+        assert units > 1
+        assert any(len(c.split()) > 120 for c in captured_chunks)
+
+    def test_agentic_tool_call_output_rejected(self, manager, monkeypatch):
+        """LFM-style agentic finetunes sometimes emit <|tool_call_start|>[...]
+        instead of a corrected sentence — the unit must be rejected exactly like
+        a refusal (original kept via the dict fallback), never spliced in."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        def mock_rewrite(chunk_text, *args, **kwargs):
+            return (
+                "<|tool_call_start|>[edit_text(input='I will recieve the package.')]"
+                "<|tool_call_end|>"
+            )
+
+        monkeypatch.setattr(manager, "_rewrite_sentence_chunk", mock_rewrite)
+
+        res, units = manager.correct_text_patch(
+            "I will recieve the package.", strength="rewrite_polish"
+        )
+        assert units == 1
+        # Unit kept original (dict fallback), not the tool-call garbage
+        assert res == "I will receive the package."
+        assert "tool_call" not in res
+        assert manager.last_patch_error is not None
+        assert "agentic tool-call" in manager.last_patch_error
+
+    def test_no_change_declaration_output_rejected(self, manager, monkeypatch):
+        """LFM 2.5 spills 'already correct' / task-restatement commentary into
+        content — the unit must be rejected (original kept via dict fallback),
+        never spliced into the result."""
+        proc = MagicMock()
+        proc.poll.return_value = None
+        manager.server_process = proc
+
+        def mock_rewrite(chunk_text, *args, **kwargs):
+            return (
+                "The text appears to be already correct. This text is "
+                "grammatically correct and well written."
+            )
+
+        monkeypatch.setattr(manager, "_rewrite_sentence_chunk", mock_rewrite)
+
+        res, units = manager.correct_text_patch(
+            "I will recieve the package.", strength="rewrite_polish"
+        )
+        assert units == 1
+        # Unit kept original (dict fallback), not the commentary
+        assert res == "I will receive the package."
+        assert "already correct" not in res
+        assert manager.last_patch_error is not None
+        assert "no-change declaration" in manager.last_patch_error
 
 
 class TestModelManagerPrefixAndPayload:
@@ -926,6 +1031,127 @@ class TestGpuOomFallback:
 
         res = mgr.load_model()
         assert res is False
+
+
+class TestServerLaunchCommand:
+    """The llama-server launch command must carry --reasoning-budget so
+    thinking templates that hard-prime <think> (e.g. LFM 2.5) are forced to
+    emit </think> and produce real content instead of burning all tokens."""
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_gpu_launch_command_has_reasoning_budget(self, mock_get, mock_popen, cfg):
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--reasoning" in cmd
+        assert cmd[cmd.index("--reasoning") + 1] == "off"
+        assert "--reasoning-budget" in cmd
+        assert cmd[cmd.index("--reasoning-budget") + 1] == "50"
+        # Budget sits directly after --reasoning off
+        assert cmd.index("--reasoning-budget") == cmd.index("--reasoning") + 2
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_lfm25_model_path_adds_no_think_chat_template(self, mock_get, mock_popen, cfg, tmp_path):
+        """LFM 2.5 GGUF paths must append --chat-template pointing at the
+        bundled no-think template (the model hard-primes <think> otherwise)."""
+        lfm_model = tmp_path / "LFM2.5-2.6B-Q4_K_M.gguf"
+        lfm_model.touch()
+        cfg.set("model_path", str(lfm_model))
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--chat-template" in cmd
+        template_arg = cmd[cmd.index("--chat-template") + 1]
+        assert template_arg.endswith("lfm25_no_think.jinja")
+        assert Path(template_arg).is_absolute()
+        # Existing reasoning flags are preserved alongside the template
+        assert cmd[cmd.index("--reasoning") + 1] == "off"
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_non_lfm_model_path_omits_chat_template(self, mock_get, mock_popen, cfg):
+        """A non-LFM GGUF path must NOT get --chat-template (pointless for
+        models whose chat templates do not prime <think>)."""
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--chat-template" not in cmd
+
+    def test_lfm25_no_think_template_removes_think_priming(self):
+        """The bundled no-think template must keep the ChatML assistant
+        header but drop the <think> priming that forces LFM 2.5 to reason."""
+        template = (
+            Path(__file__).resolve().parent.parent
+            / "stet" / "llm" / "chat_templates" / "lfm25_no_think.jinja"
+        ).read_text(encoding="utf-8")
+        # Assistant header is still primed, just without <think>. Note the
+        # jinja source stores "\n" as a literal backslash-n (escaped string).
+        assert "<|im_start|>assistant\\n" in template
+        gen_prompt_block = re.search(
+            r"{%- if add_generation_prompt -%}(.*?){%- endif -%}",
+            template,
+            re.DOTALL,
+        )
+        assert gen_prompt_block is not None
+        block = gen_prompt_block.group(1)
+        assert "<|im_start|>assistant\\n" in block
+        assert "<think>" not in block
 
 
 class TestSentenceChunkLosslessness:

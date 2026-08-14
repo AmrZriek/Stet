@@ -37,7 +37,7 @@ def make_window(original: str, dummy_cfg, mock_model) -> CorrectionWindow:
     return win
 
 
-def test_clean_view_contains_anchors_and_visible_deleted_text(qtbot, dummy_cfg, mock_model):
+def test_final_result_html_contains_anchors_and_visible_deleted_text(qtbot, dummy_cfg, mock_model):
     orig = "The quick brown fox jumps over the lazy dog."
     corr = "A fast green wolf leaps over the lazy dog."
     win = make_window(orig, dummy_cfg, mock_model)
@@ -52,52 +52,6 @@ def test_clean_view_contains_anchors_and_visible_deleted_text(qtbot, dummy_cfg, 
     assert 'quick' in html_clean
     assert 'A' in html_clean
     assert 'fast' in html_clean
-
-
-def test_toggle_flips_view_mode_and_persists_across_restore(qtbot, dummy_cfg, mock_model):
-    orig = "This is bad text."
-    corr = "This is good text."
-    win = make_window(orig, dummy_cfg, mock_model)
-    qtbot.addWidget(win)
-
-    win._render_diff(corr)
-    assert win._clean_view is False
-
-    win._toggle_clean_view()
-    assert win._clean_view is True
-
-    win._restore_change(0)
-    assert win._clean_view is True
-    assert win.corrected == orig
-
-
-def test_clean_view_button_wired_and_reflects_state(qtbot, dummy_cfg, mock_model):
-    """The 'Clean view' toggle must be reachable from the header (viewModeBtn)
-    and its checked state must track _clean_view."""
-    win = make_window("", dummy_cfg, mock_model)
-    qtbot.addWidget(win)
-
-    btn = win.view_mode_btn
-    assert btn.objectName() == "viewModeBtn"
-    assert btn.isCheckable() is True
-
-    # Buttons are disabled until a correction completes (same as edit_text_btn);
-    # this window was built with no original, so simulate the done state.
-    btn.setEnabled(True)
-
-    # Clicking the button flips the view and checks the button.
-    win._render_diff("This is good text.")
-    btn.click()
-    assert win._clean_view is True
-    assert btn.isChecked() is True
-
-    btn.click()
-    assert win._clean_view is False
-    assert btn.isChecked() is False
-
-    # Programmatic toggles keep the button state in sync.
-    win._toggle_clean_view()
-    assert btn.isChecked() is True
 
 
 def test_popover_save_splices_typed_text(monkeypatch, qtbot, dummy_cfg, mock_model):
@@ -317,16 +271,6 @@ def test_accept_without_clicking_done_applies_edits(qtbot, dummy_cfg, mock_model
 
 
 
-def test_clean_view_toggle_noop_while_in_flight(qtbot, dummy_cfg, mock_model):
-    win = make_window("Original text", dummy_cfg, mock_model)
-    qtbot.addWidget(win)
-    win._correction_in_flight = True
-
-    assert win._clean_view is False
-    win._toggle_clean_view()
-    assert win._clean_view is False
-
-
 def test_edit_text_mode_noop_while_in_flight(qtbot, dummy_cfg, mock_model):
     win = make_window("Original text", dummy_cfg, mock_model)
     qtbot.addWidget(win)
@@ -346,7 +290,6 @@ def test_patch_mode_always_full_diff(qtbot, dummy_cfg, mock_model):
     qtbot.addWidget(win)
 
     win._on_correction_ready(corr, "Patch (Full Correction)")
-    assert win._clean_view is False
     html = win.corr_edit.toHtml()
     assert "#chg" in html
 
@@ -359,29 +302,11 @@ def test_chat_dense_answer_shows_plain_default(qtbot, dummy_cfg, mock_model):
 
     win._is_chat_mode = True
     win.corrected = corr
-    assert win._force_diff_view is False
 
     html = win._chat_transcript_html(final_result=corr)
     assert "#chg" not in html
     assert "color:#60a5fa" not in html
     assert "new0" in html
-
-
-def test_chat_toggle_forces_diff(qtbot, dummy_cfg, mock_model):
-    orig = " ".join(f"old{i}" for i in range(100))
-    corr = " ".join(f"new{i}" for i in range(100))
-    win = make_window(orig, dummy_cfg, mock_model)
-    qtbot.addWidget(win)
-
-    win._is_chat_mode = True
-    win.corrected = corr
-    assert win._force_diff_view is False
-
-    win._toggle_clean_view()
-    assert win._force_diff_view is True
-
-    html = win._chat_transcript_html(final_result=corr)
-    assert "#chg" in html
 
 
 def test_readable_chat_result_shows_diff(qtbot, dummy_cfg, mock_model):
@@ -392,7 +317,6 @@ def test_readable_chat_result_shows_diff(qtbot, dummy_cfg, mock_model):
 
     win._is_chat_mode = True
     win.corrected = corr
-    assert win._force_diff_view is False
 
     html = win._chat_transcript_html(final_result=corr)
     assert "#chg" in html

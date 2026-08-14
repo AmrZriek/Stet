@@ -717,6 +717,41 @@ class TestCorrectionCallbacks:
         cw._on_correction_ready("Fixed", "method")
         assert cw.corrected == cw.original
 
+    def test_on_correction_ready_partial_label_sets_partial_status(self, qtbot, cfg):
+        """The partial-correction warning label (text DID change) must show a
+        'Partially corrected' status, not 'Correction unchanged'."""
+        cw = _make_cw(cfg, qtbot)
+        cw._correction_cancelled = False
+        with patch.object(cw, "_update_status") as mock_update:
+            cw._on_correction_ready(
+                "Fixed text",
+                "Patch (Rewrite & Polish, 4 units) \u26a0 2 of 4 sections left unchanged",
+            )
+            mock_update.assert_called_once_with(
+                "\u26a0  Partially corrected — some sections left unchanged",
+                "warning",
+            )
+
+    def test_on_correction_ready_unchanged_label_keeps_unchanged_status(self, qtbot, cfg):
+        """Genuinely unchanged labels ('⚠ Unchanged — …') must still show
+        'Correction unchanged'."""
+        cw = _make_cw(cfg, qtbot)
+        cw._correction_cancelled = False
+        with patch.object(cw, "_update_status") as mock_update:
+            cw._on_correction_ready("Fixed text", "\u26a0 Unchanged — Unit 1 rejected")
+            mock_update.assert_called_once_with(
+                "\u26a0  Correction unchanged",
+                "warning",
+            )
+
+    def test_on_correction_ready_done_label(self, qtbot, cfg):
+        """Non-warning labels keep the normal Done status."""
+        cw = _make_cw(cfg, qtbot)
+        cw._correction_cancelled = False
+        with patch.object(cw, "_update_status") as mock_update:
+            cw._on_correction_ready("Fixed text", "Patch (Full Correction)")
+            mock_update.assert_called_once_with("\u2713  Done", "done")
+
     def test_on_correction_failed(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
         cw._correction_cancelled = False
@@ -925,6 +960,66 @@ class TestDoCorrection:
         )
         cw._do_correction()
         # Just verify no crash
+
+    def test_partial_correction_emits_warning_label(self, qtbot, cfg, monkeypatch):
+        """A patch that only corrected some units must surface a warning in
+        the method label instead of silently reporting full success."""
+        from stet.core.text_utils import CorrectionOutcome, CorrectionResult
+
+        cw = _make_cw(cfg, qtbot)
+        cw.ac_model.is_loaded.return_value = True
+        # Fast-exit the health check loop: fake a healthy server on the first
+        # poll (and neutralise the sleep so a failure fails fast, not slow).
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **k: MagicMock(status_code=200),
+        )
+        monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+        cw.ac_model.correct_text_patch.return_value = CorrectionResult(
+            text="Hello world, fixed",
+            outcome=CorrectionOutcome.CORRECTED,
+            units_processed=4,
+            units_corrected=2,
+        )
+        results = []
+        cw._correction_ready.connect(
+            lambda text, method: results.append((text, method))
+        )
+        cw._do_correction()
+        assert results, "expected a _correction_ready emission"
+        text, method = results[-1]
+        assert text == "Hello world, fixed"
+        assert "\u26a0" in method
+        assert "2 of 4 sections left unchanged" in method
+
+    def test_full_correction_emits_plain_label(self, qtbot, cfg, monkeypatch):
+        """A patch that corrected every unit keeps the normal label (no
+        warning marker)."""
+        from stet.core.text_utils import CorrectionOutcome, CorrectionResult
+
+        cw = _make_cw(cfg, qtbot)
+        cw.ac_model.is_loaded.return_value = True
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **k: MagicMock(status_code=200),
+        )
+        monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+        cw.ac_model.correct_text_patch.return_value = CorrectionResult(
+            text="Hello world corrected",
+            outcome=CorrectionOutcome.CORRECTED,
+            units_processed=2,
+            units_corrected=2,
+        )
+        results = []
+        cw._correction_ready.connect(
+            lambda text, method: results.append((text, method))
+        )
+        cw._do_correction()
+        assert results, "expected a _correction_ready emission"
+        text, method = results[-1]
+        assert text == "Hello world corrected"
+        assert "\u26a0" not in method
+        assert "Patch (" in method
 
 
 # ── _render_chat_transcript ───────────────────────────────────────────────

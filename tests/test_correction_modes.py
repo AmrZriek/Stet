@@ -249,25 +249,77 @@ def test_rewrite_chunk_uses_mode_prompt_override(monkeypatch):
 
 
 def test_correct_text_patch_reads_hallucination_threshold_from_config(monkeypatch):
-    """correct_text_patch should read hallucination_threshold from correction_modes."""
-    mgr = ModelManager(MockConfig())
+    """Config correction_modes[i].hallucination_threshold is authoritative on
+    the patch path (Decision 23). A divergence that sits between the hardcoded
+    profile bar and the config bar must be judged at the CONFIG bar.
+
+    Direction 1 (stricter config): spelling_only profile bar is 0.65, config
+    bar is 0.45. A 0.53-divergence correction must be REJECTED — the old
+    profile-only code (0.65) accepted it.
+    Direction 2 (more permissive config): full_correction profile bar is 0.75,
+    config bar raised to 0.95. An 0.82-divergence rewrite must be ACCEPTED —
+    the old profile-only code (0.75) rejected it.
+    """
+    from stet.core.text_utils import _hallucination_ratio
+
+    class Cfg(MockConfig):
+        """MockConfig variant that lets us vary correction_modes per-test."""
+
+        def __init__(self, modes):
+            super().__init__()
+            self._modes_override = modes
+
+        def get(self, key, default=None):
+            if key == "correction_modes":
+                return self._modes_override
+            return super().get(key, default)
+
+    # ── Direction 1: config STRICTER than profile (spelling_only) ──
+    strict_modes = [
+        {"name": "Spelling Only", "prompt": "x", "hallucination_threshold": 0.45, "builtin": True},
+        {"name": "Full Correction", "prompt": "x", "hallucination_threshold": 0.75, "builtin": True},
+        {"name": "Rewrite & Polish", "prompt": "x", "hallucination_threshold": 0.97, "builtin": True},
+    ]
+    orig = "The quick brown fox jumps over the lazy dog."
+    corr = "A swift tan fox leaps above the sleepy hound."
+    div = _hallucination_ratio(orig, corr, "spelling_only")
+    # Anchor: divergence sits between the config bar (0.45) and the hardcoded
+    # profile bar (0.65) — old code accepted it, config-driven code rejects it.
+    assert 0.45 < div <= 0.65, f"expected discriminating band, got {div:.3f}"
+
+    mgr = ModelManager(Cfg(strict_modes))
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
-        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
-            "completely different text that has absolutely nothing to do with the original"
-        )
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: corr
     )
+    result, units = mgr.correct_text_patch(orig, strength="spelling_only")
+    assert result is None  # rejected at config bar 0.45 (profile bar 0.65 accepts)
 
-    # spelling_only mode (index 0) has threshold 0.35, should reject wild rewrites
-    result, units = mgr.correct_text_patch(
-        "hello world this is test",
-        strength="spelling_only",
+    # ── Direction 2: config MORE permissive than profile (full_correction) ──
+    permissive_modes = [
+        {"name": "Spelling Only", "prompt": "x", "hallucination_threshold": 0.45, "builtin": True},
+        {"name": "Full Correction", "prompt": "x", "hallucination_threshold": 0.95, "builtin": True},
+        {"name": "Rewrite & Polish", "prompt": "x", "hallucination_threshold": 0.97, "builtin": True},
+    ]
+    rewrite = "A fast ginger cat leaps across the sleeping hound."
+    div2 = _hallucination_ratio(orig, rewrite, "full_correction")
+    # Anchor: divergence sits between the profile bar (0.75) and the config
+    # bar (0.95) — old code rejected it, config-driven code accepts it.
+    assert 0.75 < div2 <= 0.95, f"expected discriminating band, got {div2:.3f}"
+
+    mgr2 = ModelManager(Cfg(permissive_modes))
+    mgr2.is_loaded = lambda: True
+    mgr2._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: rewrite
     )
-    assert result is None  # rejected by hallucination guard
+    result2, units2 = mgr2.correct_text_patch(orig, strength="full_correction")
+    assert result2 is not None  # accepted at config bar 0.95 (profile bar 0.75 rejects)
+    assert "ginger cat" in result2
+    assert units2 == 1
 
 
 def test_correct_text_patch_smartfix_accepts_with_threshold(monkeypatch):
-    """full_correction (threshold 0.65) should accept minor corrections."""
+    """full_correction (threshold 0.75) should accept minor corrections."""
     mgr = ModelManager(MockConfig())
     mgr.is_loaded = lambda: True
     mgr._rewrite_sentence_chunk = (
@@ -321,6 +373,55 @@ def test_rewrite_polish_accepts_legitimate_rewrite(monkeypatch):
     assert units == 1
 
 
+def test_rewrite_polish_accepts_heavy_rewrite(monkeypatch):
+    """A legitimate heavy rewrite — char-level divergence > 0.97 (above the
+    profile's hallucination threshold) but with a sane word-count ratio and
+    on-topic content — must be ACCEPTED in rewrite_polish mode.
+
+    Long units that are reworded wholesale routinely diverge >97% at char
+    level (measured 0.9712 below) — that is the point of a rewrite, so the
+    raw ratio gate is skipped for rewrite task types. The post-splice
+    word-ratio sanity check (profile min/max_word_ratio 0.45–1.60) still
+    applies and passes here."""
+    from stet.core.text_utils import _hallucination_ratio
+
+    filler_sentence = (
+        "i was thinking that maybe we could possibly go ahead and schedule a meeting "
+        "for next week tuesday if that works for you because we really need to discuss "
+        "the project timeline and the budget and everything else before the deadline "
+        "hits so please let me know your thoughts on this as soon as you get a chance"
+    )
+    filler = (filler_sentence + " ") * 8
+    rewritten_sentence = (
+        "kindly confirm your availability early next week for a discussion covering "
+        "project scheduling financial planning and outstanding deliverables ahead of "
+        "the deadline so that we can finalize our approach without further delay"
+    )
+    rewritten = (rewritten_sentence + " ") * 7
+
+    # Anchoring: this heavy rewrite diverges >97% at char level — under the
+    # old raw ratio gate it was reverted to the original (the silent partial
+    # correction bug). The word-count ratio stays inside the profile band.
+    div = _hallucination_ratio(filler, rewritten, "rewrite_polish")
+    assert div > 0.97, f"expected char divergence > 0.97, got {div:.3f}"
+    wc_ratio = len(rewritten.split()) / len(filler.split())
+    assert 0.45 <= wc_ratio <= 1.60, f"word-count ratio {wc_ratio:.2f} out of band"
+
+    cfg = MockConfig()
+    mgr = ModelManager(cfg)
+    mgr.is_loaded = lambda: True
+    mgr._rewrite_sentence_chunk = (
+        lambda chunk_text, custom_sys, idx, total, strength, cancel_event=None, mode_prompt_override=None, session=None, profile=None: (
+            rewritten
+        )
+    )
+
+    result, units = mgr.correct_text_patch(filler, strength="rewrite_polish")
+    assert result is not None, "heavy rewrite was reverted (raw ratio gate still active?)"
+    assert "kindly confirm your availability" in result
+    assert units == 1
+
+
 def test_config_threshold_changes_behavior(monkeypatch):
     """Vary the config value to prove the field is actually read."""
     filler = (
@@ -346,8 +447,11 @@ def test_config_threshold_changes_behavior(monkeypatch):
         {"name": "Rewrite & Polish", "prompt": "x", "hallucination_threshold": 0.9, "builtin": True},
     ]
 
-    # Profile-driven thresholds: rewrite_polish profile has threshold 0.9,
-    # which should accept 0.6-band divergence.
+    # Rewrite & Polish profile: the raw hallucination-ratio gate no longer
+    # applies to rewrite task types at all (char-level divergence is the
+    # point of a rewrite), so this 0.6-band divergence is accepted by
+    # construction — the rewrite must be accepted regardless of the config
+    # threshold value.
     cfg = Cfg(base_modes)
     mgr = ModelManager(cfg)
     mgr.is_loaded = lambda: True

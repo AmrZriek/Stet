@@ -1,0 +1,228 @@
+{
+  "b10107": {
+    "MaxTPS": 101.19,
+    "Details": [
+      {
+        "Time": 1.1550037,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 99.57,
+        "Run": 0,
+        "Tokens": 115
+      },
+      {
+        "Time": 1.1265997,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 101.19,
+        "Run": 1,
+        "Tokens": 114
+      },
+      {
+        "Time": 1.1642426,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 97.92,
+        "Run": 2,
+        "Tokens": 114
+      },
+      {
+        "Time": 1.1904396,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 95.76,
+        "Run": 3,
+        "Tokens": 114
+      },
+      {
+        "Time": 1.1685566,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 97.56,
+        "Run": 4,
+        "Tokens": 114
+      },
+      {
+        "Time": 1.2510104,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 93.52,
+        "Run": 0,
+        "Tokens": 117
+      },
+      {
+        "Time": 1.2902002,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 93.78,
+        "Run": 1,
+        "Tokens": 121
+      },
+      {
+        "Time": 1.2432697,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 97.32,
+        "Run": 2,
+        "Tokens": 121
+      },
+      {
+        "Time": 1.2168503,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 99.44,
+        "Run": 3,
+        "Tokens": 121
+      },
+      {
+        "Time": 1.2108939,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 99.93,
+        "Run": 4,
+        "Tokens": 121
+      },
+      {
+        "Time": 2.0038861,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 99.81,
+        "Run": 0,
+        "Tokens": 200
+      },
+      {
+        "Time": 1.9907921,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 100.46,
+        "Run": 1,
+        "Tokens": 200
+      },
+      {
+        "Time": 1.984243,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 100.79,
+        "Run": 2,
+        "Tokens": 200
+      },
+      {
+        "Time": 1.9961728,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 100.19,
+        "Run": 3,
+        "Tokens": 200
+      },
+      {
+        "Time": 2.0339298,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 98.33,
+        "Run": 4,
+        "Tokens": 200
+      }
+    ],
+    "MinTPS": 93.52,
+    "Runs": 15,
+    "AvgTPS": 98.37
+  },
+  "b10375": {
+    "MaxTPS": 100.35,
+    "Details": [
+      {
+        "Time": 1.1757701,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 96.96,
+        "Run": 0,
+        "Tokens": 114
+      },
+      {
+        "Time": 1.1123936,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 98.89,
+        "Run": 1,
+        "Tokens": 110
+      },
+      {
+        "Time": 1.1300973,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 97.34,
+        "Run": 2,
+        "Tokens": 110
+      },
+      {
+        "Time": 1.1256913,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 97.72,
+        "Run": 3,
+        "Tokens": 110
+      },
+      {
+        "Time": 1.1043853,
+        "Prompt": "Explain the difference between a CPU and a GPU in one paragraph.",
+        "TPS": 99.6,
+        "Run": 4,
+        "Tokens": 110
+      },
+      {
+        "Time": 1.1764912,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 99.45,
+        "Run": 0,
+        "Tokens": 117
+      },
+      {
+        "Time": 1.1659311,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 100.35,
+        "Run": 1,
+        "Tokens": 117
+      },
+      {
+        "Time": 1.1825813,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 98.94,
+        "Run": 2,
+        "Tokens": 117
+      },
+      {
+        "Time": 1.1985689,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 97.62,
+        "Run": 3,
+        "Tokens": 117
+      },
+      {
+        "Time": 1.2111815,
+        "Prompt": "Write a short poem about debugging code at midnight.",
+        "TPS": 96.6,
+        "Run": 4,
+        "Tokens": 117
+      },
+      {
+        "Time": 2.0725757,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 96.5,
+        "Run": 0,
+        "Tokens": 200
+      },
+      {
+        "Time": 2.1325868,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 93.78,
+        "Run": 1,
+        "Tokens": 200
+      },
+      {
+        "Time": 2.2178367,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 90.18,
+        "Run": 2,
+        "Tokens": 200
+      },
+      {
+        "Time": 2.356531,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 84.87,
+        "Run": 3,
+        "Tokens": 200
+      },
+      {
+        "Time": 2.418918,
+        "Prompt": "What are three best practices for writing secure Python code?",
+        "TPS": 82.68,
+        "Run": 4,
+        "Tokens": 200
+      }
+    ],
+    "MinTPS": 82.68,
+    "Runs": 15,
+    "AvgTPS": 95.43
+  }
+}

@@ -190,4 +190,44 @@ def test_chunk_text_by_sentences_preserves_version_numbers():
     joined = "".join(c + s for c, s in chunks)
     assert "1.2.2" in joined
 
+
+def test_is_no_change_declaration_detects_already_correct_declarations():
+    """LFM 2.5-style 'the text is fine' meta-declarations must be flagged."""
+    from stet.core.text_utils import _is_no_change_declaration
+
+    assert _is_no_change_declaration(
+        "The text appears to be already correct. I will not change anything."
+    )
+    assert _is_no_change_declaration("This text is grammatically correct.")
+    assert _is_no_change_declaration("The text is already correct and needs no edits.")
+    assert _is_no_change_declaration("No errors found in the provided text.")
+
+
+def test_is_no_change_declaration_detects_analysis_commentary():
+    """Task restatements and analysis lists that are not edits must be flagged."""
+    from stet.core.text_utils import _is_no_change_declaration
+
+    assert _is_no_change_declaration(
+        "I need to fix errors, improve flow, and make the text clearer."
+    )
+    assert _is_no_change_declaration(
+        "Original text issues: 1. Grammar 2. Word flow. The text reads fine."
+    )
+    assert _is_no_change_declaration("Let me review it carefully before editing.")
+
+
+def test_is_no_change_declaration_ignores_real_corrections():
+    """Real corrections — even ones mentioning correctness later — must pass."""
+    from stet.core.text_utils import _is_no_change_declaration
+
+    assert not _is_no_change_declaration("I will receive the package tomorrow.")
+    assert not _is_no_change_declaration("She goes to school every day.")
+    assert not _is_no_change_declaration(
+        "The report was submitted on time and the team reviewed it."
+    )
+    assert not _is_no_change_declaration(
+        "This is a corrected version of the text. The text is already correct anyway."
+    )
+    assert not _is_no_change_declaration("")
+
 

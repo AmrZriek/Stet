@@ -11,8 +11,8 @@ param(
 Set-Location -LiteralPath $ProjectRoot
 
 $versions = @(
-    @{Label="b10016"; Dir="llama-b10016-bin-win-cuda-12.4-x64"},
-    @{Label="b10107"; Dir="llama-b10107-bin-win-cuda-12.4-x64"}
+    @{Label="b10107"; Dir="llama-b10107-bin-win-cuda-12.4-x64"},
+    @{Label="b10375"; Dir="llama-b10375-bin-win-cuda-12.4-x64"}
 )
 
 $results = @{}
@@ -182,6 +182,13 @@ foreach ($v in $versions) {
     Write-Host "Stopping server..." -ForegroundColor Yellow
     $proc | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
+
+    # GPU cooldown between versions: without this, the second backend
+    # benchmarks on an already-hot GPU and shows a phantom slowdown.
+    if ($v.Label -ne $versions[-1].Label) {
+        Write-Host "GPU cooldown (30s) before next version..." -ForegroundColor Yellow
+        Start-Sleep -Seconds 30
+    }
 }
 
 # Comparison

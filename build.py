@@ -653,6 +653,10 @@ def _pyinstaller_cmd(
         for relative, destination in (
             (Path("stet") / "ui" / "stet.qss", "stet/ui"),
             (Path("stet") / "logo.svg", "stet"),
+            # No-think chat template for Liquid LFM 2.5 (--chat-template in
+            # model_manager resolves it relative to the module file, so it must
+            # land beside the module in the bundle — same as stet.qss).
+            (Path("stet") / "llm" / "chat_templates" / "lfm25_no_think.jinja", "stet/llm/chat_templates"),
         ):
             source = ROOT / relative
             if source.exists():
@@ -796,7 +800,7 @@ RUN_SH = "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")\"\n./Stet\n"
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
 
-_LLAMA_BACKEND_VERSION = "b10107"
+_LLAMA_BACKEND_VERSION = "b10375"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{_LLAMA_BACKEND_VERSION}"
 
 DOWNLOAD_BACKEND_BAT = rf"""@echo off
@@ -805,7 +809,7 @@ cd /d "%~dp0"
 
 set LLAMA_URL={_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip
 set CUDA_URL={_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip
-set LLAMA_HASH=1E43BBEC9691CD0BC636603C366769148FA6265FD261C5F7C67050B450BBC237
+set LLAMA_HASH=DD840B604C508B2F57F2ED467F70C711D1840C07B0D09A3BBA8F6DFBD8B3DA84
 set CUDA_HASH=8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6
 set DEST=llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64
 
@@ -890,7 +894,7 @@ cd "$(dirname "$0")"
 
 LLAMA_URL="{_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip"
 CUDA_URL="{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip"
-LLAMA_HASH="1e43bbec9691cd0bc636603c366769148fa6265fd261c5f7c67050b450bbc237"
+LLAMA_HASH="dd840b604c508b2f57f2ed467f70c711d1840c07b0d09a3bba8f6dfbd8b3da84"
 CUDA_HASH="8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
 DEST="llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 
