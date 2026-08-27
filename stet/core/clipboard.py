@@ -4,6 +4,9 @@ from stet.constants import WINDOWS
 
 VK_CONTROL = 0x11
 VK_SHIFT = 0x10
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
 VK_C = 0x43
 VK_V = 0x56
 KEYEVENTF_EXTENDEDKEY = 0x0001
@@ -70,6 +73,8 @@ if WINDOWS:
     _user32.SetClipboardData.restype = wintypes.HANDLE
     _user32.RegisterClipboardFormatW.argtypes = (wintypes.LPCWSTR,)
     _user32.RegisterClipboardFormatW.restype = wintypes.UINT
+    _user32.GetClipboardSequenceNumber.argtypes = ()
+    _user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
 
     _fmt_exclude = _user32.RegisterClipboardFormatW(
         "ExcludeClipboardContentFromClipboardHistory"
@@ -88,6 +93,16 @@ if WINDOWS:
     _kernel32.GlobalFree.restype = wintypes.HGLOBAL
 else:
     import pyperclip
+
+
+def _clipboard_sequence_number() -> int:
+    """Return the current Windows clipboard sequence number, or 0 if unsupported."""
+    if not WINDOWS:
+        return 0
+    try:
+        return int(_user32.GetClipboardSequenceNumber())
+    except Exception:
+        return 0
 
 
 def _open_clipboard_retry(retries: int = 10, delay: float = 0.01) -> bool:
@@ -183,22 +198,31 @@ def _clipboard_write_text(text: str) -> None:
 def _send_ctrl_chord(vk: int) -> None:
     """Press Ctrl, press `vk`, release `vk`, release Ctrl — atomically.
 
-    Uses a single SendInput call on Windows so the OS sees the four events
-    in one batch. On other platforms falls back to `keyboard.send`.
+    Ensures any physically held modifier keys (like Shift from Shift+F9 hotkeys,
+    or Alt/Win) are released before Ctrl+vk is injected. Otherwise, Windows
+    merges the physical Shift state with synthetic Ctrl+C, resulting in
+    Ctrl+Shift+C (which opens DevTools / Inspect Element in browsers instead of copying).
     """
     if WINDOWS:
-        arr = (INPUT * 4)()
-        for idx, (code, flags) in enumerate(
-            (
-                (VK_CONTROL, 0),
-                (vk, 0),
-                (vk, KEYEVENTF_KEYUP),
-                (VK_CONTROL, KEYEVENTF_KEYUP),
-            )
-        ):
+        events: list[tuple[int, int]] = []
+        # Prepend key-ups for any physically depressed modifiers that could interfere
+        for mod in (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN):
+            if _user32.GetAsyncKeyState(mod) & 0x8000:
+                events.append((mod, KEYEVENTF_KEYUP))
+
+        # Atomic Ctrl + vk chord
+        events.extend([
+            (VK_CONTROL, 0),
+            (vk, 0),
+            (vk, KEYEVENTF_KEYUP),
+            (VK_CONTROL, KEYEVENTF_KEYUP),
+        ])
+
+        arr = (INPUT * len(events))()
+        for idx, (code, flags) in enumerate(events):
             arr[idx].type = INPUT_KEYBOARD
             arr[idx].ki = _KEYBDINPUT(code, 0, flags, 0, 0)
-        _user32.SendInput(4, arr, ctypes.sizeof(INPUT))
+        _user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
     else:
         raise NotImplementedError("Stet only supports Windows native input simulation.")
 
@@ -206,20 +230,26 @@ def _send_ctrl_chord(vk: int) -> None:
 def _send_ctrl_shift_chord(vk: int) -> None:
     """Press Ctrl+Shift+`vk` and release in reverse order as one input batch."""
     if WINDOWS:
-        arr = (INPUT * 6)()
-        for idx, (code, flags) in enumerate(
-            (
-                (VK_CONTROL, 0),
-                (VK_SHIFT, 0),
-                (vk, 0),
-                (vk, KEYEVENTF_KEYUP),
-                (VK_SHIFT, KEYEVENTF_KEYUP),
-                (VK_CONTROL, KEYEVENTF_KEYUP),
-            )
-        ):
+        events: list[tuple[int, int]] = []
+        # Prepend key-up for Alt/Win if held
+        for mod in (VK_MENU, VK_LWIN, VK_RWIN):
+            if _user32.GetAsyncKeyState(mod) & 0x8000:
+                events.append((mod, KEYEVENTF_KEYUP))
+
+        events.extend([
+            (VK_CONTROL, 0),
+            (VK_SHIFT, 0),
+            (vk, 0),
+            (vk, KEYEVENTF_KEYUP),
+            (VK_SHIFT, KEYEVENTF_KEYUP),
+            (VK_CONTROL, KEYEVENTF_KEYUP),
+        ])
+
+        arr = (INPUT * len(events))()
+        for idx, (code, flags) in enumerate(events):
             arr[idx].type = INPUT_KEYBOARD
             arr[idx].ki = _KEYBDINPUT(code, 0, flags, 0, 0)
-        _user32.SendInput(6, arr, ctypes.sizeof(INPUT))
+        _user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
     else:
         raise NotImplementedError("Stet only supports Windows native input simulation.")
 

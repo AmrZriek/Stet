@@ -1,3 +1,5 @@
+import os
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
 
@@ -23,6 +25,7 @@ from PyQt6.QtWidgets import (
 
 from stet.ui.utils import no_scroll
 from stet.constants import MACOS
+from stet.llm.gguf_info import get_gguf_info_cached
 
 
 class ClickableLabel(QLabel):
@@ -101,6 +104,87 @@ def make_scrollable_page(title_str, page, add_to_stack=True):
     return form
 
 
+def _effective_ctx_for(info) -> int | None:
+    """Effective context when auto-derivation is selected.
+
+    Mirrors model_manager's n_ctx policy: min(trained ctx, 12800) with a
+    2048 floor. Returns None when no trained-ctx value is available.
+    """
+    if info is None or not info.n_ctx_train:
+        return None
+    return max(min(info.n_ctx_train, 12800), 2048)
+
+
+def _refresh_effective_ctx(dialog, spin_attr: str, auto_attr: str, lbl_attr: str):
+    """Update the '(effective: N)' hint for a context-size row.
+
+    `spin_attr`/`auto_attr`/`lbl_attr` name attributes on the dialog (e.g.
+    ('ctx_spin', 'ctx_auto_cb', 'ctx_effective_lbl')). Auto not checked →
+    label hidden. No model info yet → label hidden. Never raises.
+    """
+    ctx_spin = getattr(dialog, spin_attr, None)
+    ctx_auto_cb = getattr(dialog, auto_attr, None)
+    ctx_effective_lbl = getattr(dialog, lbl_attr, None)
+    if ctx_spin is None or ctx_auto_cb is None or ctx_effective_lbl is None:
+        return
+    if not ctx_auto_cb.isChecked():
+        ctx_effective_lbl.hide()
+        return
+    model_path = (getattr(dialog, "model_edit", None) or QLineEdit()).text() or ""
+    info = None
+    if model_path:
+        try:
+            info = get_gguf_info_cached(model_path)
+        except Exception:
+            info = None
+    effective = _effective_ctx_for(info)
+    if effective is not None:
+        ctx_effective_lbl.setText(f"(effective: {effective})")
+        ctx_effective_lbl.show()
+    else:
+        ctx_effective_lbl.hide()
+
+
+def _refresh_model_info_row(dialog):
+    """Update the GGUF metadata info row and the effective-ctx label.
+
+    Best-effort: a missing file/package (or any read error) renders
+    'Model info unavailable' and hides the effective-ctx label. Never
+    raises, so the settings dialog always opens.
+    """
+    # Guard with getattr: an early setText caller may invoke this before the
+    # info widgets exist — skip silently instead of crashing the dialog.
+    model_info_lbl = getattr(dialog, "model_info_lbl", None)
+    ctx_spin = getattr(dialog, "ctx_spin", None)
+    ctx_auto_cb = getattr(dialog, "ctx_auto_cb", None)
+    ctx_effective_lbl = getattr(dialog, "ctx_effective_lbl", None)
+    if model_info_lbl is None:
+        return
+
+    model_path = (dialog.model_edit.text() or "").strip()
+    info = None
+    if model_path:
+        try:
+            info = get_gguf_info_cached(model_path)
+        except Exception:
+            info = None
+
+    if info is None:
+        model_info_lbl.setText("Model info unavailable")
+    else:
+        name = info.name or os.path.basename(info.path) or info.path
+        arch = info.architecture or "unknown"
+        trained_ctx = str(info.n_ctx_train) if info.n_ctx_train else "unknown"
+        template = "yes" if info.chat_template else "no"
+        reasoning = "yes" if info.reasoning_capable else "no"
+        model_info_lbl.setText(
+            f"Model: {name} · arch: {arch} · trained ctx: {trained_ctx} · "
+            f"template: {template} · reasoning: {reasoning}"
+        )
+
+    _refresh_effective_ctx(dialog, "ctx_spin", "ctx_auto_cb", "ctx_effective_lbl")
+
+
 class ServerPage(QWidget):
     def __init__(self, dialog):
         super().__init__(dialog)
@@ -173,14 +257,22 @@ class ServerPage(QWidget):
         model_desc.setStyleSheet("color:#88898c; font-size:11px;")
         model_desc.setWordWrap(True)
 
+        self.dialog.model_info_lbl = QLabel("Model info unavailable")
+        self.dialog.model_info_lbl.setStyleSheet("color:#88898c; font-size:11px;")
+        self.dialog.model_info_lbl.setWordWrap(True)
+
         mod_container = QVBoxLayout()
         mod_container.setContentsMargins(0, 0, 0, 0)
         mod_container.setSpacing(4)
         mod_container.addWidget(mod_w)
+        mod_container.addWidget(self.dialog.model_info_lbl)
         mod_container.addWidget(model_desc)
         mod_group_w = QWidget()
         mod_group_w.setLayout(mod_container)
         form.addLayout(self.dialog._field_group("Model Weights (.gguf)", mod_group_w))
+        self.dialog.model_edit.textChanged.connect(
+            lambda _t: _refresh_model_info_row(self.dialog)
+        )
 
         self.dialog.recent_combo = QComboBox()
         self.dialog.recent_combo.setSizeAdjustPolicy(
@@ -289,9 +381,14 @@ def _apply_tooltips(dialog, prefix: str = ""):
         "repeat_penalty_spin": "Penalty for repeating words. Default: 1.0. Increase to reduce word repetition.",
         "freq_penalty_spin": "Frequency penalty. Default: 0.0. Positive values penalize frequent tokens.",
         "pres_penalty_spin": "Presence penalty. Default: 0.0. Positive values encourage new topics.",
-        "mtp_cb": "Multi-Token Prediction — generates multiple tokens at once for speed. Default: off.",
+        "mtp_cb": "Multi-Token Prediction — generates multiple tokens at once for speed. Default: on.",
+        "mtp_max_spin": "Maximum speculative tokens generated ahead per draft step. Default: 3.",
+        "mtp_min_spin": "Minimum draft tokens required. Default: 0.",
         "gpu_spin": "How many model layers run on GPU (more = faster, uses more VRAM). Default: Auto/Max.",
-        "ctx_spin": "How much text the model can 'see' at once (in tokens). Default: 4096.",
+        "ctx_spin": "Context window in tokens (when Auto is disabled).",
+        "ctx_auto_cb": "Auto-derive context window from the model's training context (min(trained ctx, 12800), floor 2048).",
+        "kv_cache_k_combo": "KV cache quantization for keys. Default: q8_0.",
+        "kv_cache_v_combo": "KV cache quantization for values. Default: q8_0.",
         "parallel_spin": "Parallel request slots. Default: 4. Process more text at once.",
         "flash_attn_cb": "Faster attention computation — requires GPU support. Default: on (when GPU available).",
         "batch_spin": "How many tokens are processed together. Default: 512.",
@@ -368,6 +465,21 @@ class ParametersPage(QWidget):
         self.dialog.ctx_spin.setRange(512, 131072)
         self.dialog.ctx_spin.setSingleStep(512)
         self.dialog.ctx_spin.setFixedWidth(100)
+        self.dialog.ctx_spin.valueChanged.connect(
+            lambda _v: _refresh_model_info_row(self.dialog)
+        )
+
+        self.dialog.ctx_auto_cb = QCheckBox("Auto")
+        self.dialog.ctx_auto_cb.toggled.connect(
+            lambda checked: (
+                self.dialog.ctx_spin.setEnabled(not checked),
+                _refresh_model_info_row(self.dialog),
+            )
+        )
+
+        self.dialog.ctx_effective_lbl = QLabel("")
+        self.dialog.ctx_effective_lbl.setStyleSheet("color:#88898c; font-size:11px;")
+        self.dialog.ctx_effective_lbl.hide()
 
         self.dialog.rope_base_spin = no_scroll(QDoubleSpinBox())
         self.dialog.rope_base_spin.setRange(0.0, 10000000.0)
@@ -385,6 +497,14 @@ class ParametersPage(QWidget):
 
         self.dialog.flash_attn_cb = QCheckBox("Flash Attention")
         self.dialog.mtp_cb = QCheckBox("MTP Speculative Decoding")
+
+        self.dialog.kv_cache_k_combo = no_scroll(QComboBox())
+        self.dialog.kv_cache_k_combo.addItems(["q8_0", "q4_0", "f16"])
+        self.dialog.kv_cache_k_combo.setFixedWidth(100)
+
+        self.dialog.kv_cache_v_combo = no_scroll(QComboBox())
+        self.dialog.kv_cache_v_combo.addItems(["q8_0", "q4_0", "f16"])
+        self.dialog.kv_cache_v_combo.setFixedWidth(100)
 
         self.dialog.mtp_max_spin = no_scroll(QSpinBox())
         self.dialog.mtp_max_spin.setRange(1, 16)
@@ -404,7 +524,18 @@ class ParametersPage(QWidget):
         arch_grid.setVerticalSpacing(12)
 
         arch_grid.addWidget(_grid_cell("Context size", self.dialog.ctx_spin), 0, 0)
-        arch_grid.addWidget(self.dialog.flash_attn_cb, 1, 0)
+        arch_grid.addWidget(_grid_cell("KV Cache K", self.dialog.kv_cache_k_combo), 0, 1)
+        arch_grid.addWidget(_grid_cell("KV Cache V", self.dialog.kv_cache_v_combo), 0, 2)
+        auto_ctx_row = QHBoxLayout()
+        auto_ctx_row.setContentsMargins(0, 0, 0, 0)
+        auto_ctx_row.setSpacing(8)
+        auto_ctx_row.addWidget(self.dialog.ctx_auto_cb)
+        auto_ctx_row.addWidget(self.dialog.ctx_effective_lbl)
+        auto_ctx_row.addStretch()
+        auto_ctx_widget = QWidget()
+        auto_ctx_widget.setLayout(auto_ctx_row)
+        arch_grid.addWidget(auto_ctx_widget, 1, 0, 1, 2)
+        arch_grid.addWidget(self.dialog.flash_attn_cb, 1, 2)
 
         form.addWidget(arch_grid_w)
         
@@ -955,25 +1086,20 @@ class CorrectionModesPage(QWidget):
             self._form.addWidget(desc)
 
             if i == 0:
-                warn = QLabel(
-                    "English dictionary pre-pass: all built-in modes first apply a "
-                    "built-in English typo dictionary before the model runs, so common "
-                    "typos are fixed even if the model misses them. It may rewrite valid "
-                    "words from other languages (e.g. Spanish \u201csi\u201d becomes "
-                    "\u201cis\u201d). It is skipped when a system prompt override or "
-                    "custom mode prompt is active."
+                prepass_note = QLabel("\u2139  Uses fast dictionary pre-pass")
+                prepass_note.setObjectName("prepassNotice")
+                prepass_note.setWordWrap(True)
+                prepass_note.setToolTip(
+                    "Before the model runs, common typos are fixed deterministically "
+                    "with a built-in ~4,300-entry English typo dictionary, so obvious "
+                    "misspellings are corrected even if the model misses them. The "
+                    "dictionary is English-only and context-blind: a valid word from "
+                    "another language (e.g. Spanish \u201csi\u201d) can be rewritten "
+                    "(\u201cis\u201d). Skipped when a system prompt override or custom "
+                    "mode prompt is active. The LLM still runs afterwards to catch "
+                    "typos the dictionary missed."
                 )
-                warn.setObjectName("settingsWarning")
-                warn.setWordWrap(True)
-                self._form.addWidget(warn)
-            elif i in (1, 2):
-                warn = QLabel(
-                    "Uses the built-in English typo dictionary before the model runs — "
-                    "see the note under Spelling Only."
-                )
-                warn.setObjectName("settingsWarning")
-                warn.setWordWrap(True)
-                self._form.addWidget(warn)
+                self._form.addWidget(prepass_note)
 
             instr_label = QLabel("Prompt sent to the LLM for this mode:")
             instr_label.setObjectName("settingsSublabel")
@@ -1258,6 +1384,25 @@ class ChatParametersPage(QWidget):
         self.dialog.chat_ctx_spin.setSingleStep(512)
         self.dialog.chat_ctx_spin.setFixedWidth(100)
 
+        self.dialog.chat_ctx_auto_cb = QCheckBox("Auto")
+        self.dialog.chat_ctx_auto_cb.toggled.connect(
+            lambda checked: (
+                self.dialog.chat_ctx_spin.setEnabled(not checked),
+                _refresh_effective_ctx(
+                    self.dialog,
+                    "chat_ctx_spin",
+                    "chat_ctx_auto_cb",
+                    "chat_ctx_effective_lbl",
+                ),
+            )
+        )
+
+        self.dialog.chat_ctx_effective_lbl = QLabel("")
+        self.dialog.chat_ctx_effective_lbl.setStyleSheet(
+            "color:#88898c; font-size:11px;"
+        )
+        self.dialog.chat_ctx_effective_lbl.hide()
+
         self.dialog.chat_rope_base_spin = no_scroll(QDoubleSpinBox())
         self.dialog.chat_rope_base_spin.setRange(0.0, 10000000.0)
         self.dialog.chat_rope_base_spin.setSingleStep(1000.0)
@@ -1274,6 +1419,14 @@ class ChatParametersPage(QWidget):
 
         self.dialog.chat_flash_attn_cb = QCheckBox("Flash Attention")
         self.dialog.chat_mtp_cb = QCheckBox("MTP Speculative Decoding")
+
+        self.dialog.chat_kv_cache_k_combo = no_scroll(QComboBox())
+        self.dialog.chat_kv_cache_k_combo.addItems(["q8_0", "q4_0", "f16"])
+        self.dialog.chat_kv_cache_k_combo.setFixedWidth(100)
+
+        self.dialog.chat_kv_cache_v_combo = no_scroll(QComboBox())
+        self.dialog.chat_kv_cache_v_combo.addItems(["q8_0", "q4_0", "f16"])
+        self.dialog.chat_kv_cache_v_combo.setFixedWidth(100)
 
         self.dialog.chat_mtp_max_spin = no_scroll(QSpinBox())
         self.dialog.chat_mtp_max_spin.setRange(1, 16)
@@ -1293,7 +1446,18 @@ class ChatParametersPage(QWidget):
         arch_grid.setVerticalSpacing(12)
 
         arch_grid.addWidget(_grid_cell("Context size", self.dialog.chat_ctx_spin), 0, 0)
-        arch_grid.addWidget(self.dialog.chat_flash_attn_cb, 1, 0)
+        arch_grid.addWidget(_grid_cell("KV Cache K", self.dialog.chat_kv_cache_k_combo), 0, 1)
+        arch_grid.addWidget(_grid_cell("KV Cache V", self.dialog.chat_kv_cache_v_combo), 0, 2)
+        auto_ctx_row = QHBoxLayout()
+        auto_ctx_row.setContentsMargins(0, 0, 0, 0)
+        auto_ctx_row.setSpacing(8)
+        auto_ctx_row.addWidget(self.dialog.chat_ctx_auto_cb)
+        auto_ctx_row.addWidget(self.dialog.chat_ctx_effective_lbl)
+        auto_ctx_row.addStretch()
+        auto_ctx_widget = QWidget()
+        auto_ctx_widget.setLayout(auto_ctx_row)
+        arch_grid.addWidget(auto_ctx_widget, 1, 0, 1, 2)
+        arch_grid.addWidget(self.dialog.chat_flash_attn_cb, 1, 2)
 
         form.addWidget(arch_grid_w)
         

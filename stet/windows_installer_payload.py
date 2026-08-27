@@ -633,8 +633,8 @@ class CompletionPage(QWizardPage):
         options_layout.addSpacing(4)
 
         self._download_model_cb = QCheckBox(
-            "&Download Google Gemma 4 model (recommended, ~1.8 GB)\n"
-            "Minimum working model size for reliable prompt adherence."
+            "&Download Google Gemma 4 model + MTP (recommended, ~3.3 GB)\n"
+            "Lightweight, fast, and enabled with speculative decoding."
         )
         self._download_model_cb.setChecked(True)
         options_layout.addWidget(self._download_model_cb)
@@ -851,12 +851,25 @@ class StetInstaller(QWizard):
             })
 
         if self._completion_page.download_model:
-            from stet.constants import RECOMMENDED_MODEL_URL, RECOMMENDED_MODEL_FILE, RECOMMENDED_MODEL_HASH
+            from stet.constants import (
+                RECOMMENDED_MODEL_URL,
+                RECOMMENDED_MODEL_FILE,
+                RECOMMENDED_MODEL_HASH,
+                RECOMMENDED_MTP_URL,
+                RECOMMENDED_MTP_FILE,
+                RECOMMENDED_MTP_HASH,
+            )
             downloads.append({
                 "url": RECOMMENDED_MODEL_URL,
                 "dest": install_dir / RECOMMENDED_MODEL_FILE,
                 "hash": RECOMMENDED_MODEL_HASH,
-                "label": "AI language model"
+                "label": "AI language model",
+            })
+            downloads.append({
+                "url": RECOMMENDED_MTP_URL,
+                "dest": install_dir / RECOMMENDED_MTP_FILE,
+                "hash": RECOMMENDED_MTP_HASH,
+                "label": "MTP speculative draft model",
             })
 
         if downloads:
@@ -888,6 +901,8 @@ class StetInstaller(QWizard):
                             cfg_data["model_path"] = str(model_file)
                             if not cfg_data.get("chat_use_separate_model", False):
                                 cfg_data["chat_model_path"] = str(model_file)
+                            cfg_data["mtp_enabled"] = True
+                            cfg_data["chat_mtp_enabled"] = True
 
                     with open(config_path, "w", encoding="utf-8") as f:
                         json.dump(cfg_data, f, indent=2)

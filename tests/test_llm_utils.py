@@ -11,10 +11,12 @@ from stet.llm.utils import (
     _COMPILED_THINKING_PATTERNS,
     _COMPILED_UNCLOSED_PATTERNS,
     _MIN_RELIABLE_MODEL_B,
+    _find_mtp_draft_model,
     _find_shipped_llama_server,
-    _model_size_billions,
-    has_nvidia,
     _is_valid_gguf,
+    _model_size_billions,
+    _supports_mtp,
+    has_nvidia,
 )
 
 # ── _model_size_billions ──────────────────────────────────────────────────
@@ -213,4 +215,103 @@ class TestIsValidGguf:
 
     def test_is_directory(self, tmp_path):
         assert _is_valid_gguf(tmp_path) is False
+
+
+# ── _find_mtp_draft_model & _supports_mtp ─────────────────────────────────
+
+
+class TestFindMtpDraftModel:
+    """Test sibling companion draft model detection."""
+
+    def test_finds_mtp_prefix(self, tmp_path):
+        base = tmp_path / "gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf"
+        draft = tmp_path / "mtp-gemma-4-E2B-it.gguf"
+        base.write_bytes(b"GGUF" + b"\x00" * 2000)
+        draft.write_bytes(b"GGUF" + b"\x00" * 2000)
+
+        found = _find_mtp_draft_model(str(base))
+        assert found == str(draft)
+
+    def test_finds_assistant_suffix(self, tmp_path):
+        base = tmp_path / "model.gguf"
+        draft = tmp_path / "model-assistant.gguf"
+        base.write_bytes(b"GGUF" + b"\x00" * 2000)
+        draft.write_bytes(b"GGUF" + b"\x00" * 2000)
+
+        found = _find_mtp_draft_model(str(base))
+        assert found == str(draft)
+
+    def test_no_sibling_draft(self, tmp_path):
+        base = tmp_path / "model.gguf"
+        other = tmp_path / "unrelated.txt"
+        base.write_bytes(b"GGUF" + b"\x00" * 2000)
+        other.write_text("hello")
+
+        assert _find_mtp_draft_model(str(base)) is None
+
+    def test_nonexistent_base(self):
+        assert _find_mtp_draft_model("/nonexistent/model.gguf") is None
+
+
+class TestSupportsMtp:
+    """Test MTP support detection."""
+
+    def test_sibling_draft_enables_mtp(self, tmp_path):
+        base = tmp_path / "gemma-base.gguf"
+        draft = tmp_path / "mtp-gemma-draft.gguf"
+        base.write_bytes(b"GGUF" + b"\x00" * 2000)
+        draft.write_bytes(b"GGUF" + b"\x00" * 2000)
+
+        assert _supports_mtp(str(base)) is True
+
+    def test_filename_mtp(self, tmp_path):
+        model = tmp_path / "qwen-4b-mtp-q4_k_m.gguf"
+        model.write_bytes(b"GGUF" + b"\x00" * 2000)
+        assert _supports_mtp(str(model)) is True
+
+    def test_content_nextn(self, tmp_path):
+        model = tmp_path / "model.gguf"
+        model.write_bytes(b"GGUF" + b"some header nextn_predict_layers bytes" + b"\x00" * 2000)
+        assert _supports_mtp(str(model)) is True
+
+    def test_plain_model_no_mtp(self, tmp_path):
+        model = tmp_path / "plain_model.gguf"
+        model.write_bytes(b"GGUF" + b"\x00" * 2000)
+        assert _supports_mtp(str(model)) is False
+
+
+class TestVramHelpers:
+    """Test VRAM query and estimation functions."""
+
+    def test_query_free_vram_mb_nvidia_smi(self):
+        from stet.llm.utils import query_free_vram_mb
+
+        with patch("subprocess.run") as mock_run:
+            mock_res = MagicMock()
+            mock_res.returncode = 0
+            mock_res.stdout = "8192\n4096\n"
+            mock_run.return_value = mock_res
+
+            val = query_free_vram_mb()
+            assert val == 8192
+
+    def test_query_free_vram_mb_failure(self):
+        from stet.llm.utils import query_free_vram_mb
+
+        with patch("subprocess.run", side_effect=Exception("no nvidia-smi")):
+            assert query_free_vram_mb() is None
+
+    def test_estimate_model_vram_mb(self, tmp_path):
+        from stet.llm.utils import estimate_model_vram_mb
+
+        # Missing file
+        assert estimate_model_vram_mb(str(tmp_path / "missing.gguf")) is None
+        assert estimate_model_vram_mb("") is None
+
+        # Existing file with 100 MB dummy size
+        dummy = tmp_path / "dummy.gguf"
+        dummy.write_bytes(b"0" * (100 * 1024 * 1024))
+        est = estimate_model_vram_mb(str(dummy), ctx_size=4096)
+        assert est is not None
+        assert est > 100  # Should include weights + overhead
 

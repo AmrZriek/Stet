@@ -653,10 +653,6 @@ def _pyinstaller_cmd(
         for relative, destination in (
             (Path("stet") / "ui" / "stet.qss", "stet/ui"),
             (Path("stet") / "logo.svg", "stet"),
-            # No-think chat template for Liquid LFM 2.5 (--chat-template in
-            # model_manager resolves it relative to the module file, so it must
-            # land beside the module in the bundle — same as stet.qss).
-            (Path("stet") / "llm" / "chat_templates" / "lfm25_no_think.jinja", "stet/llm/chat_templates"),
         ):
             source = ROOT / relative
             if source.exists():
@@ -674,6 +670,7 @@ def _pyinstaller_cmd(
             "--hidden-import=requests",
             "--hidden-import=pyperclip",
             "--hidden-import=spellchecker",
+            "--hidden-import=gguf",
             *extra,
         ],
     )
@@ -733,6 +730,10 @@ RELEASE_CONFIG = {
     "server_port": 8080,
     "context_size": 12800,
     "gpu_layers": 99,
+    "mtp_enabled": True,
+    "mtp_max_draft": 3,
+    "mtp_min_draft": 0,
+    "mtp_p_min": 0.75,
     # Sampling parameters
     "temperature": 0.0,
     "top_k": 1,
@@ -750,6 +751,10 @@ RELEASE_CONFIG = {
     "chat_use_separate_model": False,
     "chat_keep_loaded": False,
     "chat_idle_timeout_seconds": 60,
+    "chat_mtp_enabled": True,
+    "chat_mtp_max_draft": 3,
+    "chat_mtp_min_draft": 0,
+    "chat_mtp_p_min": 0.75,
     # Hotkeys
     "hotkeys": [
         {"shortcut": "f9", "mode": "panel", "strength": "full_correction"},
@@ -800,7 +805,7 @@ RUN_SH = "#!/usr/bin/env bash\ncd \"$(dirname \"$0\")\"\n./Stet\n"
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
 
-_LLAMA_BACKEND_VERSION = "b10375"
+_LLAMA_BACKEND_VERSION = "b10639"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{_LLAMA_BACKEND_VERSION}"
 
 DOWNLOAD_BACKEND_BAT = rf"""@echo off
@@ -809,7 +814,7 @@ cd /d "%~dp0"
 
 set LLAMA_URL={_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip
 set CUDA_URL={_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip
-set LLAMA_HASH=DD840B604C508B2F57F2ED467F70C711D1840C07B0D09A3BBA8F6DFBD8B3DA84
+set LLAMA_HASH=D2A9263AE118E514B6FC61329D5AB7A588A17D600B96DF07CB723C820151A22A
 set CUDA_HASH=8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6
 set DEST=llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64
 
@@ -894,7 +899,7 @@ cd "$(dirname "$0")"
 
 LLAMA_URL="{_LLAMA_BASE}/llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip"
 CUDA_URL="{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip"
-LLAMA_HASH="dd840b604c508b2f57f2ed467f70c711d1840c07b0d09a3bba8f6dfbd8b3da84"
+LLAMA_HASH="d2a9263ae118e514b6fc61329d5ab7a588a17d600b96df07cb723c820151a22a"
 CUDA_HASH="8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
 DEST="llama-{_LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 
@@ -952,73 +957,144 @@ echo "You can now launch Stet."
 
 _RECOMMENDED_MODEL_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-UD-Q4_K_XL.gguf"
 _RECOMMENDED_MODEL_FILE = "gemma-4-E2B-it-UD-Q4_K_XL.gguf"
-_RECOMMENDED_MODEL_HASH = "b8906b8c5e05e57b657646bbc657bd35814a269b2c20f0a2579047fafa1a67dd"
+_RECOMMENDED_MODEL_HASH = "b52f438017efaec5debf1c0d8be690571e212a07c312f1102bbce927258cfc32"
+
+_RECOMMENDED_MTP_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mtp-gemma-4-E2B-it.gguf"
+_RECOMMENDED_MTP_FILE = "mtp-gemma-4-E2B-it.gguf"
+_RECOMMENDED_MTP_HASH = "9eba819938efccfd6044f8af84e3bbfddc639a2bcf32ebc36420e6a649191919"
 
 DOWNLOAD_SH = f"""#!/usr/bin/env bash
+set -e
+
 MODEL_URL="{_RECOMMENDED_MODEL_URL}"
 DEST="{_RECOMMENDED_MODEL_FILE}"
 EXPECTED_HASH="{_RECOMMENDED_MODEL_HASH}"
-echo "Downloading $DEST ..."
-if command -v curl &>/dev/null; then curl -L --progress-bar -o "$DEST.tmp" "$MODEL_URL"
-elif command -v wget &>/dev/null; then wget -O "$DEST.tmp" "$MODEL_URL"
-else echo "Error: neither curl nor wget found."; exit 1; fi
 
-echo "Verifying integrity (SHA-256)..."
-if command -v sha256sum &>/dev/null; then
-    ACTUAL_HASH=$(sha256sum "$DEST.tmp" | awk '{{print $1}}')
-elif command -v shasum &>/dev/null; then
-    ACTUAL_HASH=$(shasum -a 256 "$DEST.tmp" | awk '{{print $1}}')
-else
-    echo "WARNING: sha256sum or shasum not found. Skipping integrity check."
-    mv "$DEST.tmp" "$DEST"
-    echo "Done. Open Settings and set Model Path."
-    exit 0
-fi
+MTP_URL="{_RECOMMENDED_MTP_URL}"
+MTP_DEST="{_RECOMMENDED_MTP_FILE}"
+MTP_EXPECTED_HASH="{_RECOMMENDED_MTP_HASH}"
 
-# Convert both to lowercase for comparison
-ACTUAL_LOWER=$(echo "$ACTUAL_HASH" | tr '[:upper:]' '[:lower:]')
-EXPECTED_LOWER=$(echo "$EXPECTED_HASH" | tr '[:upper:]' '[:lower:]')
+download_and_verify() {{
+    local url="$1"
+    local dest="$2"
+    local expected="$3"
 
-if [ "$ACTUAL_LOWER" = "$EXPECTED_LOWER" ]; then
-    echo "Integrity verification successful!"
-    mv "$DEST.tmp" "$DEST"
-    echo "Done. Open Settings and set Model Path to: $(pwd)/$DEST"
-else
-    echo "WARNING: SHA-256 mismatch!"
-    echo "Expected: $EXPECTED_HASH"
-    echo "Actual:   $ACTUAL_HASH"
-    rm "$DEST.tmp"
-    exit 1
-fi
+    echo "Downloading $dest ..."
+    if command -v curl &>/dev/null; then
+        curl -L --progress-bar -o "$dest.tmp" "$url"
+    elif command -v wget &>/dev/null; then
+        wget -O "$dest.tmp" "$url"
+    else
+        echo "Error: neither curl nor wget found."; exit 1
+    fi
+
+    echo "Verifying $dest integrity (SHA-256)..."
+    if command -v sha256sum &>/dev/null; then
+        ACTUAL_HASH=$(sha256sum "$dest.tmp" | awk '{{print $1}}')
+    elif command -v shasum &>/dev/null; then
+        ACTUAL_HASH=$(shasum -a 256 "$dest.tmp" | awk '{{print $1}}')
+    else
+        echo "WARNING: sha256sum or shasum not found. Skipping integrity check."
+        mv "$dest.tmp" "$dest"
+        return 0
+    fi
+
+    ACTUAL_LOWER=$(echo "$ACTUAL_HASH" | tr '[:upper:]' '[:lower:]')
+    EXPECTED_LOWER=$(echo "$expected" | tr '[:upper:]' '[:lower:]')
+
+    if [ "$ACTUAL_LOWER" = "$EXPECTED_LOWER" ]; then
+        echo "Integrity verification successful for $dest!"
+        mv "$dest.tmp" "$dest"
+    else
+        echo "WARNING: SHA-256 mismatch for $dest!"
+        echo "Expected: $expected"
+        echo "Actual:   $ACTUAL_HASH"
+        rm -f "$dest.tmp"
+        exit 1
+    fi
+}}
+
+echo "=== Stet Model Downloader (Gemma 4 + MTP) ==="
+download_and_verify "$MODEL_URL" "$DEST" "$EXPECTED_HASH"
+download_and_verify "$MTP_URL" "$MTP_DEST" "$MTP_EXPECTED_HASH"
+
+echo ""
+echo "Done. Open Settings and set Model Path to: $(pwd)/$DEST"
 """
 
 DOWNLOAD_BAT = rf"""@echo off
 set MODEL_URL={_RECOMMENDED_MODEL_URL}
 set DEST={_RECOMMENDED_MODEL_FILE}
 set EXPECTED_HASH={_RECOMMENDED_MODEL_HASH}
-echo Downloading %DEST% ...
+
+set MTP_URL={_RECOMMENDED_MTP_URL}
+set MTP_DEST={_RECOMMENDED_MTP_FILE}
+set MTP_EXPECTED_HASH={_RECOMMENDED_MTP_HASH}
+
+echo ===================================================
+echo   Downloading Stet Recommended AI Model + MTP Draft
+echo ===================================================
+echo.
+
+echo [1/2] Downloading %DEST% ...
 curl -L --progress-bar -o "%DEST%.tmp" "%MODEL_URL%"
 if errorlevel 1 (
-    echo Download failed.
-    goto end
+    echo Error: Failed to download %DEST%
+    del "%DEST%.tmp" 2>nul
+    goto fail
 )
-echo Verifying integrity (SHA-256)...
+
+echo Verifying %DEST% integrity (SHA-256)...
 for /f "skip=1 delims=" %%i in ('certutil -hashfile "%DEST%.tmp" SHA256') do (
     set ACTUAL_HASH=%%i
-    goto check
+    goto check_base
 )
-:check
+:check_base
 set ACTUAL_HASH=%ACTUAL_HASH: =%
-if /i "%ACTUAL_HASH%"=="%EXPECTED_HASH%" (
-    echo Integrity verification successful!
-    rename "%DEST%.tmp" "%DEST%"
-    echo Done. Open Settings and set Model Path.
-) else (
-    echo WARNING: SHA-256 mismatch! File might be corrupted or tampered with.
+if /i not "%ACTUAL_HASH%"=="%EXPECTED_HASH%" (
+    echo WARNING: SHA-256 mismatch for %DEST%!
     echo Expected: %EXPECTED_HASH%
     echo Actual:   %ACTUAL_HASH%
-    del "%DEST%.tmp"
+    del "%DEST%.tmp" 2>nul
+    goto fail
 )
+move /y "%DEST%.tmp" "%DEST%" >nul
+echo %DEST% verified successfully.
+echo.
+
+echo [2/2] Downloading %MTP_DEST% ...
+curl -L --progress-bar -o "%MTP_DEST%.tmp" "%MTP_URL%"
+if errorlevel 1 (
+    echo Error: Failed to download %MTP_DEST%
+    del "%MTP_DEST%.tmp" 2>nul
+    goto fail
+)
+
+echo Verifying %MTP_DEST% integrity (SHA-256)...
+for /f "skip=1 delims=" %%i in ('certutil -hashfile "%MTP_DEST%.tmp" SHA256') do (
+    set MTP_ACTUAL_HASH=%%i
+    goto check_mtp
+)
+:check_mtp
+set MTP_ACTUAL_HASH=%MTP_ACTUAL_HASH: =%
+if /i not "%MTP_ACTUAL_HASH%"=="%MTP_EXPECTED_HASH%" (
+    echo WARNING: SHA-256 mismatch for %MTP_DEST%!
+    echo Expected: %MTP_EXPECTED_HASH%
+    echo Actual:   %MTP_ACTUAL_HASH%
+    del "%MTP_DEST%.tmp" 2>nul
+    goto fail
+)
+move /y "%MTP_DEST%.tmp" "%MTP_DEST%" >nul
+echo %MTP_DEST% verified successfully.
+echo.
+
+echo Done! Both base model and MTP draft model downloaded and verified.
+echo Open Settings in Stet and set Model Path to: %DEST%
+goto end
+
+:fail
+echo.
+echo Model download failed or verification error. Please try again.
 :end
 pause
 """
@@ -1582,6 +1658,7 @@ open "$SCRIPT_DIR/Stet.app"
             paths = [
                 Path(os.path.expandvars(r"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe")),
                 Path(os.path.expandvars(r"%ProgramFiles%\Inno Setup 6\ISCC.exe")),
+                Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe")),
             ]
             for p in paths:
                 if p.exists():

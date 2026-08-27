@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from stet.core.text_utils import (
     _chunk_text_by_sentences,
-    _dict_prepass,
     _remove_introduced_duplicate_sentences,
     _post_splice_sanity,
 )

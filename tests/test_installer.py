@@ -525,6 +525,7 @@ class TestPostInstallActions:
     def test_model_download_launched(self, qapp, installer_zip, tmp_path):
         """DownloadProgressDialog exec is called when either download checkbox is checked."""
         from windows_installer_payload import StetInstaller
+        from stet.constants import RECOMMENDED_MODEL_FILE, RECOMMENDED_MTP_FILE
 
         wizard = StetInstaller(installer_zip)
         wizard.setField("installDir", str(tmp_path))
@@ -538,6 +539,10 @@ class TestPostInstallActions:
 
         mock_dialog.assert_called_once()
         mock_dialog_inst.exec.assert_called_once()
+        queued_downloads = mock_dialog.call_args[0][0]
+        queued_dests = [str(d["dest"]) for d in queued_downloads]
+        assert any(RECOMMENDED_MODEL_FILE in dest for dest in queued_dests)
+        assert any(RECOMMENDED_MTP_FILE in dest for dest in queued_dests)
 
     def test_launch_stet_called(self, qapp, installer_zip, tmp_path):
         """Popen called with Stet.exe when launch checkbox is checked."""
@@ -624,6 +629,8 @@ class TestPostInstallActions:
         cfg = json_mod.loads(config.read_text(encoding="utf-8"))
         assert cfg["model_path"] == str(model_file)
         assert cfg["chat_model_path"] == str(model_file)
+        assert cfg["mtp_enabled"] is True
+        assert cfg["chat_mtp_enabled"] is True
         assert cfg["llama_server_path"] == str(
             tmp_path / LLAMA_BACKEND_DIR / SERVER_EXE
         )

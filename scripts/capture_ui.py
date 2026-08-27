@@ -4,7 +4,6 @@ os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 from pathlib import Path
 from PyQt6.QtWidgets import QApplication
-from PyQt6.QtCore import QTimer
 
 root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir))

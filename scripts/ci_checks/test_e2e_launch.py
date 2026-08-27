@@ -22,7 +22,7 @@ def _safe_extract(zip_ref, dest):
 
 def test_e2e_launch():
     dist_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "dist"))
-    zip_pattern = os.path.join(dist_dir, "Stet_*_Windows.zip")
+    zip_pattern = os.path.join(dist_dir, "stet_portable.zip")
 
     zip_files = glob.glob(zip_pattern)
     assert zip_files, f"No zip files found matching {zip_pattern}"
@@ -43,7 +43,9 @@ def test_e2e_launch():
         with zipfile.ZipFile(latest_zip, "r") as zip_ref:
             _safe_extract(zip_ref, test_dir)
 
-        # The zip usually contains a folder, so let's find the exe inside test_dir
+        # The portable zip is flat (Stet.exe at the zip root, PyInstaller
+        # one-dir layout in _internal/), but walking keeps this robust to
+        # future layout changes.
         exe_path = None
         for root, dirs, files in os.walk(test_dir):
             if "Stet.exe" in files:

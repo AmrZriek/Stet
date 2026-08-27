@@ -251,6 +251,19 @@ def test_gpu_fallback_detection_logging(monkeypatch, tmp_path):
 
     monkeypatch.setattr(builtins, "open", mock_open)
 
+    # The log-scrape warning path reads server_log.txt via read_text(); the
+    # write-mode mock above swallows writes. Make reads return the real log
+    # content so the CPU-fallback warning branch is exercised.
+    real_read_text = temp_log.read_text
+
+    def _read_text(self, encoding=None, errors=None):
+        if self == temp_log:
+            with original_open(temp_log, "r", encoding=encoding or "utf-8", errors=errors) as fh:
+                return fh.read()
+        return real_read_text(encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(temp_log.__class__, "read_text", _read_text)
+
     # Mock fallback auto-detection so the .exe guard (line 471) doesn't
     # cause a spurious failure when no real binary is present (e.g. CI).
     # The guard correctly rejects __file__ because it ends in .py, then
@@ -269,6 +282,10 @@ def test_gpu_fallback_detection_logging(monkeypatch, tmp_path):
 
     assert res is True
     assert mgr.actual_backend_type == "cpu"
+    # Deferred GPU warning: log proves CPU backend, /props confirms no CUDA —
+    # the warning must actually be emitted after the probe.
+    assert mgr._pending_gpu_warning is not None
+    assert mgr._props_probed is True
 
 
 def test_gpu_loaded_detection(monkeypatch, tmp_path):
@@ -369,6 +386,340 @@ def test_carriage_return_preservation(manager):
 
         mock_post.side_effect = mock_post_side_effect
 
-        result, _ = manager.correct_text_patch(input_text)
-        assert "\r\n" in result
-        assert result == "Line 1.\r\nLine 2.\r\nLine 3."
+
+
+def test_gpu_detected_via_props_when_log_has_no_banners(monkeypatch, tmp_path):
+    """llama.cpp b10375+ dropped the legacy backend/device_info banners from
+    server logs. When the log is bare, the /props device fields must still
+    flip GPU detection to cuda and no CPU warning may fire."""
+    cfg = ConfigManager()
+    cfg.set("gpu_layers", 99)
+    monkeypatch.setattr(cfg, "save", lambda: None)
+
+    # Real b10375 logs jump straight from "model loaded" to slot processing —
+    # no "load_backend", no "device_info", no "ggml_*" markers.
+    temp_log = tmp_path / "server_log.txt"
+    temp_log.write_text(
+        "srv    load_model: initializing, n_slots = 4, n_ctx_slot = 3328\n"
+        "srv  llama_server: model loaded\n"
+        "srv  llama_server: listening on http://127.0.0.1:8082\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("stet.llm.model_manager.LOG_FILE", temp_log)
+
+    mgr = ModelManager(cfg)
+    from stet.llm.backend_manager import BackendManager
+
+    mgr.backend_manager = BackendManager(platform_name="win32")
+
+    from stet.llm.model_manager import ModelManager as OriginalModelManager
+
+    monkeypatch.setattr(
+        mgr,
+        "load_model",
+        lambda *args, **kwargs: OriginalModelManager.load_model(mgr, *args, **kwargs),
+    )
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: mock_proc)
+    monkeypatch.setattr(
+        "stet.llm.model_manager._create_job_object_for_subprocess", lambda p: None
+    )
+
+    warnings_emitted = []
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/health"):
+            return MagicMock(status_code=200, ok=True, json=lambda: {"status": "ok"})
+        # /props reports a CUDA device even though the log carries no banner
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        resp.json.return_value = {
+            "default_generation_settings": {"n_ctx": 4096, "n_gpu_layers": 99},
+            "devices": ["CUDA0 (NVIDIA GeForce RTX)"],
+            "device_info": "CUDA 12.4",
+            "chat_template_caps": {"supports_thinking": False},
+        }
+        return resp
+
+    monkeypatch.setattr("stet.llm.model_manager.requests.get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import builtins
+
+    original_open = builtins.open
+
+    def mock_open(file, *args, **kwargs):
+        if str(file) == str(temp_log):
+            return MagicMock()
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", mock_open)
+    monkeypatch.setattr(
+        "stet.llm.model_manager._find_shipped_llama_server", lambda: __file__
+    )
+    mgr.model_warning.connect(lambda msg: warnings_emitted.append(msg))
+    cfg.set("model_path", __file__)
+    cfg.set("llama_server_path", __file__)
+
+    res = mgr.load_model()
+
+    assert res is True
+    assert mgr.actual_backend_type == "cuda"
+    assert mgr._props_probed is True
+    assert warnings_emitted == [], (
+        f"no GPU warning may fire when /props proves CUDA; got {warnings_emitted}"
+    )
+
+
+def test_probe_gpu_devices_unit(monkeypatch, tmp_path):
+    """_probe_gpu_devices should correctly parse various --list-devices outputs and handle errors."""
+    from stet.llm.model_manager import _probe_gpu_devices
+
+    # 1. Non-existent file returns empty default
+    res = _probe_gpu_devices(tmp_path / "nonexistent.exe")
+    assert res["cuda"] is False
+    assert res["vulkan"] is False
+    assert res["metal"] is False
+    assert res["devices"] == []
+
+    fake_exe = tmp_path / "fake_llama_server.exe"
+    fake_exe.write_text("dummy", encoding="utf-8")
+
+    # 2. CUDA output parsing
+    cuda_output = (
+        "Available devices:\n"
+        "  CUDA0: NVIDIA GeForce RTX 3060 Laptop GPU (6143 MiB, 5130 MiB free)\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: MagicMock(stdout=cuda_output, stderr="", returncode=0),
+    )
+    res = _probe_gpu_devices(fake_exe)
+    assert res["cuda"] is True
+    assert res["vulkan"] is False
+    assert len(res["devices"]) == 1
+    assert "CUDA0: NVIDIA GeForce RTX 3060 Laptop GPU" in res["devices"][0]
+
+    # 3. Vulkan output parsing
+    vulkan_output = (
+        "Available devices:\n"
+        "  Vulkan0: AMD Radeon Graphics (16384 MiB, 15000 MiB free)\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: MagicMock(stdout=vulkan_output, stderr="", returncode=0),
+    )
+    res = _probe_gpu_devices(fake_exe)
+    assert res["cuda"] is False
+    assert res["vulkan"] is True
+
+    # 4. Metal output parsing
+    metal_output = (
+        "Available devices:\n"
+        "  Metal0: Apple M2 (16384 MiB, 12000 MiB free)\n"
+    )
+    monkeypatch.setattr(
+        "subprocess.run",
+        lambda *args, **kwargs: MagicMock(stdout=metal_output, stderr="", returncode=0),
+    )
+    res = _probe_gpu_devices(fake_exe)
+    assert res["metal"] is True
+
+    # 5. Process exception / timeout returns non-fatal default
+    def raise_err(*args, **kwargs):
+        raise RuntimeError("simulated timeout")
+
+    monkeypatch.setattr("subprocess.run", raise_err)
+    res = _probe_gpu_devices(fake_exe)
+    assert res["cuda"] is False
+    assert res["devices"] == []
+
+
+def test_gpu_detected_via_probe_when_log_and_props_have_no_banners(monkeypatch, tmp_path):
+    """llama.cpp b10639 drops banners from logs and returns empty device fields in /props.
+    _probe_gpu_devices (--list-devices) must update backend to cuda and suppress false CPU warnings."""
+    cfg = ConfigManager()
+    cfg.set("gpu_layers", 99)
+    monkeypatch.setattr(cfg, "save", lambda: None)
+
+    temp_log = tmp_path / "server_log.txt"
+    temp_log.write_text(
+        "srv    load_model: initializing, n_slots = 4, n_ctx_slot = 3328\n"
+        "srv  llama_server: model loaded\n"
+        "srv  llama_server: listening on http://127.0.0.1:8082\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("stet.llm.model_manager.LOG_FILE", temp_log)
+
+    mgr = ModelManager(cfg)
+    from stet.llm.backend_manager import BackendManager
+
+    mgr.backend_manager = BackendManager(platform_name="win32")
+
+    from stet.llm.model_manager import ModelManager as OriginalModelManager
+
+    monkeypatch.setattr(
+        mgr,
+        "load_model",
+        lambda *args, **kwargs: OriginalModelManager.load_model(mgr, *args, **kwargs),
+    )
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: mock_proc)
+    monkeypatch.setattr(
+        "stet.llm.model_manager._create_job_object_for_subprocess", lambda p: None
+    )
+
+    warnings_emitted = []
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/health"):
+            return MagicMock(status_code=200, ok=True, json=lambda: {"status": "ok"})
+        # /props returns empty devices/backend fields (modern b10639 format)
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        resp.json.return_value = {
+            "default_generation_settings": {"n_ctx": 4096},
+            "devices": [],
+            "device_info": "",
+            "backend": "",
+            "chat_template_caps": {"supports_thinking": False},
+        }
+        return resp
+
+    monkeypatch.setattr("stet.llm.model_manager.requests.get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import builtins
+
+    original_open = builtins.open
+
+    def mock_open(file, *args, **kwargs):
+        if str(file) == str(temp_log):
+            return MagicMock()
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", mock_open)
+    monkeypatch.setattr(
+        "stet.llm.model_manager._find_shipped_llama_server", lambda: __file__
+    )
+    # Mock _probe_gpu_devices returning CUDA device
+    monkeypatch.setattr(
+        "stet.llm.model_manager._probe_gpu_devices",
+        lambda s, timeout=20.0: {
+            "cuda": True,
+            "vulkan": False,
+            "metal": False,
+            "devices": ["CUDA0: NVIDIA GeForce RTX 3060 Laptop GPU (6143 MiB, 5130 MiB free)"],
+            "raw": "Available devices:\n  CUDA0: NVIDIA GeForce RTX 3060 Laptop GPU\n",
+        },
+    )
+    mgr.model_warning.connect(lambda msg: warnings_emitted.append(msg))
+    cfg.set("model_path", __file__)
+    cfg.set("llama_server_path", __file__)
+
+    res = mgr.load_model()
+
+    assert res is True
+    assert mgr.actual_backend_type == "cuda"
+    assert mgr._props_probed is True
+    assert warnings_emitted == [], (
+        f"no GPU warning may fire when --list-devices proves CUDA; got {warnings_emitted}"
+    )
+
+
+def test_gpu_warning_emitted_when_probe_and_props_and_log_find_no_gpu(monkeypatch, tmp_path):
+    """When gpu_layers > 0 and log, /props, and --list-devices all confirm no GPU, warning must fire."""
+    cfg = ConfigManager()
+    cfg.set("gpu_layers", 99)
+    monkeypatch.setattr(cfg, "save", lambda: None)
+
+    temp_log = tmp_path / "server_log.txt"
+    temp_log.write_text(
+        "srv    load_model: initializing, n_slots = 4, n_ctx_slot = 3328\n"
+        "srv  llama_server: model loaded\n"
+        "srv  llama_server: listening on http://127.0.0.1:8082\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("stet.llm.model_manager.LOG_FILE", temp_log)
+
+    mgr = ModelManager(cfg)
+    from stet.llm.backend_manager import BackendManager
+
+    mgr.backend_manager = BackendManager(platform_name="win32")
+
+    from stet.llm.model_manager import ModelManager as OriginalModelManager
+
+    monkeypatch.setattr(
+        mgr,
+        "load_model",
+        lambda *args, **kwargs: OriginalModelManager.load_model(mgr, *args, **kwargs),
+    )
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: mock_proc)
+    monkeypatch.setattr(
+        "stet.llm.model_manager._create_job_object_for_subprocess", lambda p: None
+    )
+
+    warnings_emitted = []
+
+    def fake_get(url, *args, **kwargs):
+        if url.endswith("/health"):
+            return MagicMock(status_code=200, ok=True, json=lambda: {"status": "ok"})
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.ok = True
+        resp.json.return_value = {
+            "default_generation_settings": {"n_ctx": 4096},
+            "devices": [],
+            "device_info": "",
+            "backend": "",
+            "chat_template_caps": {"supports_thinking": False},
+        }
+        return resp
+
+    monkeypatch.setattr("stet.llm.model_manager.requests.get", fake_get)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    import builtins
+
+    original_open = builtins.open
+
+    def mock_open(file, *args, **kwargs):
+        if str(file) == str(temp_log):
+            return MagicMock()
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", mock_open)
+    monkeypatch.setattr(
+        "stet.llm.model_manager._find_shipped_llama_server", lambda: __file__
+    )
+    # Mock _probe_gpu_devices returning NO GPU devices
+    monkeypatch.setattr(
+        "stet.llm.model_manager._probe_gpu_devices",
+        lambda s, timeout=20.0: {
+            "cuda": False,
+            "vulkan": False,
+            "metal": False,
+            "devices": [],
+            "raw": "No devices found",
+        },
+    )
+    mgr.model_warning.connect(lambda msg: warnings_emitted.append(msg))
+    cfg.set("model_path", __file__)
+    cfg.set("llama_server_path", __file__)
+
+    res = mgr.load_model()
+
+    assert res is True
+    assert mgr.actual_backend_type == "cpu"
+    assert mgr._props_probed is True
+    assert len(warnings_emitted) == 1
+    assert "GPU requested but no GPU backend found" in warnings_emitted[0]

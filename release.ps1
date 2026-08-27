@@ -112,7 +112,7 @@ Stet is a local, privacy-first AI autocorrect and text rewriting tool. Runs enti
 1. Download and extract **stet_portable.zip**.
 2. Run **Unblock_Stet.bat** (right-click → Run as administrator) to remove Windows security warnings from downloaded scripts.
 3. Run **download_backend.bat** to fetch the llama.cpp backend (~652 MB, one-time).
-4. Run **download_model.bat** to fetch the AI model (~1.8 GB).
+4. Run **download_model.bat** to fetch the AI model + MTP draft head (~3.3 GB).
 5. Run **Stet.exe** (or run.bat).
 
 > **Windows SmartScreen note:** Stet.exe is not code-signed. If Windows shows a "Windows protected your PC" warning, click **More info** → **Run anyway**. This warning will disappear once the executable builds reputation with Microsoft.
@@ -120,7 +120,7 @@ Stet is a local, privacy-first AI autocorrect and text rewriting tool. Runs enti
 **Requirements:**
 - Windows 10/11 (64-bit)
 - NVIDIA GPU recommended for GPU-accelerated AI inference
-- ~2.5 GB disk space for the backend + model
+- ~4.0 GB disk space for the backend + model
 
 **SHA-256 Checksums:**
 ``````

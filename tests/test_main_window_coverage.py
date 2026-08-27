@@ -89,6 +89,8 @@ def cfg(tmp_path, monkeypatch):
 def _make_cw(cfg, qtbot, text="Hello world"):
     ac_model = MagicMock()
     chat_model = MagicMock()
+    ac_model.loading = False
+    chat_model.loading = False
     cw = CorrectionWindow(text, ac_model, chat_model, cfg)
     qtbot.addWidget(cw)
     return cw
@@ -106,6 +108,8 @@ def _make_accept_cw(cfg, text="Hello world"):
     """
     ac_model = MagicMock()
     chat_model = MagicMock()
+    ac_model.loading = False
+    chat_model.loading = False
     return CorrectionWindow(text, ac_model, chat_model, cfg)
 
 
@@ -525,11 +529,16 @@ class TestOnModelStatus:
 
         monkeypatch.setattr("stet.ui.main_window.threading.Thread", CapturingThread)
 
-        cw._on_model_status("Loading model")
+        cw._retry_correction_when_model_ready = True
+        cw._correction_in_flight = False
         cw._on_model_status("Ready — fake-model")
 
         assert len(started_threads) == 1
         assert started_threads[0].daemon is True
+        assert cw._retry_correction_when_model_ready is False
+
+        # Verify that "Loading model" does NOT set retry flag (preventing double dispatch)
+        cw._on_model_status("Loading model")
         assert cw._retry_correction_when_model_ready is False
 
     def test_correcting(self, qtbot, cfg):
@@ -541,6 +550,9 @@ class TestOnModelStatus:
         cw = _make_cw(cfg, qtbot)
         cw._on_model_status("loading model")
         assert "Loading" in cw.status_lbl.text()
+        # Distinct initializing state keeps a slow first load clearly visible
+        assert "initializing" in cw.status_lbl.text()
+        assert cw.status_lbl.property("state") == "initializing"
 
     def test_error(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)
@@ -637,7 +649,31 @@ class TestApplyTemplate:
                 cw._apply_template("Fix grammar")
         assert cw._correction_cancelled is True
         assert len(cw.chat_history) == 0
-        mock_send.assert_called_once()
+        mock_send.assert_called_once_with(msg="Fix grammar", is_template=True, grammar=None, json_schema=None)
+
+    def test_apply_template_passes_grammar_and_json_schema(self, qtbot, cfg):
+        with patch("stet.ui.main_window.threading.Thread"):
+            cw = _make_cw(cfg, qtbot)
+            cw._stream_worker = MagicMock()
+            cw._stream_worker.isRunning.return_value = False
+            cw._correction_stream_worker = MagicMock()
+            cw._correction_stream_worker.isRunning.return_value = False
+            with patch.object(cw, "_send_chat") as mock_send:
+                cw._apply_template("Fix grammar", grammar="root ::= 'ok'", json_schema={"type": "object"})
+        mock_send.assert_called_once_with(
+            msg="Fix grammar", is_template=True, grammar="root ::= 'ok'", json_schema={"type": "object"}
+        )
+
+    def test_send_chat_template_routes_to_separate_chat_model(self, qtbot, cfg):
+        cfg.config["chat_use_separate_model"] = True
+        with patch("stet.ui.main_window.threading.Thread"):
+            cw = _make_cw(cfg, qtbot)
+            cw.chat_model.is_loaded = MagicMock(return_value=True)
+            cw.ac_model.is_loaded = MagicMock(return_value=True)
+            with patch.object(cw, "_do_stream"):
+                cw._send_chat(msg="Test template", is_template=True)
+                assert cw._target_chat_model is cw.chat_model
+
 
 
 # ── _refresh_templates ────────────────────────────────────────────────────
@@ -934,7 +970,8 @@ class TestDoCorrection:
         assert "Model error" in cw.status_lbl.text()
         assert cw._retry_correction_when_model_ready is True
 
-    def test_model_not_loaded_shows_original(self, qtbot, cfg):
+    def test_model_not_loaded_shows_original(self, qtbot, cfg, monkeypatch):
+        monkeypatch.setattr("time.sleep", lambda *a, **k: None)
         cw = _make_cw(cfg, qtbot)
         cw.ac_model.is_loaded.return_value = False
         cw.ac_model.load_model = MagicMock(return_value=None)
@@ -949,7 +986,12 @@ class TestDoCorrection:
         # Signal may deliver synchronously
         # Just verify no crash
 
-    def test_already_correct(self, qtbot, cfg):
+    def test_already_correct(self, qtbot, cfg, monkeypatch):
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **k: MagicMock(status_code=200),
+        )
+        monkeypatch.setattr("time.sleep", lambda *a, **k: None)
         cw = _make_cw(cfg, qtbot)
         cw.ac_model.is_loaded.return_value = True
         mock_worker = MagicMock()
@@ -960,6 +1002,22 @@ class TestDoCorrection:
         )
         cw._do_correction()
         # Just verify no crash
+
+    def test_do_correction_clears_in_flight_flag_on_exit(self, qtbot, cfg, monkeypatch):
+        """_correction_in_flight must be reset to False in finally block when _do_correction finishes."""
+        monkeypatch.setattr(
+            "requests.get",
+            lambda *a, **k: MagicMock(status_code=200),
+        )
+        monkeypatch.setattr("time.sleep", lambda *a, **k: None)
+        cw = _make_cw(cfg, qtbot)
+        cw.ac_model.is_loaded.return_value = True
+        mock_worker = MagicMock()
+        cw.ac_model.make_patch_worker.return_value = mock_worker
+
+        assert cw._correction_in_flight is False
+        cw._do_correction()
+        assert cw._correction_in_flight is False
 
     def test_partial_correction_emits_warning_label(self, qtbot, cfg, monkeypatch):
         """A patch that only corrected some units must surface a warning in

@@ -10,6 +10,7 @@ _quote_cmd, _source_startup_python, _startup_command, _show_silent_osd,
 _is_model_ready, _wait_for_model_ready.
 """
 
+import inspect
 import sys
 import time
 from unittest.mock import MagicMock, patch
@@ -1507,16 +1508,27 @@ class TestStetAppCaptureSelection:
         assert len(created_threads) == 1
         assert created_threads[0].name == "StetUIACapture"
         assert created_threads[0].daemon is True
-        assert created_threads[0].join_timeouts == [1.5]
+        assert created_threads[0].join_timeouts == [StetApp._UIA_CAPTURE_TIMEOUT]
         mock_send_chord.assert_called_once()
+
+    def test_capture_selection_uia_timeout_constant(self):
+        """UIA direct-capture join must be bounded to the tuned 250 ms.
+
+        Was a hardcoded 1.5 s; frozen-COM apps (Chromium, terminals) burned
+        the full budget before the clipboard fallback fired.
+        """
+        assert StetApp._UIA_CAPTURE_TIMEOUT == 0.25
+        src = inspect.getsource(StetApp._capture_selection)
+        assert "uia_thread.join(timeout=self._UIA_CAPTURE_TIMEOUT)" in src, (
+            "_capture_selection must use the _UIA_CAPTURE_TIMEOUT class constant"
+        )
+        assert "join(timeout=1.5)" not in src
 
     def test_capture_selection_polling_constants(self):
         """Verify the polling tunables are set to the latency-reduced values.
 
         Worst-case wait: 50 ms + 12 * 15 ms = 230 ms (was 680 ms).
         """
-        from stet.core.app import StetApp
-
         assert StetApp._CLIPBOARD_POLL_INTERVAL == 0.015
         assert StetApp._CLIPBOARD_MAX_POLLS == 12
         assert StetApp._CLIPBOARD_INITIAL_GRACE == 0.05
@@ -1527,7 +1539,6 @@ class TestStetAppCaptureSelection:
             + StetApp._CLIPBOARD_MAX_POLLS * StetApp._CLIPBOARD_POLL_INTERVAL
         )
         assert worst_case <= 0.25  # well under the old 680 ms ceiling
-
 
 class TestStetAppTrayActivated:
     @patch("stet.core.app.QSystemTrayIcon")

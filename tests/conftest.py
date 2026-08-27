@@ -90,6 +90,12 @@ def mock_llm_post(monkeypatch):
                 strength, "Mocked correction"
             )
             return MockResponse({"choices": [{"message": {"content": content}}]})
+        if "/apply-template" in url:
+            # Benign default: a clean rendered prompt with no think open-tag.
+            # Keeps post-load sanitized-template validation from ever hitting
+            # a real socket; tests that assert on the flag patch
+            # ModelManager._get_session locally instead.
+            return MockResponse({"prompt": "<|im_start|>assistant\n"})
         return original_post(self, url, *args, **kwargs)
 
     monkeypatch.setattr(requests.Session, "post", mock_post)
@@ -98,13 +104,16 @@ def mock_llm_post(monkeypatch):
 @pytest.fixture(autouse=True)
 def block_model_load(monkeypatch, request):
     """Prevent ModelManager.load_model from spawning llama-server in tests."""
-    # Name-based bypass: the GPU-launch-command tests and the TestServerLaunchCommand
-    # class (LFM 2.5 --chat-template command tests) exercise the real load_model
-    # builder with subprocess.Popen patched out. nodeid carries the class, so
-    # check it (node.name alone is just the function name).
+    # Bypass for launch-command tests: the GPU-launch-command tests and the
+    # TestServerLaunchCommand class exercise the real load_model builder with
+    # subprocess.Popen patched out. nodeid carries the class, so check it
+    # (node.name alone is just the function name).
     if (
         "test_gpu_" in request.node.name
         or "TestServerLaunchCommand" in request.node.nodeid
+        or "TestMtpLoadingAndFallback" in request.node.nodeid
+        or "TestAuditEnhancements" in request.node.nodeid
+        or "TestGpuOomFallback" in request.node.nodeid
     ):
         return
     monkeypatch.setattr(

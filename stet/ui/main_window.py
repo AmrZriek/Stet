@@ -134,6 +134,7 @@ class CorrectionWindow(QWidget):
     _do_stream_signal = pyqtSignal()
     _status_loading_signal = pyqtSignal()
     _status_streaming_signal = pyqtSignal()
+    _status_progress_signal = pyqtSignal(int, int)
     _correction_ready_sig = pyqtSignal(str, str)
     _correction_failed_sig = pyqtSignal(str)
     _chat_done_sig = pyqtSignal(str)
@@ -180,8 +181,11 @@ class CorrectionWindow(QWidget):
         self._stream_buf = ""
         self._active_ai_bubble: QLabel | None = None
         self._drag_pos = None
-        self._is_closed: bool = False
         self._correction_in_flight: bool = False
+        # Polls ac_model.loading from the UI thread while _do_correction waits
+        # for model readiness, keeping the status label fresh ("Loading model
+        # (initializing)…") during slow first loads.
+        self._load_start_monitor: QTimer | None = None
         self._diff_nl = "\x00NL\x00"
         self._diff_orig_words: list[str] = []
         self._diff_corr_words: list[str] = []
@@ -284,6 +288,7 @@ class CorrectionWindow(QWidget):
         self._do_stream_signal.connect(self._do_stream)
         self._status_loading_signal.connect(self._on_status_loading)
         self._status_streaming_signal.connect(self._on_status_streaming)
+        self._status_progress_signal.connect(self._on_status_progress)
         self.ac_model.status_changed.connect(self._on_model_status)
         self.chat_input.textChanged.connect(lambda text: self.send_btn.setEnabled(bool(text.strip())))
         self.setMouseTracking(True)
@@ -614,6 +619,15 @@ class CorrectionWindow(QWidget):
             self._status_label.style().polish(self._status_label)
         except (AttributeError, RuntimeError):
             pass
+
+    def _on_status_progress(self, completed: int, total: int):
+        try:
+            if sip.isdeleted(self):
+                return
+        except (AttributeError, RuntimeError):
+            pass
+        if total > 1 and completed <= total:
+            self._update_status(f"Correcting {completed}/{total}…", "loading")
 
     # NOTE: Tab cycling is handled by the app-level eventFilter installed in
     # _setup_shortcuts(). The old event() override did not work because Qt
@@ -1152,10 +1166,21 @@ class CorrectionWindow(QWidget):
             b = QPushButton(ct.get("name", "Custom").replace("&", "&&"))
             b.setObjectName("templateBtn")
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.clicked.connect(lambda _, p=ct.get("prompt", ""): self._apply_template(p))
+            b.clicked.connect(
+                lambda _, t=ct: self._apply_template(
+                    t.get("prompt", ""),
+                    grammar=t.get("grammar"),
+                    json_schema=t.get("json_schema"),
+                )
+            )
             self.tmp_lay.addWidget(b)
 
-    def _apply_template(self, prompt: str):
+    def _apply_template(
+        self,
+        prompt: str,
+        grammar: str | None = None,
+        json_schema: dict | None = None,
+    ):
         self._correction_cancelled = True
         self._cancel_event.set()
         if self._stream_worker and self._stream_worker.isRunning():
@@ -1173,7 +1198,12 @@ class CorrectionWindow(QWidget):
         self._clear_chat_transcript()
         self._chat_start_text = None
         self._render_diff(self.original)
-        self._send_chat(msg=prompt, is_template=True)
+        self._send_chat(
+            msg=prompt,
+            is_template=True,
+            grammar=grammar,
+            json_schema=json_schema,
+        )
 
     # ── correction logic ──────────────────────────────────────────────────
     def _on_model_status(self, msg: str):
@@ -1185,30 +1215,59 @@ class CorrectionWindow(QWidget):
                 if getattr(self, "_correction_cancelled", False) or self.method_badge.text() == "STREAM CORRECT":
                     self._update_status(self.method_badge.text(), "ready")
             if getattr(self, "_retry_correction_when_model_ready", False):
-                self._retry_correction_when_model_ready = False
-                t = threading.Thread(target=self._do_correction, daemon=True)
-                t.start()
+                if not getattr(self, "_correction_in_flight", False):
+                    self._retry_correction_when_model_ready = False
+                    t = threading.Thread(target=self._do_correction, daemon=True)
+                    t.start()
             return
         elif "correcting" in ml:
             self._update_status("⏳  Processing…", "processing")
         elif "loading" in ml or "starting" in ml:
-            self._update_status("⏳  Loading model…", "loading")
-            self._retry_correction_when_model_ready = True
+            self._update_status("⏳  Loading model (initializing)…", "initializing")
         elif "error" in ml or "failed" in ml or "not found" in ml:
             self._update_status(self.status_lbl.text(), "error")
+
+    def _start_load_start_monitor(self):
+        """Poll ac_model.loading from the UI thread while _do_correction waits.
+
+        A slow first load (CPU/battery, MTP draft head) can take 60–100s.
+        The status label shows '⏳ Loading model (initializing)…' so the
+        window never looks hung. Runs only when a QApplication exists.
+        """
+        if self._load_start_monitor is not None:
+            return
+        if QApplication.instance() is None:
+            return
+        self._load_start_monitor = QTimer(self)
+        self._load_start_monitor.setInterval(1000)
+
+        def _poll():
+            if getattr(self, "_is_closed", False):
+                self._stop_load_start_monitor()
+                return
+            if not getattr(self.ac_model, "loading", False):
+                return
+            self._update_status("⏳  Loading model (initializing)…", "initializing")
+
+        self._load_start_monitor.timeout.connect(_poll)
+        self._load_start_monitor.start()
+
+    def _stop_load_start_monitor(self):
+        if self._load_start_monitor is not None:
+            self._load_start_monitor.stop()
+            self._load_start_monitor = None
 
     def _do_correction(self):
         """Autocorrect via the AC model.
 
-        Two delivery modes, selected by config:
-          - "patch": indexed-word patches, single pass, word-level edits.
-            On malformed model output, falls back to streaming Smart Fix.
-          - "stream": full corrected text streamed token-by-token into the
-            correction pane. Strength is "spelling_only" (typos only) or
-             "full_correction" (grammar/capitalization/punctuation).
+        Delivery is always the patch pipeline (single pass, word-level edits,
+        parallel sentence units). On malformed model output it falls back to
+        streaming Smart Fix. A configured system_prompt bypasses patch and
+        streams directly.
         """
         log("[CW] _do_correction started")
         self._correction_in_flight = True
+        self._recycle_done = False
         # Use a unique object token to identify this specific correction run.
         # This prevents stale correction threads or callbacks from updating UI
         # state or clearing the token if a new correction task has started.
@@ -1225,14 +1284,29 @@ class CorrectionWindow(QWidget):
                 )
 
             text = self.original
-
-            if not self.ac_model.is_loaded():
+            import time
+            wait_start = None
+            if getattr(self.ac_model, "loading", False):
+                log("[CW] AC model is currently loading — waiting for readiness")
+                self._start_load_start_monitor()
+                wait_start = time.monotonic()
+                while getattr(self.ac_model, "loading", False) and (time.monotonic() - wait_start < 120.0):
+                    if is_stale():
+                        return
+                    time.sleep(0.2)
+            elif not self.ac_model.is_loaded():
+                log("[CW] AC model not loaded — starting load")
+                self._start_load_start_monitor()
                 self.ac_model.load_model()
+                wait_start = time.monotonic()
+                while getattr(self.ac_model, "loading", False) and (time.monotonic() - wait_start < 120.0):
+                    if is_stale():
+                        return
+                    time.sleep(0.2)
 
             if not self.ac_model.is_loaded():
                 if self.ac_model.should_retry_load():
                     log("[CW] Model load failed but file exists — retrying after 5s")
-                    import time
                     time.sleep(5)
                     self.ac_model.load_model()
 
@@ -1325,6 +1399,7 @@ class CorrectionWindow(QWidget):
                 strength=strength,
                 cancel_event=my_cancel,
                 mode_prompt_override=self.__dict__.get("_mode_prompt_override"),
+                progress_cb=lambda c, t: self._status_progress_signal.emit(c, t),
             )
             # If our cancel event was replaced while we were working then a
             # newer correction thread has already started — drop our result
@@ -1374,6 +1449,12 @@ class CorrectionWindow(QWidget):
                     self._correction_ready.emit(
                         text, f"\u26a0 Protected content \u2014 {msg}"
                     )
+                elif _outcome == CorrectionOutcome.UNCHANGED_NON_PROSE:
+                    msg = "Selected text was identified as code or non-prose formatting; no text was changed."
+                    log(f"[CW] {msg}")
+                    self._correction_ready.emit(
+                        text, f"\u26a0 Non-prose \u2014 {msg}"
+                    )
                 elif _reason:
                     log(f"[CW] Correction unchanged due to: {_reason}")
                     self._correction_ready.emit(
@@ -1405,9 +1486,10 @@ class CorrectionWindow(QWidget):
             except RuntimeError:
                 pass
         finally:
+            self._stop_load_start_monitor()
             if self._correction_thread_token is thread_token:
                 self._correction_thread_token = None
-
+                self._correction_in_flight = False
     def _dispatch_correction_failed(self, msg: str):
         if getattr(self, "_is_closed", False):
             return
@@ -1576,6 +1658,8 @@ class CorrectionWindow(QWidget):
             messages, max_tokens=max_tokens,
             temperature=0.0, top_k=1, repeat_penalty=1.0,
             frequency_penalty=0.0, presence_penalty=0.0,
+            think=False, reasoning_budget=0,
+            chat_template_kwargs={"enable_thinking": False},
         )
         worker.token.connect(self._on_correction_stream_token)
         worker.done.connect(self._on_correction_stream_done)
@@ -1584,6 +1668,8 @@ class CorrectionWindow(QWidget):
         self._correction_stream_worker = worker
         self.ac_model.mark_used()
         self._streaming_masked = _streaming_masked
+        self._streaming_custom_sys = custom_sys
+        self._streaming_mode_override = mode_prompt_override
         self._correction_stream_buf = ""
         self._correction_stream_strength = strength
         # Show fallback reason in streaming status if we got here from patch failure
@@ -1647,7 +1733,8 @@ class CorrectionWindow(QWidget):
                         self.original, "Sentinel lost — try a larger model"
                     )
                     return
-            for i, entity in enumerate(self._streaming_masked):
+            for i in range(len(self._streaming_masked) - 1, -1, -1):
+                entity = self._streaming_masked[i]
                 cleaned = cleaned.replace(f"__STET_PROTECTED_{i+1}__", entity)
             self._streaming_masked = []
         if not cleaned.strip():
@@ -1718,6 +1805,21 @@ class CorrectionWindow(QWidget):
         if self._correction_cancelled:
             return
         log(f"[CW] correction stream error: {err}")
+        if err.startswith("StetStreamTimeout") and not getattr(self, "_recycle_done", False):
+            self._recycle_done = True
+            log("[CW] Freeze detected in streaming correction — recycling backend and retrying once")
+            self._update_status("\u23f3  Re-initializing model\u2026", "streaming")
+            if self.ac_model._recycle_server():
+                _custom_sys = getattr(self, "_streaming_custom_sys", None) or self.cfg.get("system_prompt", "").strip() or None
+                _strength = getattr(self, "_correction_stream_strength", "full_correction")
+                _mode_override = getattr(self, "_streaming_mode_override", None)
+                self._start_streaming_correction(
+                    self.original,
+                    custom_sys=_custom_sys,
+                    strength=_strength,
+                    mode_prompt_override=_mode_override,
+                )
+                return
         self._on_correction_failed()
 
     def _diff_html(self, corrected: str, final_only: bool = False) -> str:
@@ -2029,7 +2131,7 @@ class CorrectionWindow(QWidget):
     def _render_current_view(self):
         # The diff pane always renders the redline markup (changed words
         # colored + highlighted). The former "Clean view" toggle was removed —
-        # see Decision 20 note; there is no alternate view to switch to.
+        # see Decision 22; there is no alternate view to switch to.
         html = self._diff_html(self.corrected)
         self.corr_edit.setHtml(
             '<style>a { color: inherit; text-decoration: none; }</style>'
@@ -2118,15 +2220,24 @@ class CorrectionWindow(QWidget):
             self._render_chat_transcript(final_result=self.corrected)
 
     # ── chat ──────────────────────────────────────────────────────────────
-    def _send_chat(self, msg: str = None, is_template: bool = False):
+    def _send_chat(
+        self,
+        msg: str = None,
+        is_template: bool = False,
+        grammar: str | None = None,
+        json_schema: dict | None = None,
+    ):
         if msg is None or isinstance(msg, bool):
             msg = self.chat_input.text().strip()
         if not msg:
             self._update_status("⚠  Please enter an instruction", "error")
             return
+        self._pending_grammar = grammar
+        self._pending_json_schema = json_schema
         self.chat_input.clear()
         self.send_btn.setEnabled(False)
         self.accept_btn.setEnabled(False)
+        self._chat_recycle_done = False
 
         # Kill any in-flight PATCH correction (parallel chunk workers in
         # correct_text_patch poll this event). Do NOT replace _cancel_event with
@@ -2203,10 +2314,10 @@ class CorrectionWindow(QWidget):
                 pass
 
         # Decouple chat routing based on is_template and chat_use_separate_model
-        if is_template or not self.cfg.get("chat_use_separate_model", False):
-            self._target_chat_model = self.ac_model
-        else:
+        if self.cfg.get("chat_use_separate_model", False):
             self._target_chat_model = self.chat_model
+        else:
+            self._target_chat_model = self.ac_model
 
         if not self._target_chat_model.is_loaded():
             if self._active_ai_bubble is not None:
@@ -2227,7 +2338,14 @@ class CorrectionWindow(QWidget):
     def _do_stream(self):
         self._stream_buf = ""
         backend = self._target_chat_model
-        worker = backend.make_stream_worker(self.chat_history, max_tokens=1024)
+        grammar = getattr(self, "_pending_grammar", None)
+        json_schema = getattr(self, "_pending_json_schema", None)
+        worker = backend.make_stream_worker(
+            self.chat_history,
+            max_tokens=1024,
+            grammar=grammar,
+            json_schema=json_schema,
+        )
         worker.token.connect(self._chat_token)
         worker.done.connect(self._chat_done)
         worker.error.connect(self._chat_error)
@@ -2290,6 +2408,16 @@ class CorrectionWindow(QWidget):
         self._render_chat_transcript()
 
     def _on_chat_error(self, err: str):
+        if err.startswith("StetStreamTimeout") and not getattr(self, "_chat_recycle_done", False):
+            self._chat_recycle_done = True
+            log("[CW] Freeze detected in chat stream — recycling backend and retrying once")
+            if self._active_ai_bubble is not None:
+                self._active_ai_bubble.setText("Re-initializing model…")
+            self._update_status("⏳  Re-initializing model…", "streaming")
+            backend = getattr(self, "_target_chat_model", self.ac_model)
+            if backend._recycle_server():
+                self._do_stream()
+                return
         self._replace_chat_stream_region(f"Error: {err}")
         self._update_status("⚠  Error", "error")
         self.send_btn.setEnabled(True)
@@ -2577,6 +2705,7 @@ class CorrectionWindow(QWidget):
                 self._correction_stream_worker.wait(500)
             self._correction_stream_worker = None
 
+        self._stop_load_start_monitor()
         self._is_closed = True
         self.blockSignals(True)
         QCoreApplication.removePostedEvents(self)

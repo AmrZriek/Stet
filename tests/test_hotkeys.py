@@ -382,6 +382,71 @@ def test_register_hotkey_silent_gracefully_handles_exception(qtbot):
         assert mock_user32.RegisterHotKey.call_count == 2
 
 
+def test_register_hotkey_retries_on_already_registered_error(qtbot):
+    """When RegisterHotKey fails with ERROR_HOTKEY_ALREADY_REGISTERED, Stet retries."""
+    mock_user32 = MockUser32()
+    attempts = 0
+
+    def reg_side_effect(hwnd, hotkey_id, mods, vk):
+        nonlocal attempts
+        attempts += 1
+        if attempts <= 1:
+            return 0  # Fail first attempt
+        return 1  # Succeed retry attempt
+
+    with patch("ctypes.windll.user32", new=mock_user32), \
+         patch("ctypes.GetLastError", return_value=1409), \
+         patch("ctypes.FormatError", return_value="Hot key is already registered."):
+        app = StetApp()
+        attempts = 0
+        mock_user32.RegisterHotKey.side_effect = reg_side_effect
+        app.cfg.config["hotkeys"] = [
+            {"shortcut": "f9", "mode": "panel", "strength": "full_correction"}
+        ]
+        notify_calls = []
+        app.tray.showMessage = lambda *args, **kwargs: notify_calls.append(args)
+
+        app._register_hotkey(force=True)
+        assert app._hotkey_retry_count == 1
+        assert app._hotkey_retry_timer.isActive()
+        assert len(notify_calls) == 0  # No warning yet while retrying
+
+        # Trigger the retry
+        app._retry_register_hotkeys()
+        assert 1000 in app._hotkey_handles
+        assert app._hotkey_retry_count == 0
+        assert not app._hotkey_retry_timer.isActive()
+        assert len(notify_calls) == 0
+
+
+def test_register_hotkey_shows_warning_after_max_retries_exhausted(qtbot):
+    """When RegisterHotKey fails across all retries, tray warning is shown."""
+    mock_user32 = MockUser32()
+    mock_user32.RegisterHotKey.return_value = 0
+
+    with patch("ctypes.windll.user32", new=mock_user32), \
+         patch("ctypes.GetLastError", return_value=1409), \
+         patch("ctypes.FormatError", return_value="Hot key is already registered."):
+        app = StetApp()
+        app.cfg.config["hotkeys"] = [
+            {"shortcut": "f9", "mode": "panel", "strength": "full_correction"}
+        ]
+        notify_calls = []
+        app.tray.showMessage = lambda *args, **kwargs: notify_calls.append(args)
+
+        # Initial call schedules retry 1
+        app._register_hotkey(force=True)
+        assert app._hotkey_retry_count == 1
+        assert len(notify_calls) == 0
+
+        # Execute retries until exhausted
+        for _ in range(app._max_hotkey_retries):
+            app._retry_register_hotkeys()
+
+        assert len(notify_calls) == 1
+        assert "Could not register hotkey 'f9'" in notify_calls[0][1]
+
+
 def test_debounce_prevents_rapid_re_registration(qtbot):
     """Calling _register_hotkey twice within 500 ms must skip the second."""
     mock_user32 = MockUser32()
@@ -923,6 +988,37 @@ def test_panel_hotkey_worker_receives_profile_strength(qtbot, monkeypatch):
         app._handle_hotkey_fired({"mode": "panel", "strength": "rewrite_polish"})
         assert worker_calls == ["rewrite_polish"]
 
+
+
+def test_panel_hotkey_dispatches_while_model_loading(qtbot, monkeypatch):
+    """Panel hotkey must dispatch worker even while model is still loading."""
+    import stet.core.app as app_module
+
+    mock_user32 = MockUser32()
+    with patch("ctypes.windll.user32", new=mock_user32):
+        app = StetApp()
+        worker_calls = []
+        app.ac_model.is_loaded = lambda: False
+        app.ac_model.loading = True
+
+        monkeypatch.setattr(app, "_is_window_alive", lambda: False)
+        monkeypatch.setattr(
+            app,
+            "_hotkey_worker",
+            lambda: worker_calls.append(app._pending_panel_strength),
+        )
+
+        class ImmediateThread:
+            def __init__(self, target, args=(), daemon=None):
+                self.target = target
+                self.args = args
+
+            def start(self):
+                self.target(*self.args)
+
+        monkeypatch.setattr(app_module.threading, "Thread", ImmediateThread)
+        app._handle_hotkey_fired({"mode": "panel", "strength": "full_correction"})
+        assert worker_calls == ["full_correction"]
 
 def test_show_window_constructs_with_profile_strength(qtbot, monkeypatch):
     """CorrectionWindow must be constructed with the hotkey profile strength."""

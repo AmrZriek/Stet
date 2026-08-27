@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 from stet.constants import (
     APP_VERSION,
     DEBUG_LOG,
+    DEFAULT_CONFIG,
     DEFAULT_TEMPLATES,
     GITHUB_RELEASES_API,
     MACOS,
@@ -38,6 +39,7 @@ from stet.core.clipboard import (
     VK_C,
     VK_V,
     _clipboard_read_text,
+    _clipboard_sequence_number,
     _clipboard_write_text,
     _send_ctrl_chord,
     _send_ctrl_shift_chord,
@@ -387,7 +389,7 @@ class StetApp(QObject):
         log(
             f"[APP] Boot — keep_model_loaded: {self.cfg.get('keep_model_loaded', True)}"
         )
-        log(f"[APP] Boot — gpu_layers: {self.cfg.get('gpu_layers', 99)}")
+        log(f"[APP] Boot — gpu_layers: {self.cfg.get('gpu_layers', DEFAULT_CONFIG['gpu_layers'])}")
         log("[APP] Boot — correction_method: patch (fixed)")
         log(
             f"[APP] Boot — default_strength: {self.cfg.get('streaming_strength', 'full_correction')}"
@@ -438,6 +440,14 @@ class StetApp(QObject):
         # cycles from corrupting keyboard library internal state.
         self._last_register_ts = 0.0
         self._hotkey_handles: list = []
+        self._hotkey_retry_timer = QTimer(self)
+        self._hotkey_retry_timer.setSingleShot(True)
+        self._hotkey_retry_timer.timeout.connect(self._retry_register_hotkeys)
+        self._hotkey_retry_count = 0
+        # A lingering second instance (elevation race, pre-Global-lock builds)
+        # can hold the OS hotkey table for a while; keep retrying for ~60s so
+        # the collision self-heals once the stale holder exits.
+        self._max_hotkey_retries = 12
 
         self._download_processes: list = []
         self._download_timer = QTimer(self)
@@ -477,17 +487,16 @@ class StetApp(QObject):
         self._idle_timer.start(60_000)
 
 
+        self._retry_scheduled = False
+        self._retry_count = 0
+        self._max_retries = 3
+        self._retry_timer = None
+        self.ac_model.status_changed.connect(self._schedule_model_retry_if_needed)
+        self.ac_model.model_loaded.connect(self._on_model_loaded)
+
         # Load autocorrect model at boot
         ac_path = self.cfg.get("model_path", "")
         if ac_path:
-            # Connect deferred retry BEFORE starting the thread so the first
-            # 'not found' emission is captured even if load_model completes
-            # before the event loop processes the signal.
-            self._retry_scheduled = False
-            self._retry_count = 0
-            self._max_retries = 3
-            self.ac_model.status_changed.connect(self._schedule_model_retry_if_needed)
-            self.ac_model.model_loaded.connect(self._on_model_loaded)
             threading.Thread(
                 target=lambda: self.ac_model.load_model(retry_missing_path=True),
                 daemon=True,
@@ -502,8 +511,8 @@ class StetApp(QObject):
                     daemon=True,
                 ).start()
 
-        # Clean up legacy startup scheduled task if present to avoid dual launching
-        self._cleanup_legacy_startup_task()
+        # Clean up legacy startup scheduled task if present to avoid dual launching (deferred)
+        QTimer.singleShot(2000, self._cleanup_legacy_startup_task)
 
         # Check if first run download is needed (backend or model missing)
         QTimer.singleShot(100, self._check_first_run_downloads)
@@ -545,15 +554,19 @@ class StetApp(QObject):
 
     # ── deferred model retry ──────────────────────────────────────────────
 
+    def _cancel_model_retry(self):
+        """Cancel any pending deferred retry timer and reset retry state."""
+        self._retry_scheduled = False
+        self._retry_count = 0
 
     def _schedule_model_retry_if_needed(self, status_msg: str):
         """Slot connected to ac_model.status_changed at boot.
 
         Triggers a deferred retry when the model fails to load for any reason
         (missing file, server crash, startup timeout, CUDA error, etc.).
-        Uses exponential backoff (45s → 90s → 180s) capped at _max_retries
-        attempts.  The _retry_scheduled flag ensures only one timer is queued
-        at a time.
+        Uses exponential backoff (15 s base, doubling, capped at 60 s) for at
+        most _max_retries attempts.  The _retry_scheduled flag ensures only
+        one timer is queued at a time.
         """
         FAILURE_KEYWORDS = (
             "not found",
@@ -564,7 +577,7 @@ class StetApp(QObject):
         msg = status_msg.lower()
         is_failure = any(kw in msg for kw in FAILURE_KEYWORDS)
 
-        if is_failure and not self.ac_model.is_loaded() and not self._retry_scheduled:
+        if is_failure and not self.ac_model.is_loaded() and not self.ac_model.loading and not self._retry_scheduled:
             if self._retry_count >= self._max_retries:
                 log(
                     f"[APP] Model load retry limit reached "
@@ -588,20 +601,19 @@ class StetApp(QObject):
         If the path is still missing, the status signal will re-arm another
         one-shot retry instead of sleeping inside load_model().
         """
-        if not self.ac_model.is_loaded():
-            self._retry_scheduled = False
+        self._retry_scheduled = False
+        if not self.ac_model.is_loaded() and not self.ac_model.loading:
             log("[APP] Deferred model retry firing now")
             threading.Thread(
                 target=lambda: self.ac_model.load_model(retry_missing_path=True),
                 daemon=True,
             ).start()
         else:
-            self._retry_scheduled = False
-            self._retry_count = 0
-            log("[APP] Deferred model retry skipped — model already loaded")
+            self._cancel_model_retry()
+            log("[APP] Deferred model retry skipped — model already loaded or loading")
 
     def _on_model_loaded(self):
-        self._retry_count = 0
+        self._cancel_model_retry()
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(make_tray_icon("#475569"), self)
@@ -830,9 +842,11 @@ class StetApp(QObject):
             self._llm_menu.addAction(act)
 
     def _tray_load_model(self):
+        self._cancel_model_retry()
         threading.Thread(target=self.ac_model.load_model, daemon=True).start()
 
     def _tray_unload_model(self):
+        self._cancel_model_retry()
         self.ac_model.unload_model()
 
     def _update_llm_menu_initial_text(self):
@@ -905,7 +919,7 @@ class StetApp(QObject):
         else:
             self._chat_status_lbl.hide()
 
-    def _register_hotkey(self, force: bool = False):
+    def _register_hotkey(self, force: bool = False, is_retry: bool = False):
         """Register global hotkeys through the native platform adapter."""
         if MACOS:
             now = time.monotonic()
@@ -974,6 +988,10 @@ class StetApp(QObject):
             return
         self._last_register_ts = now
 
+        if not is_retry and hasattr(self, "_hotkey_retry_timer"):
+            self._hotkey_retry_timer.stop()
+            self._hotkey_retry_count = 0
+
         # ── Step 1: remove previous handles surgically ────────────────────
         for hotkey_id in self._hotkey_handles:
             try:
@@ -986,6 +1004,8 @@ class StetApp(QObject):
 
         # ── Step 2: register new hotkeys ──────────────────────────────────
         hotkeys = self.cfg.get("hotkeys", [])
+        failed_shortcuts = []
+        has_already_registered_error = False
 
         for idx, hk_cfg in enumerate(hotkeys):
             shortcut = hk_cfg.get("shortcut", "").lower().strip()
@@ -1000,7 +1020,8 @@ class StetApp(QObject):
                 hotkey_id = 1000 + idx
                 res = ctypes.windll.user32.RegisterHotKey(None, hotkey_id, mods, vk)
                 if res == 0:
-                    raise OSError(ctypes.FormatError(ctypes.GetLastError()))
+                    err = ctypes.GetLastError()
+                    raise OSError(err, ctypes.FormatError(err))
 
                 self._hotkey_handles.append(hotkey_id)
                 if hasattr(self, "_hotkey_filter"):
@@ -1010,15 +1031,47 @@ class StetApp(QObject):
                 log(f"[Hotkey] registered: {shortcut} (mode: {hk_cfg.get('mode')})")
             except Exception as e:
                 log(f"[Hotkey] register failed for '{shortcut}': {e}")
-                self.tray.showMessage(
-                    "Stet",
-                    f"Could not register hotkey '{shortcut}'. Try running as administrator or change it in settings.",
-                    QSystemTrayIcon.MessageIcon.Warning,
-                    4000,
+                failed_shortcuts.append((shortcut, e))
+                err_str = str(e).lower()
+                winerror = getattr(e, "winerror", None) or getattr(e, "errno", None)
+                if winerror == 1409 or "already registered" in err_str:
+                    has_already_registered_error = True
+
+        if not failed_shortcuts:
+            if is_retry or self._hotkey_retry_count > 0:
+                log(
+                    f"[Hotkey] Successfully registered all {len(self._hotkey_handles)} hotkeys after retry"
                 )
+            self._hotkey_retry_count = 0
+            if hasattr(self, "_hotkey_retry_timer"):
+                self._hotkey_retry_timer.stop()
+        else:
+            if has_already_registered_error and self._hotkey_retry_count < self._max_hotkey_retries:
+                self._hotkey_retry_count += 1
+                delay_ms = min(1500 * self._hotkey_retry_count, 4000)
+                log(
+                    f"[Hotkey] Scheduling retry in {delay_ms}ms "
+                    f"(attempt {self._hotkey_retry_count}/{self._max_hotkey_retries}) for {[s for s, _ in failed_shortcuts]}"
+                )
+                if hasattr(self, "_hotkey_retry_timer"):
+                    self._hotkey_retry_timer.start(delay_ms)
+            else:
+                for shortcut, _ in failed_shortcuts:
+                    self.tray.showMessage(
+                        "Stet",
+                        f"Could not register hotkey '{shortcut}'. Try running as administrator or change it in settings.",
+                        QSystemTrayIcon.MessageIcon.Warning,
+                        4000,
+                    )
+
+    def _retry_register_hotkeys(self):
+        log(f"[Hotkey] Executing scheduled retry {self._hotkey_retry_count}/{self._max_hotkey_retries}")
+        self._register_hotkey(force=True, is_retry=True)
 
     def _unregister_hotkey(self):
         """Unregister global hotkeys temporarily."""
+        if hasattr(self, "_hotkey_retry_timer"):
+            self._hotkey_retry_timer.stop()
         if MACOS:
             if self._mac_input is not None:
                 self._mac_input.unregister_hotkeys()
@@ -1089,11 +1142,12 @@ class StetApp(QObject):
 
     def _handle_hotkey_fired(self, hk_cfg: dict):
         """Called from main Qt thread via queue polling."""
-        # Auto-detect if any new models/servers were downloaded
-        if self.cfg.auto_detect():
-            self._update_llm_menu_initial_text()
-            if self.cfg.get("model_path", "") and not self.ac_model.is_loaded() and not self.ac_model.loading:
-                threading.Thread(target=self.ac_model.load_model, daemon=True).start()
+        # Auto-detect if no model is loaded yet (e.g. fresh download)
+        if not self.ac_model.is_loaded() and not self.ac_model.loading:
+            if self.cfg.auto_detect():
+                self._update_llm_menu_initial_text()
+                if self.cfg.get("model_path", ""):
+                    threading.Thread(target=self.ac_model.load_model, daemon=True).start()
 
         mode = hk_cfg.get("mode", "panel")
         strength = hk_cfg.get("strength", "full_correction")
@@ -1133,6 +1187,13 @@ class StetApp(QObject):
             self._pending_panel_strength = strength
             self._pending_panel_custom_prompt = custom_prompt
             threading.Thread(target=self._hotkey_worker, daemon=True).start()
+
+    # UIA direct-capture budget. Real UIA queries (focused element +
+    # TextPattern + GetSelection) return in <50 ms; the bound only matters
+    # when the target app's COM/UI thread is frozen (Chromium, Electron,
+    # terminals). 250 ms bounds that worst case instead of stalling 1.5 s
+    # before the clipboard fallback fires.
+    _UIA_CAPTURE_TIMEOUT = 0.25
 
     # Clipboard polling tunables. Modern Windows clipboard updates are fast,
     # so we can poll aggressively without paying meaningful CPU cost.
@@ -1184,7 +1245,7 @@ class StetApp(QObject):
             daemon=True,
         )
         uia_thread.start()
-        uia_thread.join(timeout=1.5)
+        uia_thread.join(timeout=self._UIA_CAPTURE_TIMEOUT)
         if uia_thread.is_alive():
             log("[Capture] UIA capture timed out — falling back to clipboard")
             uia_text = ""
@@ -1206,13 +1267,15 @@ class StetApp(QObject):
         if _is_terminal_or_ide(hwnd):
             log("[Capture] Active window is a terminal. Using Ctrl+Shift+C fallback.")
             terminal_safe_copy = True
+            self._target_is_terminal = True
         else:
             terminal_safe_copy = False
+            self._target_is_terminal = False
 
         # Fallback: existing Ctrl+C + clipboard read
-        # Longer settle: the hotkey fires on key-down; 200 ms is enough
-        # for both the key-up event and the target app to regain input focus.
-        time.sleep(0.20)
+        # Settle: the hotkey fires on key-down; 80 ms lets the target window's
+        # message queue settle, while _send_ctrl_chord atomically releases any held Shift.
+        time.sleep(0.08)
 
         self._old_clip = self._safe_paste()
         log(
@@ -1432,9 +1495,13 @@ class StetApp(QObject):
                     self._silent_osd_signal.emit("Could not paste safely", "warning")
                     return
             else:
+                seq_before = _clipboard_sequence_number()
                 self._safe_copy(result)
                 time.sleep(0.12)
-                _send_ctrl_chord(VK_V)
+                if getattr(self, "_target_is_terminal", False):
+                    _send_ctrl_shift_chord(VK_V)
+                else:
+                    _send_ctrl_chord(VK_V)
                 time.sleep(0.08)
 
             # Restore original clipboard after paste settles.
@@ -1442,7 +1509,12 @@ class StetApp(QObject):
             # QTimer.singleShot, which would crash from a non-Qt thread.
             if not MACOS and self._old_clip and self._old_clip != result:
                 time.sleep(0.5)
-                self._safe_copy(self._old_clip)
+                seq_now = _clipboard_sequence_number()
+                # Restore only if the clipboard hasn't been changed by another app
+                if seq_before == 0 or seq_now == seq_before + 1:
+                    self._safe_copy(self._old_clip)
+                else:
+                    log("[Silent] Clipboard was modified externally — skipping restore")
 
             self._last_silent_history_id = self._history.add(
                 mode="silent",
@@ -1645,21 +1717,29 @@ class StetApp(QObject):
 
             threading.Thread(target=_paste_macos, name="StetMacPaste", daemon=True).start()
             return
+        seq_before = _clipboard_sequence_number()
+        target_is_terminal = getattr(self, "_target_is_terminal", False)
         def _paste_worker():
             # We're in a background thread — just sleep instead of
             # QTimer.singleShot, which would crash from a non-Qt thread.
             self._safe_copy(text)
             time.sleep(0.15)
-            _send_ctrl_chord(VK_V)
+            if target_is_terminal:
+                _send_ctrl_shift_chord(VK_V)
+            else:
+                _send_ctrl_chord(VK_V)
             time.sleep(0.1)
 
         threading.Thread(target=_paste_worker, name="StetPaste", daemon=True).start()
         if self._old_clip and self._old_clip != text:
             clip_to_restore = self._old_clip
             def _restore_if_unchanged():
+                seq_now = _clipboard_sequence_number()
                 current = _clipboard_read_text()
-                if current == text:
+                if (seq_before == 0 or seq_now == seq_before + 1) and current == text:
                     _clipboard_write_text(clip_to_restore)
+                elif current != text or (seq_before != 0 and seq_now != seq_before + 1):
+                    log("[Paste] Clipboard was modified externally or text changed — skipping restore")
             QTimer.singleShot(500, _restore_if_unchanged)
 
     def _undo_correction(self, entry_id: str):
@@ -1737,15 +1817,16 @@ class StetApp(QObject):
             )
 
     def _on_settings_saved(self):
+        self._cancel_model_retry()
         self._register_hotkey(force=True)
         # If autocorrect model changed, reload
         ac_path = self.cfg.get("model_path", "")
-        if self.ac_model.is_loaded():
+        if self.ac_model.is_loaded() or self.ac_model.loading:
             self.ac_model.unload_model()
         if ac_path:
             threading.Thread(target=self.ac_model.load_model, daemon=True).start()
 
-        if self.chat_model.is_loaded():
+        if self.chat_model.is_loaded() or self.chat_model.loading:
             self.chat_model.unload_model()
         if self.cfg.get("chat_use_separate_model", False) and self.cfg.get("chat_keep_loaded", False):
             chat_path = self.cfg.get("chat_model_path", "")
@@ -1938,7 +2019,7 @@ class StetApp(QObject):
 
         cb_model = None
         if model_missing:
-            cb_model = QCheckBox("Download Google Gemma 4 model (~1.8 GB)")
+            cb_model = QCheckBox("Download Google Gemma 4 model + MTP (~3.3 GB)")
             cb_model.setChecked(True)
             layout.addWidget(cb_model)
 
@@ -2003,6 +2084,9 @@ class StetApp(QObject):
                     RECOMMENDED_MODEL_URL,
                     RECOMMENDED_MODEL_FILE,
                     RECOMMENDED_MODEL_HASH,
+                    RECOMMENDED_MTP_URL,
+                    RECOMMENDED_MTP_FILE,
+                    RECOMMENDED_MTP_HASH,
                     SCRIPT_DIR,
                     SERVER_EXE,
                 )
@@ -2010,7 +2094,7 @@ class StetApp(QObject):
                 if not model_exists:
                     msg = (
                         "Stet requires a local AI model to correct spelling, grammar, and style.\n\n"
-                        "Google Gemma 4 is the recommended model — lightweight, fast, and 100% private."
+                        "Google Gemma 4 with MTP is the recommended model — lightweight, fast, and 100% private."
                     )
                 else:
                     msg = "Stet needs to download required runtime dependencies to run locally."
@@ -2035,6 +2119,7 @@ class StetApp(QObject):
                                     "hash": release.sha256,
                                     "label": release.label,
                                     "extract_dir": BACKENDS_DIR,
+                                    "extract_flatten": True,
                                 })
                             except BackendError as error:
                                 QMessageBox.warning(
@@ -2065,6 +2150,12 @@ class StetApp(QObject):
                             "hash": RECOMMENDED_MODEL_HASH,
                             "label": "AI language model"
                         })
+                        downloads.append({
+                            "url": RECOMMENDED_MTP_URL,
+                            "dest": (MODELS_DIR if MACOS else SCRIPT_DIR) / RECOMMENDED_MTP_FILE,
+                            "hash": RECOMMENDED_MTP_HASH,
+                            "label": "MTP speculative draft model"
+                        })
                         
                     if downloads:
                         dl_dialog = DownloadProgressDialog(downloads)
@@ -2085,6 +2176,8 @@ class StetApp(QObject):
                                     self.cfg.set("model_path", str(new_model_path))
                                     if not self.cfg.get("chat_use_separate_model", False):
                                         self.cfg.set("chat_model_path", str(new_model_path))
+                                    self.cfg.set("mtp_enabled", True)
+                                    self.cfg.set("chat_mtp_enabled", True)
                                     log(f"[FirstRun] Configured model_path: {new_model_path}")
                             
                             # Load model now
@@ -2175,14 +2268,16 @@ class StetApp(QObject):
         )
 
     def _select_model(self, path: str):
+        self._cancel_model_retry()
         self.cfg.set("model_path", path)
         self.cfg.add_recent(path)
         
         if not self.cfg.get("chat_use_separate_model", False):
             self.cfg.set("chat_model_path", path)
-            self.chat_model.unload_model()
+            if self.chat_model.is_loaded() or self.chat_model.loading:
+                self.chat_model.unload_model()
 
-        if self.ac_model.is_loaded():
+        if self.ac_model.is_loaded() or self.ac_model.loading:
             self.ac_model.unload_model()
         threading.Thread(target=self.ac_model.load_model, daemon=True).start()
 
@@ -2542,6 +2637,8 @@ class StetApp(QObject):
             self._update_checker = None
         if self._available_update:
             self._restore_tray_status_color()
+        if hasattr(self, "_hotkey_retry_timer"):
+            self._hotkey_retry_timer.stop()
         if MACOS:
             if self._mac_input is not None:
                 self._mac_input.close()

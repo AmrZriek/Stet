@@ -137,3 +137,97 @@ class TestStreamWorkerSignals:
 
         # Should have stopped after first token
         assert len(tokens) <= 2
+
+    def test_worker_timeout(self, qtbot):
+        """Watchdog timeout triggers StetStreamTimeout error and prevents done emission."""
+        import time
+
+        class _BlockingResponse:
+            def raise_for_status(self):
+                pass
+
+            def iter_lines(self):
+                # Simulates deadlocked server that blocks on iter_lines
+                time.sleep(1.0)
+                yield b"data: {\"choices\": [{\"delta\": {\"content\": \"late\"}}]}"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                pass
+
+        w = StreamWorker(
+            "http://localhost:8080/v1/chat/completions",
+            _make_payload(),
+            watchdog_timeout=0.05,
+        )
+
+        tokens = []
+        dones = []
+        errors = []
+        w.token.connect(tokens.append)
+        w.done.connect(dones.append)
+        w.error.connect(errors.append)
+
+        with patch("stet.llm.worker.requests.Session") as MockSession:
+            session_instance = MockSession.return_value
+            session_instance.post.return_value = _BlockingResponse()
+            w.run()
+
+        assert len(errors) == 1
+        assert errors[0].startswith("StetStreamTimeout")
+        assert len(dones) == 0
+        assert len(tokens) == 0
+
+    def test_worker_timeout_uses_separate_flag(self, qtbot):
+        """Normal stop() sets _stop and suppresses error emission, distinct from abort_timeout()."""
+        w = StreamWorker(
+            "http://localhost:8080/v1/chat/completions",
+            _make_payload(),
+            watchdog_timeout=10.0,
+        )
+        errors = []
+        w.error.connect(errors.append)
+
+        # Call stop() before/during run
+        w.stop()
+        assert w._stop is True
+        assert w._timeout_aborted is False
+
+        with patch("stet.llm.worker.requests.Session") as MockSession:
+            session_instance = MockSession.return_value
+            session_instance.post.side_effect = ConnectionError("cancelled")
+            w.run()
+
+        # Suppressed because _stop is True and _timeout_aborted is False
+        assert len(errors) == 0
+
+    def test_worker_watchdog_cancelled_on_token(self, qtbot):
+        """Arrival of tokens cancels the watchdog timer so streaming finishes cleanly."""
+        chunks = [
+            {"choices": [{"delta": {"content": "Fast"}}]},
+            {"choices": [{"delta": {"content": " response"}}]},
+        ]
+        w = StreamWorker(
+            "http://localhost:8080/v1/chat/completions",
+            _make_payload(),
+            watchdog_timeout=0.2,
+        )
+        tokens = []
+        dones = []
+        errors = []
+        w.token.connect(tokens.append)
+        w.done.connect(dones.append)
+        w.error.connect(errors.append)
+
+        with patch("stet.llm.worker.requests.Session") as MockSession:
+            session_instance = MockSession.return_value
+            session_instance.post.return_value = _FakeChunkedResponse(chunks)
+            w.run()
+
+        assert tokens == ["Fast", " response"]
+        assert len(dones) == 1
+        assert len(errors) == 0
+        assert w._watchdog is None
+

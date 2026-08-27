@@ -82,14 +82,20 @@ def test_looks_like_prose():
     # Pure equation E = mc^2 has special symbols: '=' count = 1, len = 8 -> 0.125 > 0.04
     assert not looks_like_prose("E = mc^2")
 
-    # 5. CamelCase / code tokens (avg_caps_mid > 0.05)
+    # 5. CamelCase / code tokens (multiple code tokens vs single brand name)
     assert not looks_like_prose("Check the value of myVariable and run getUserId method.")
+    assert looks_like_prose("these settings are different from my other app, PanoramaSlice, if these values y")
+    assert looks_like_prose("I bought a new iPhone today.")
+    assert looks_like_prose("Upload the video to YouTube please.")
+    assert looks_like_prose("We use FastAPI for our service.")
 
-    # 6. Code keywords regex
+    # 6. Code keywords regex vs natural language
     assert not looks_like_prose("def my_func():\n    pass")
     assert not looks_like_prose("class StetApp(QMainWindow):\n    pass")
     assert not looks_like_prose("const value = 42;")
     assert not looks_like_prose("import sys\nprint(sys.argv)")
+    assert looks_like_prose("Let me know if you need any further assistance with this.")
+    assert looks_like_prose("> This is an email quote replying to the thread.")
 
     # 7. Log files / Hex patterns
     assert not looks_like_prose("12:34:56 [INFO] Started server process")

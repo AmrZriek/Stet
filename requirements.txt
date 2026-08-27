@@ -10,6 +10,9 @@ pyperclip>=1.11.0
 # HTTP client (llama.cpp OpenAI-compatible API + streaming)
 requests>=2.34.2
 
+# Offline GGUF metadata reading (model info, reasoning detection)
+gguf==0.19.0
+
 # ── Build / release only (uncomment when building) ──────────────────────────
 pyinstaller>=6.0
 

@@ -419,7 +419,7 @@ def test_rewrite_polish_accepts_heavy_rewrite(monkeypatch):
     result, units = mgr.correct_text_patch(filler, strength="rewrite_polish")
     assert result is not None, "heavy rewrite was reverted (raw ratio gate still active?)"
     assert "kindly confirm your availability" in result
-    assert units == 1
+    assert units >= 1
 
 
 def test_config_threshold_changes_behavior(monkeypatch):

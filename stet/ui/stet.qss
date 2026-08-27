@@ -622,6 +622,9 @@ QLabel#statusLabel[state="processing"] {
 QLabel#statusLabel[state="loading"] {
     color: #f59e0b;
 }
+QLabel#statusLabel[state="initializing"] {
+    color: #f59e0b;
+}
 QLabel#statusLabel[state="error"] {
     color: #f87171;
 }

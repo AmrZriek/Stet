@@ -5,14 +5,17 @@ param(
     [int]$BenchPort = 8081,
     [int]$WarmupTokens = 128,
     [int]$BenchTokens = 256,
-    [int]$Repeats = 5
-)
+    [int]$Repeats = 5,     [string]$OldDir,
+    [string]$NewDir,
+    [string]$OldLabel = "bOLD",
+    [string]$NewLabel = "bNEW"
+    )
 
 Set-Location -LiteralPath $ProjectRoot
 
 $versions = @(
-    @{Label="b10107"; Dir="llama-b10107-bin-win-cuda-12.4-x64"},
-    @{Label="b10375"; Dir="llama-b10375-bin-win-cuda-12.4-x64"}
+    @{Label=$OldLabel; Dir=$OldDir},
+    @{Label=$NewLabel; Dir=$NewDir}
 )
 
 $results = @{}

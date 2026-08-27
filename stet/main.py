@@ -153,7 +153,24 @@ def main():
         _boot_log("[BOOT] Acquiring single-instance lock via QSharedMemory...")
         from PyQt6.QtCore import QSharedMemory
 
-        _shared_mem = QSharedMemory(_lock_key)
+        # Use the Global namespace so the lock is shared across integrity
+        # levels (elevated via run.bat -Verb RunAs vs. standard user). A bare
+        # per-session name lets an elevated and a non-elevated instance both
+        # boot, and they then collide on RegisterHotKey (Win32 error 1409).
+        _lock_key = os.environ.get("STET_LOCK_KEY", "StetSingleInstanceLock")
+        _win_lock_key = f"Global\\{_lock_key}"
+        _shared_mem = QSharedMemory(_win_lock_key)
+        if not _shared_mem.attach():
+            # No segment yet (normal first boot) or access denied. The Global
+            # namespace works across integrity levels (elevated vs. standard);
+            # only fall back to the per-user namespace on access errors, so a
+            # bare segment-not-found keeps the Global key.
+            if _shared_mem.error() is not None and _shared_mem.error() != QSharedMemory.SharedMemoryError.NoError:
+                _boot_log(
+                    f"[BOOT] Global lock namespace error {_shared_mem.error()} — falling back to per-user"
+                )
+                _win_lock_key = _lock_key
+                _shared_mem = QSharedMemory(_win_lock_key)
         if _shared_mem.attach():
             _boot_log(
                 "[BOOT] Another instance is already running (shared memory attached). Exiting."

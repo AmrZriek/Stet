@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.3.0"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os
@@ -129,14 +129,14 @@ GITHUB_RELEASES_API = "https://api.github.com/repos/AmrZriek/Stet/releases/lates
 # ── llama.cpp backend auto-download ──────────────────────────────────────────
 # The llama-server binaries + CUDA runtime are downloaded on first run instead
 # of bundled in the installer (keeps installer under 120 MB to avoid AV flags).
-LLAMA_BACKEND_VERSION = "b10375"
+LLAMA_BACKEND_VERSION = "b10639"
 _LLAMA_BASE = f"https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_BACKEND_VERSION}"
 LLAMA_BACKEND_URLS = {
     "llama": f"{_LLAMA_BASE}/llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64.zip",
     "cuda": f"{_LLAMA_BASE}/cudart-llama-bin-win-cuda-12.4-x64.zip",
 }
 LLAMA_BACKEND_HASHES = {
-    "llama": "DD840B604C508B2F57F2ED467F70C711D1840C07B0D09A3BBA8F6DFBD8B3DA84",
+    "llama": "D2A9263AE118E514B6FC61329D5AB7A588A17D600B96DF07CB723C820151A22A",
     "cuda": "8C79A9B226DE4B3CACFD1F83D24F962D0773BE79F1E7B75C6AF4DED7E32AE1D6",
 }
 LLAMA_BACKEND_DIR = f"llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
@@ -144,7 +144,11 @@ LLAMA_BACKEND_DIR = f"llama-{LLAMA_BACKEND_VERSION}-bin-win-cuda-12.4-x64"
 # Recommended Model Configuration
 RECOMMENDED_MODEL_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-UD-Q4_K_XL.gguf"
 RECOMMENDED_MODEL_FILE = "gemma-4-E2B-it-UD-Q4_K_XL.gguf"
-RECOMMENDED_MODEL_HASH = "b8906b8c5e05e57b657646bbc657bd35814a269b2c20f0a2579047fafa1a67dd"
+RECOMMENDED_MODEL_HASH = "b52f438017efaec5debf1c0d8be690571e212a07c312f1102bbce927258cfc32"
+
+RECOMMENDED_MTP_URL = "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mtp-gemma-4-E2B-it.gguf"
+RECOMMENDED_MTP_FILE = "mtp-gemma-4-E2B-it.gguf"
+RECOMMENDED_MTP_HASH = "9eba819938efccfd6044f8af84e3bbfddc639a2bcf32ebc36420e6a649191919"
 
 WELCOME_SAMPLE_TEXT = (
     "Stet is running! Select any text in any app, and press the F9 hotkey "
@@ -217,7 +221,8 @@ DEFAULT_TEMPLATES: list[dict[str, str]] = [
 DEFAULT_CONFIG: dict = {
     # Presets
     "show_welcome_on_startup": True,
-    "chat_thinking_enabled": True,
+    # Locked off by user decision (2026-08-18): chat thinking must stay disabled.
+    "chat_thinking_enabled": False,
     "startup_on_login": False,
 
     # llama.cpp
@@ -229,17 +234,19 @@ DEFAULT_CONFIG: dict = {
 
     "server_host": "127.0.0.1",
     "server_port": 8080,
+    "context_size_auto": True,
     "context_size": 12800,
-    "gpu_layers": 99,
+    "gpu_layers": 999,
     "threads": -1,
     "batch_size": 1024,
     "ubatch_size": 512,
     "flash_attn": True,
     "kv_cache_type_k": "q8_0",
     "kv_cache_type_v": "q8_0",
-    "mtp_enabled": False,
-    "mtp_max_draft": 2,
+    "mtp_enabled": True,
+    "mtp_max_draft": 3,
     "mtp_min_draft": 0,
+    "mtp_p_min": 0.75,
     "temperature": 0.0,
     "top_k": 1,
     "top_p": 0.95,
@@ -266,7 +273,6 @@ DEFAULT_CONFIG: dict = {
     "threads_batch": -1,
     "keep_model_loaded": True,
     "idle_timeout_seconds": 300,
-    "patch_chunk_size": 60,
     "cache_prompt": True,
     "recent_models": [],
     # Chat model
@@ -274,17 +280,19 @@ DEFAULT_CONFIG: dict = {
     "chat_use_separate_model": False,
     "chat_keep_loaded": False,
     "chat_idle_timeout_seconds": 60,
+    "chat_context_size_auto": True,
     "chat_context_size": 12800,
-    "chat_gpu_layers": 99,
+    "chat_gpu_layers": 999,
     "chat_threads": -1,
     "chat_batch_size": 1024,
     "chat_ubatch_size": 512,
     "chat_flash_attn": True,
     "chat_kv_cache_type_k": "q8_0",
     "chat_kv_cache_type_v": "q8_0",
-    "chat_mtp_enabled": False,
-    "chat_mtp_max_draft": 2,
+    "chat_mtp_enabled": True,
+    "chat_mtp_max_draft": 3,
     "chat_mtp_min_draft": 0,
+    "chat_mtp_p_min": 0.75,
     "chat_temperature": 0.8,
     "chat_top_k": 40,
     "chat_top_p": 0.95,
@@ -315,6 +323,9 @@ DEFAULT_CONFIG: dict = {
     # Correction history (local-only record for undo and review)
     "history_enabled": True,
     "history_limit": 200,
+    # Word-count threshold above which selecting more text triggers a
+    # large-document warning instead of an automatic correction.
+    "large_doc_warning_words": 1000,
     # Protected terms: user-defined words/phrases masked from the LLM like URLs
     "protected_terms": [],
     # Fallback default strength when no per-hotkey strength is set.

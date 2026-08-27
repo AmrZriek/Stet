@@ -28,6 +28,14 @@ def test_latest_build_artifact_contents():
         missing_files = expected_files - top_level_contents
         assert not missing_files, f"Missing files in the zip artifact: {missing_files}"
 
-        # Check for llama folder at the top level
-        has_llama_folder = any(item.startswith("llama") for item in top_level_contents)
-        assert has_llama_folder, "Missing 'llama' folder/placeholder in the zip artifact"
+        # The llama.cpp backend is intentionally NOT bundled — it is
+        # downloaded at first run via download_backend.bat (build.py excludes
+        # any top-level llama* dir from the portable zip; see build.py
+        # package()). Assert the current packaging instead: the PyInstaller
+        # one-dir layout and the backend downloader script must be present.
+        assert "_internal" in top_level_contents, (
+            "Missing PyInstaller one-dir '_internal' folder in the zip artifact"
+        )
+        assert "download_backend.bat" in top_level_contents, (
+            "Missing 'download_backend.bat' in the zip artifact"
+        )

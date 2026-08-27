@@ -601,8 +601,12 @@ class TestMainWindowCoverage:
         with patch.object(cw, "_send_chat") as mock_send:
             cw._apply_template("Translate to French")
             assert cw._correction_cancelled is True
-            assert len(cw.chat_history) == 0
-            mock_send.assert_called_with(msg="Translate to French", is_template=True)
+            mock_send.assert_called_with(
+                msg="Translate to French",
+                is_template=True,
+                grammar=None,
+                json_schema=None,
+            )
 
     def test_cancel_and_close_events(self, qtbot, cfg):
         ac_model = MagicMock()

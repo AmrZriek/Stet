@@ -176,3 +176,84 @@ def test_read_selection_uia_bounds_length():
         assert "max_length" in gettext_args, "GetText was not called"
         assert gettext_args["max_length"] == 50000
 
+
+def test_clipboard_sequence_number():
+    from stet.core.clipboard import _clipboard_sequence_number, _clipboard_write_text
+
+    seq1 = _clipboard_sequence_number()
+    assert isinstance(seq1, int)
+    assert seq1 >= 0
+
+    _clipboard_write_text("sequence_test_token_123")
+    seq2 = _clipboard_sequence_number()
+    assert isinstance(seq2, int)
+    # Sequence number should advance after a clipboard write
+    assert seq2 != seq1
+
+
+
+def test_send_ctrl_chord_releases_held_shift(monkeypatch):
+    """When Shift is physically down (e.g. from Shift+F9), _send_ctrl_chord prepends Shift key-up."""
+    from unittest.mock import MagicMock
+    import stet.core.clipboard as clip
+
+    mock_send_input = MagicMock()
+    monkeypatch.setattr(clip._user32, "SendInput", mock_send_input)
+
+    # Emulate Shift physically down (0x8000 bit set)
+    def mock_get_async_key_state(vk):
+        return -32768 if vk == clip.VK_SHIFT else 0
+
+    monkeypatch.setattr(clip._user32, "GetAsyncKeyState", mock_get_async_key_state)
+
+    clip._send_ctrl_chord(clip.VK_C)
+
+    mock_send_input.assert_called_once()
+    n_inputs, arr, size = mock_send_input.call_args[0]
+    assert n_inputs == 5  # 1 (Shift UP) + 4 (Ctrl+C chord)
+    # First event must be Shift key-up
+    assert arr[0].ki.wVk == clip.VK_SHIFT
+    assert arr[0].ki.dwFlags == clip.KEYEVENTF_KEYUP
+    # Next event must be Ctrl key-down
+    assert arr[1].ki.wVk == clip.VK_CONTROL
+    assert arr[1].ki.dwFlags == 0
+
+
+def test_send_ctrl_chord_normal_when_no_modifiers_held(monkeypatch):
+    """When no modifiers are held, _send_ctrl_chord sends standard 4-input batch."""
+    from unittest.mock import MagicMock
+    import stet.core.clipboard as clip
+
+    mock_send_input = MagicMock()
+    monkeypatch.setattr(clip._user32, "SendInput", mock_send_input)
+    monkeypatch.setattr(clip._user32, "GetAsyncKeyState", lambda vk: 0)
+
+    clip._send_ctrl_chord(clip.VK_C)
+
+    mock_send_input.assert_called_once()
+    n_inputs, arr, size = mock_send_input.call_args[0]
+    assert n_inputs == 4
+    assert arr[0].ki.wVk == clip.VK_CONTROL
+    assert arr[0].ki.dwFlags == 0
+
+
+def test_send_ctrl_shift_chord_releases_held_alt_win(monkeypatch):
+    """When Alt is physically held, _send_ctrl_shift_chord prepends Alt key-up."""
+    from unittest.mock import MagicMock
+    import stet.core.clipboard as clip
+
+    mock_send_input = MagicMock()
+    monkeypatch.setattr(clip._user32, "SendInput", mock_send_input)
+
+    def mock_get_async_key_state(vk):
+        return -32768 if vk == clip.VK_MENU else 0
+
+    monkeypatch.setattr(clip._user32, "GetAsyncKeyState", mock_get_async_key_state)
+
+    clip._send_ctrl_shift_chord(clip.VK_C)
+
+    mock_send_input.assert_called_once()
+    n_inputs, arr, size = mock_send_input.call_args[0]
+    assert n_inputs == 7  # 1 (Alt UP) + 6 (Ctrl+Shift+C chord)
+    assert arr[0].ki.wVk == clip.VK_MENU
+    assert arr[0].ki.dwFlags == clip.KEYEVENTF_KEYUP

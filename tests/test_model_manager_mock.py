@@ -1,15 +1,16 @@
 """Tests for stet.llm.model_manager -- subprocess management, Job Object, health checks."""
 
 import json
-import re
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from stet.core.config import ConfigManager
 from stet.core.text_utils import _extract_rewritten_sentence
+from stet.llm.gguf_info import GgufModelInfo, GgufReadError
 from stet.llm.model_manager import (
     _STRENGTH_TO_MODE_INDEX,
     _detect_loaded_backend,
@@ -944,6 +945,7 @@ class TestGpuOomFallback:
         fake_server.touch()
         cfg.set("llama_server_path", str(fake_server))
         cfg.set("gpu_layers", 99)
+        cfg.set("mtp_enabled", False)
         mgr = ModelManager(cfg)
 
         retry_calls = []
@@ -966,9 +968,9 @@ class TestGpuOomFallback:
         monkeypatch.setattr("subprocess.Popen", fake_popen)
 
         # Track calls to load_model
-        def spy_load_model(self, force_cpu=False):
+        def spy_load_model(self, force_cpu=False, **kwargs):
             retry_calls.append(force_cpu)
-            return original_load(self, force_cpu=force_cpu)
+            return original_load(self, force_cpu=force_cpu, **kwargs)
 
         monkeypatch.setattr(ModelManager, "load_model", spy_load_model)
 
@@ -982,6 +984,7 @@ class TestGpuOomFallback:
         fake_server.touch()
         cfg.set("llama_server_path", str(fake_server))
         cfg.set("gpu_layers", 99)
+        cfg.set("mtp_enabled", False)
         mgr = ModelManager(cfg)
 
         retry_calls = []
@@ -1000,9 +1003,9 @@ class TestGpuOomFallback:
 
         monkeypatch.setattr("subprocess.Popen", lambda *a, **kw: mock_proc)
 
-        def spy_load_model(self, force_cpu=False):
+        def spy_load_model(self, force_cpu=False, **kwargs):
             retry_calls.append(force_cpu)
-            return original_load(self, force_cpu=force_cpu)
+            return original_load(self, force_cpu=force_cpu, **kwargs)
 
         monkeypatch.setattr(ModelManager, "load_model", spy_load_model)
 
@@ -1065,18 +1068,21 @@ class TestServerLaunchCommand:
         assert "--reasoning" in cmd
         assert cmd[cmd.index("--reasoning") + 1] == "off"
         assert "--reasoning-budget" in cmd
-        assert cmd[cmd.index("--reasoning-budget") + 1] == "50"
-        # Budget sits directly after --reasoning off
-        assert cmd.index("--reasoning-budget") == cmd.index("--reasoning") + 2
+        assert cmd[cmd.index("--reasoning-budget") + 1] == "0"
+        # Budget sits directly after --reasoning off and --reasoning-format
+        assert "--reasoning-budget" in cmd
 
     @patch("subprocess.Popen")
     @patch("requests.get")
-    def test_lfm25_model_path_adds_no_think_chat_template(self, mock_get, mock_popen, cfg, tmp_path):
-        """LFM 2.5 GGUF paths must append --chat-template pointing at the
-        bundled no-think template (the model hard-primes <think> otherwise)."""
-        lfm_model = tmp_path / "LFM2.5-2.6B-Q4_K_M.gguf"
-        lfm_model.touch()
-        cfg.set("model_path", str(lfm_model))
+    def test_hard_primed_template_adds_chat_template_file(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """A model whose embedded chat template hard-primes <think> must get
+        --chat-template-file pointing at a sanitized copy (generic flow —
+        no model-name special-casing)."""
+        model = tmp_path / "AnyModel-Q4_K_M.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
         fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
         fake_server.touch()
         cfg.set("llama_server_path", str(fake_server))
@@ -1090,6 +1096,24 @@ class TestServerLaunchCommand:
             mock_props_resp if "/props" in url else mock_health_resp
         )
 
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="lfm2",
+            name="AnyModel",
+            chat_template=(
+                '{%- if add_generation_prompt -%}'
+                '{{- "<|im_start|>assistant\\n<think>" -}}'
+                '{%- endif -%}'
+            ),
+            n_ctx_train=8192,
+            reasoning_capable=True,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -1098,18 +1122,79 @@ class TestServerLaunchCommand:
         assert mgr.load_model() is True
 
         cmd = mock_popen.call_args[0][0]
-        assert "--chat-template" in cmd
-        template_arg = cmd[cmd.index("--chat-template") + 1]
-        assert template_arg.endswith("lfm25_no_think.jinja")
-        assert Path(template_arg).is_absolute()
-        # Existing reasoning flags are preserved alongside the template
+        assert "--chat-template-file" in cmd
+        template_path = Path(cmd[cmd.index("--chat-template-file") + 1])
+        assert template_path.is_absolute()
+        assert template_path.exists()
+        # The sanitized copy has the <think> prime removed
+        assert "<think>" not in template_path.read_text(encoding="utf-8")
+        # Base reasoning suppression is preserved alongside the override
+        assert cmd[cmd.index("--reasoning") + 1] == "off"
+        assert cmd[cmd.index("--reasoning-budget") + 1] == "0"
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_non_reasoning_template_omits_chat_template_file(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """A model whose template does not prime thinking must NOT get a
+        --chat-template-file override."""
+        model = tmp_path / "PlainModel.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="qwen2",
+            name="PlainModel",
+            chat_template=(
+                '{%- if add_generation_prompt -%}'
+                '{{- "<|im_start|>assistant\\n" -}}'
+                '{%- endif -%}'
+            ),
+            n_ctx_train=4096,
+            reasoning_capable=False,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--chat-template-file" not in cmd
+        # Base reasoning suppression is still present
         assert cmd[cmd.index("--reasoning") + 1] == "off"
 
     @patch("subprocess.Popen")
     @patch("requests.get")
-    def test_non_lfm_model_path_omits_chat_template(self, mock_get, mock_popen, cfg):
-        """A non-LFM GGUF path must NOT get --chat-template (pointless for
-        models whose chat templates do not prime <think>)."""
+    def test_gguf_read_failure_omits_chat_template_file_no_crash(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """GGUF metadata read failure must degrade gracefully: no template
+        flag, no crash, load still succeeds."""
+        model = tmp_path / "BrokenModel.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
         fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
         fake_server.touch()
         cfg.set("llama_server_path", str(fake_server))
@@ -1123,6 +1208,13 @@ class TestServerLaunchCommand:
             mock_props_resp if "/props" in url else mock_health_resp
         )
 
+        def _raise_gguf_error(_path):
+            raise GgufReadError("gguf package not installed")
+
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", _raise_gguf_error
+        )
+
         proc = MagicMock()
         proc.poll.return_value = None
         mock_popen.return_value = proc
@@ -1131,27 +1223,374 @@ class TestServerLaunchCommand:
         assert mgr.load_model() is True
 
         cmd = mock_popen.call_args[0][0]
-        assert "--chat-template" not in cmd
+        assert "--chat-template-file" not in cmd
+        assert cmd[cmd.index("--reasoning") + 1] == "off"
 
-    def test_lfm25_no_think_template_removes_think_priming(self):
-        """The bundled no-think template must keep the ChatML assistant
-        header but drop the <think> priming that forces LFM 2.5 to reason."""
-        template = (
-            Path(__file__).resolve().parent.parent
-            / "stet" / "llm" / "chat_templates" / "lfm25_no_think.jinja"
-        ).read_text(encoding="utf-8")
-        # Assistant header is still primed, just without <think>. Note the
-        # jinja source stores "\n" as a literal backslash-n (escaped string).
-        assert "<|im_start|>assistant\\n" in template
-        gen_prompt_block = re.search(
-            r"{%- if add_generation_prompt -%}(.*?){%- endif -%}",
-            template,
-            re.DOTALL,
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_user_set_context_size_is_respected(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """A user-set context_size must win over GGUF-derived defaults."""
+        model = tmp_path / "CtxModel.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
+        cfg.set("context_size", 8192)  # user explicitly chose 8192
+        cfg.set("context_size_auto", False)
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 8192}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
         )
-        assert gen_prompt_block is not None
-        block = gen_prompt_block.group(1)
-        assert "<|im_start|>assistant\\n" in block
-        assert "<think>" not in block
+
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="qwen2",
+            name="CtxModel",
+            chat_template="{{prompt}}",
+            n_ctx_train=4096,  # would cap to 4096 if the default were used
+            reasoning_capable=False,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[cmd.index("--ctx-size") + 1] == "8192"
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_default_ctx_derived_from_gguf_capped_at_12800(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """Untouched default ctx (12800) is derived from GGUF n_ctx_train,
+        capped at 12800."""
+        model = tmp_path / "CtxModel.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
+        cfg.set("context_size_auto", True)
+        cfg.set("context_size", 12800)  # untouched default
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="qwen2",
+            name="CtxModel",
+            chat_template="{{prompt}}",
+            n_ctx_train=32768,  # min(32768, 12800) -> 12800
+            reasoning_capable=False,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[cmd.index("--ctx-size") + 1] == "12800"
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_default_ctx_derived_from_gguf_floored_at_2048(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """Untouched default ctx (12800) is derived from GGUF n_ctx_train,
+        floored at 2048."""
+        model = tmp_path / "CtxModel.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
+        cfg.set("context_size_auto", True)
+        cfg.set("context_size", 12800)  # untouched default
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 2048}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="qwen2",
+            name="CtxModel",
+            chat_template="{{prompt}}",
+            n_ctx_train=512,  # max(min(512, 4096), 2048) -> 2048
+            reasoning_capable=False,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+
+        cmd = mock_popen.call_args[0][0]
+        assert cmd[cmd.index("--ctx-size") + 1] == "2048"
+
+    def _launch_hard_primed(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch, session_post=None
+    ):
+        """Run the real load_model flow with a hard-primed template so the
+        post-load /apply-template validation actually executes.
+
+        *session_post* controls the mocked session's post() response; when
+        None, a clean prompt (no think open-tag) is returned. The session is
+        patched at the class level so no real localhost socket is ever opened.
+        """
+        model = tmp_path / "AnyModel-Q4_K_M.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_props_resp if "/props" in url else mock_health_resp
+        )
+
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="lfm2",
+            name="AnyModel",
+            chat_template=(
+                '{%- if add_generation_prompt -%}'
+                '{{- "<|im_start|>assistant\\n<think>" -}}'
+                '{%- endif -%}'
+            ),
+            n_ctx_train=8192,
+            reasoning_capable=True,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
+        mock_session = MagicMock()
+        if session_post is None:
+            mock_session.post.return_value = MockResponse(
+                {"prompt": "<|im_start|>assistant\n"}
+            )
+        else:
+            mock_session.post.side_effect = session_post
+        monkeypatch.setattr(
+            ModelManager, "_get_session", lambda self: mock_session
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+        return mgr, mock_session
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_apply_template_validation_clean_prompt_keeps_flag(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """A 200 /apply-template response with a clean prompt (no residual
+        think open-tag) must keep _sanitized_template_used True."""
+        mgr, mock_session = self._launch_hard_primed(
+            mock_get, mock_popen, cfg, tmp_path, monkeypatch
+        )
+
+        assert mgr._sanitized_template_used is True
+        assert mgr._sanitized_template_str is not None
+        apply_url = [a[0] for a, _k in mock_session.post.call_args_list]
+        assert any("/apply-template" in u for u in apply_url)
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_apply_template_validation_residual_think_clears_flag(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """A rendered prompt that still carries an unbalanced think open-tag
+        must clear the override flag (fallback to base suppression)."""
+
+        def _residual_think(*args, **kwargs):
+            return MockResponse({"prompt": "<|im_start|>assistant\n<think>"})
+
+        mgr, _mock_session = self._launch_hard_primed(
+            mock_get,
+            mock_popen,
+            cfg,
+            tmp_path,
+            monkeypatch,
+            session_post=_residual_think,
+        )
+
+        assert mgr._sanitized_template_used is False
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_apply_template_validation_404_clears_flag(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """A non-2xx /apply-template response (e.g. 404 on older llama-server
+        builds) must clear the override flag without crashing the load."""
+
+        def _not_found(*args, **kwargs):
+            return MockResponse({"error": "not found"}, status_code=404)
+
+        mgr, _mock_session = self._launch_hard_primed(
+            mock_get,
+            mock_popen,
+            cfg,
+            tmp_path,
+            monkeypatch,
+            session_post=_not_found,
+        )
+
+        assert mgr._sanitized_template_used is False
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_apply_template_validation_raise_clears_flag(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """An exception from /apply-template must clear the override flag and
+        never propagate (load already succeeded)."""
+
+        def _boom(*args, **kwargs):
+            raise requests.exceptions.ConnectionError("refused")
+
+        mgr, _mock_session = self._launch_hard_primed(
+            mock_get,
+            mock_popen,
+            cfg,
+            tmp_path,
+            monkeypatch,
+            session_post=_boom,
+        )
+
+        assert mgr._sanitized_template_used is False
+
+    @patch("subprocess.Popen")
+    @patch("requests.get")
+    def test_props_thinking_supported_reads_caps_dict(
+        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
+    ):
+        """thinking_supported must read supports_thinking/supports_reasoning
+        from the caps dict — not the mere presence of the dict."""
+        model = tmp_path / "CapsModel.gguf"
+        model.touch()
+        cfg.set("model_path", str(model))
+        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_get.side_effect = lambda url, **kwargs: (
+            mock_get_props if "/props" in url else mock_health_resp
+        )
+
+        fake_info = GgufModelInfo(
+            path=str(model),
+            architecture="qwen2",
+            name="CapsModel",
+            chat_template="{{prompt}}",
+            n_ctx_train=4096,
+            reasoning_capable=False,
+            file_size=1,
+            mtime=1.0,
+        )
+        monkeypatch.setattr(
+            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
+        )
+
+        mock_session = MagicMock()
+        mock_session.post.return_value = MockResponse(
+            {"choices": [{"message": {"content": "ok"}}]}
+        )
+        monkeypatch.setattr(
+            ModelManager, "_get_session", lambda self: mock_session
+        )
+
+        proc = MagicMock()
+        proc.poll.return_value = None
+        mock_popen.return_value = proc
+
+        # caps present but no support keys -> False
+        mock_get_props = MagicMock()
+        mock_get_props.ok = True
+        mock_get_props.json.return_value = {
+            "n_ctx": 4096,
+            "chat_template_caps": {},
+        }
+        mgr = ModelManager(cfg)
+        assert mgr.load_model() is True
+        assert mgr.thinking_supported is False
+
+        # supports_thinking key -> True
+        mock_get_props.json.return_value = {
+            "n_ctx": 4096,
+            "chat_template_caps": {"supports_thinking": True},
+        }
+        mgr2 = ModelManager(cfg)
+        assert mgr2.load_model() is True
+        assert mgr2.thinking_supported is True
+
+        # supports_reasoning key (alternative name) -> True
+        mock_get_props.json.return_value = {
+            "n_ctx": 4096,
+            "chat_template_caps": {"supports_reasoning": True},
+        }
+        mgr3 = ModelManager(cfg)
+        assert mgr3.load_model() is True
+        assert mgr3.thinking_supported is True
 
 
 class TestSentenceChunkLosslessness:
@@ -1259,4 +1698,156 @@ class TestSentenceChunkLosslessness:
         assert result == text
         for v in ("1.2.2", "3.1.4", "2.0.1", "4.0.0"):
             assert v in result
+
+
+class TestMtpLoadingAndFallback:
+    """MTP CLI arguments and startup failure fallback."""
+
+    def test_mtp_cli_includes_spec_draft_p_min(self, cfg, tmp_path, monkeypatch):
+        monkeypatch.setattr("stet.llm.model_manager.WINDOWS", False)
+        monkeypatch.setattr("stet.llm.model_manager.ModelManager._warmup_prompt_cache", lambda self: None)
+
+        fake_server = tmp_path / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(b"GGUF" + b"\x00" * 2000)
+        cfg.config["model_path"] = str(model_file)
+        cfg.config["mtp_enabled"] = True
+        cfg.config["mtp_p_min"] = 0.85
+        cfg.config["mtp_max_draft"] = 3
+        cfg.config["mtp_min_draft"] = 1
+
+        mgr = ModelManager(cfg)
+        captured_cmd = []
+
+        def mock_popen(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.poll.return_value = None
+            return proc
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+
+        monkeypatch.setattr("subprocess.Popen", mock_popen)
+        monkeypatch.setattr(
+            "requests.get",
+            lambda url, **kw: mock_props_resp if "/props" in url else mock_health_resp,
+        )
+
+        assert mgr.load_model() is True
+        assert "--spec-type" in captured_cmd
+        assert "draft-mtp" in captured_cmd
+        assert "--spec-draft-p-min" in captured_cmd
+        idx = captured_cmd.index("--spec-draft-p-min")
+        assert captured_cmd[idx + 1] == "0.85"
+        max_idx = captured_cmd.index("--spec-draft-n-max")
+        assert captured_cmd[max_idx + 1] == "3"
+
+    def test_mtp_cli_uses_default_settings_3_tokens_ahead_at_075(self, cfg, tmp_path, monkeypatch):
+        monkeypatch.setattr("stet.llm.model_manager.WINDOWS", False)
+        monkeypatch.setattr("stet.llm.model_manager.ModelManager._warmup_prompt_cache", lambda self: None)
+
+        fake_server = tmp_path / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(b"GGUF" + b"\x00" * 2000)
+        cfg.config["model_path"] = str(model_file)
+        # Leave mtp_max_draft, mtp_min_draft, mtp_p_min at default
+        cfg.config["mtp_enabled"] = True
+
+        mgr = ModelManager(cfg)
+        captured_cmd = []
+
+        def mock_popen(cmd, *args, **kwargs):
+            captured_cmd.extend(cmd)
+            proc = MagicMock()
+            proc.poll.return_value = None
+            return proc
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+
+        monkeypatch.setattr("subprocess.Popen", mock_popen)
+        monkeypatch.setattr(
+            "requests.get",
+            lambda url, **kw: mock_props_resp if "/props" in url else mock_health_resp,
+        )
+
+        assert mgr.load_model() is True
+        assert "--spec-type" in captured_cmd
+        assert "draft-mtp" in captured_cmd
+        
+        max_idx = captured_cmd.index("--spec-draft-n-max")
+        assert captured_cmd[max_idx + 1] == "3"
+
+        p_min_idx = captured_cmd.index("--spec-draft-p-min")
+        assert captured_cmd[p_min_idx + 1] == "0.75"
+
+        min_idx = captured_cmd.index("--spec-draft-n-min")
+        assert captured_cmd[min_idx + 1] == "0"
+
+    def test_mtp_startup_failure_falls_back_to_non_speculative(self, cfg, tmp_path, monkeypatch):
+        monkeypatch.setattr("stet.llm.model_manager.WINDOWS", False)
+        monkeypatch.setattr("stet.llm.model_manager.ModelManager._warmup_prompt_cache", lambda self: None)
+
+        fake_server = tmp_path / "llama-server.exe"
+        fake_server.touch()
+        cfg.set("llama_server_path", str(fake_server))
+
+        model_file = tmp_path / "model.gguf"
+        model_file.write_bytes(b"GGUF" + b"\x00" * 2000)
+        cfg.config["model_path"] = str(model_file)
+        cfg.config["mtp_enabled"] = True
+        mgr = ModelManager(cfg)
+
+        cmds = []
+        attempt = [0]
+
+        def mock_popen(cmd, *args, **kwargs):
+            cmds.append(cmd)
+            proc = MagicMock()
+            if attempt[0] == 0:
+                attempt[0] += 1
+                proc.poll.return_value = 1  # exited immediately on startup
+            else:
+                proc.poll.return_value = None
+            return proc
+
+        mock_health_resp = MagicMock()
+        mock_health_resp.status_code = 200
+        mock_props_resp = MagicMock()
+        mock_props_resp.ok = True
+        mock_props_resp.json.return_value = {"n_ctx": 4096}
+
+        monkeypatch.setattr("subprocess.Popen", mock_popen)
+        monkeypatch.setattr(
+            "requests.get",
+            lambda url, **kw: mock_props_resp if "/props" in url else mock_health_resp,
+        )
+
+        logs = []
+        monkeypatch.setattr("stet.llm.model_manager.log", lambda msg: logs.append(msg))
+        monkeypatch.setattr("stet.llm.model_manager.has_nvidia", lambda: False)
+
+        assert mgr.load_model() is True
+        server_cmds = [c for c in cmds if any("llama-server" in str(x) for x in c)]
+        assert len(server_cmds) == 2
+        # First attempt had MTP args
+        assert "--spec-draft-p-min" in server_cmds[0]
+        # Fallback attempt stripped MTP args
+        assert "--spec-draft-p-min" not in server_cmds[1]
+        assert "--spec-type" not in server_cmds[1]
+        assert any("Speculative decoding failed on startup — falling back to non-speculative mode" in log_msg for log_msg in logs)
+
 

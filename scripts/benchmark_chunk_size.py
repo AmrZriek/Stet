@@ -7,9 +7,11 @@ from PyQt6.QtCore import QCoreApplication
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from dataclasses import replace
+
 from stet.core.config import ConfigManager
 from stet.llm.model_manager import ModelManager
-from stet.core.text_utils import looks_like_prose
+from stet.core.text_utils import PROFILES, looks_like_prose
 
 # Massive sample text (~600 words) with typical spelling, grammar, punctuation mistakes,
 # and some complex sentences to test context preservation.
@@ -81,9 +83,14 @@ def main():
     chunk_sizes = [30, 45, 60, 80, 100, 120, 150]
     results = []
 
+    # smart_fix maps to the full_correction profile; chunk sizes are locked in
+    # PROFILES (frozen dataclass), so sweep them via dataclasses.replace and
+    # restore the original profile afterwards.
+    _orig_profile = PROFILES["full_correction"]
+
     for size in chunk_sizes:
         print(f"--- Evaluating Chunk Size: {size} words ---")
-        cfg.set("patch_chunk_size", size)
+        PROFILES["full_correction"] = replace(_orig_profile, chunk_words=size)
         
         # Track timing
         start_time = time.time()
@@ -143,6 +150,7 @@ def main():
 
     # Unload server
     print("\nShutting down server...")
+    PROFILES["full_correction"] = _orig_profile
     manager.unload_model()
 
     # Print Final Markdown Table

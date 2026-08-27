@@ -201,26 +201,25 @@ def test_release_config_sampling_defaults():
     assert build.RELEASE_CONFIG["min_p"] == 0.0
 
 
-def test_macos_pyinstaller_cmd_bundles_no_think_template(tmp_path):
-    """The LFM 2.5 no-think chat template must ship in packaged builds.
-    macOS uses a per-file datas list, so it must be declared explicitly;
-    Windows/Linux bundle the whole stet package via --add-data, which
-    includes stet/llm/chat_templates automatically."""
+def test_macos_pyinstaller_cmd_omits_no_think_template(tmp_path):
+    """The sanitized-template override is written to the user's tempdir at
+    runtime, so build.py must NOT bundle a static no-think template anymore.
+    macOS uses a per-file datas list, so it must stay free of any
+    lfm25_no_think.jinja entry while still shipping stet.qss and logo.svg."""
     art = tmp_path / "artifacts"
     with patch("build.PLATFORM", "macOS"):
         cmd = build._pyinstaller_cmd("1.2.4", art)
-    assert any(
+    assert not any(
         "--add-data" in flag and "lfm25_no_think.jinja" in flag for flag in cmd
     )
+    assert any("stet.qss" in flag for flag in cmd)
 
 
-def test_build_declares_no_think_template_datas_entry():
-    """build.py's macOS datas tuple must include the no-think template
-    beside the existing stet.qss entry (grep-level guard for the macOS
-    explicit datas list)."""
+def test_build_no_longer_declares_no_think_template_datas_entry():
+    """build.py's macOS datas tuple must no longer reference the removed
+    no-think template (grep-level guard for the macOS explicit datas list)."""
     build_src = Path(__file__).resolve().parent.parent.joinpath("build.py").read_text(
         encoding="utf-8"
     )
-    assert "lfm25_no_think.jinja" in build_src
-    assert "chat_templates" in build_src
+    assert "lfm25_no_think" not in build_src
 

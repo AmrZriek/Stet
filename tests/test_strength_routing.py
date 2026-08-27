@@ -226,8 +226,8 @@ def test_correction_window_initial_strength_overrides_global_config(monkeypatch)
         "Emitter", (), {"emit": lambda self, *args: emitted.append(args)}
     )()
     win._start_streaming_correction = lambda *args: None
+    win._stop_load_start_monitor = lambda: None
     win._initial_strength = "rewrite_polish"
-
     CorrectionWindow._do_correction(win)
 
     assert model.calls == ["rewrite_polish"]

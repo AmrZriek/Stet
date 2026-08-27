@@ -30,8 +30,10 @@ class TestConfigMigration:
         cfg = ConfigManager()
         # Verify fresh config initializes new default keys
         assert cfg.get("show_welcome_on_startup") is True
-        assert cfg.get("chat_thinking_enabled") is True
+        assert cfg.get("chat_thinking_enabled") is False
         assert cfg.get("startup_on_login") is False
+        assert cfg.get("mtp_enabled") is True
+        assert cfg.get("chat_mtp_enabled") is True
 
     def test_migrate_existing_config_preserves_values(self, temp_config_setup):
         # Create a legacy config (no presets or welcome keys, but has startup_on_login=True)
@@ -48,7 +50,7 @@ class TestConfigMigration:
 
         # Check that missing keys were migrated
         assert cfg.get("show_welcome_on_startup") is True
-        assert cfg.get("chat_thinking_enabled") is True
+        assert cfg.get("chat_thinking_enabled") is False
 
     def test_migrate_existing_config_missing_startup_registry_true(self, temp_config_setup, monkeypatch):
         # Legacy config exists, has NO startup_on_login key

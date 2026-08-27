@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
     QSpinBox,
 )
 
-from stet.constants import MACOS
+from stet.constants import DEFAULT_CONFIG, MACOS
 from stet.core.config import ConfigManager
 from stet.ui.components import HotkeyEdit
 from stet.ui.settings_pages import (
@@ -480,6 +480,7 @@ class SettingsDialog(QDialog):
         self.chat_keep_cb.toggled.connect(self._update_chat_model_controls_state)
         self.keep_cb.toggled.connect(self._update_idle_timeout_state)
         self.model_edit.textChanged.connect(self._on_model_changed)
+        self.chat_model_edit.textChanged.connect(self._on_chat_model_changed)
 
     def set_update_action_text(self, text: str):
         self._app_update_label = text
@@ -519,6 +520,17 @@ class SettingsDialog(QDialog):
 
         if not supports_mtp:
             self.mtp_cb.setChecked(False)
+
+    def _on_chat_model_changed(self, model_path: str):
+        from stet.llm.utils import _supports_mtp
+        supports_mtp = _supports_mtp(model_path)
+
+        self.chat_mtp_cb.setEnabled(supports_mtp)
+        self.chat_mtp_max_cell.setEnabled(supports_mtp)
+        self.chat_mtp_min_cell.setEnabled(supports_mtp)
+
+        if not supports_mtp:
+            self.chat_mtp_cb.setChecked(False)
 
     def _on_nav_item_changed(self, row):
         for i in range(self.nav_list.count()):
@@ -972,17 +984,22 @@ class SettingsDialog(QDialog):
             index = self.backend_mode_combo.findData(backend_mode)
             self.backend_mode_combo.setCurrentIndex(max(index, 0))
 
+        chat_ctx_auto = self.cfg.get("chat_context_size_auto", True)
+        self.chat_ctx_auto_cb.setChecked(chat_ctx_auto)
         self.chat_ctx_spin.setValue(self.cfg.get("chat_context_size", 12800))
-        self.chat_gpu_spin.setValue(self.cfg.get("chat_gpu_layers", 99))
+        self.chat_ctx_spin.setEnabled(not chat_ctx_auto)
+        self.chat_gpu_spin.setValue(self.cfg.get("chat_gpu_layers", DEFAULT_CONFIG["chat_gpu_layers"]))
         self.chat_threads_spin.setValue(self.cfg.get("chat_threads", -1))
         self.chat_threads_batch_spin.setValue(self.cfg.get("chat_threads_batch", -1))
         self.chat_parallel_spin.setValue(self.cfg.get("chat_parallel", 1))
         self.chat_batch_spin.setValue(self.cfg.get("chat_batch_size", 1024))
         self.chat_ubatch_spin.setValue(self.cfg.get("chat_ubatch_size", 512))
         self.chat_flash_attn_cb.setChecked(self.cfg.get("chat_flash_attn", True))
-        self.chat_mtp_cb.setChecked(self.cfg.get("chat_mtp_enabled", False))
-        self.chat_mtp_max_spin.setValue(self.cfg.get("chat_mtp_max_draft", 2))
-        self.chat_mtp_min_spin.setValue(self.cfg.get("chat_mtp_min_draft", 0))
+        self.chat_kv_cache_k_combo.setCurrentText(self.cfg.get("chat_kv_cache_type_k", "q8_0"))
+        self.chat_kv_cache_v_combo.setCurrentText(self.cfg.get("chat_kv_cache_type_v", "q8_0"))
+        self.chat_mtp_cb.setChecked(self.cfg.get("chat_mtp_enabled", DEFAULT_CONFIG["chat_mtp_enabled"]))
+        self.chat_mtp_max_spin.setValue(self.cfg.get("chat_mtp_max_draft", DEFAULT_CONFIG["chat_mtp_max_draft"]))
+        self.chat_mtp_min_spin.setValue(self.cfg.get("chat_mtp_min_draft", DEFAULT_CONFIG["chat_mtp_min_draft"]))
         self.chat_rope_base_spin.setValue(self.cfg.get("chat_rope_freq_base", 0.0))
         self.chat_rope_scale_spin.setValue(self.cfg.get("chat_rope_freq_scale", 0.0))
         self.chat_temp_spin.setValue(self.cfg.get("chat_temperature", 0.8))
@@ -998,17 +1015,22 @@ class SettingsDialog(QDialog):
         self.chat_repeat_penalty_spin.setValue(self.cfg.get("chat_repeat_penalty", 1.1))
         self.chat_freq_penalty_spin.setValue(self.cfg.get("chat_frequency_penalty", 0.0))
         self.chat_pres_penalty_spin.setValue(self.cfg.get("chat_presence_penalty", 0.0))
+        ctx_auto = self.cfg.get("context_size_auto", True)
+        self.ctx_auto_cb.setChecked(ctx_auto)
         self.ctx_spin.setValue(self.cfg.get("context_size", 12800))
-        self.gpu_spin.setValue(self.cfg.get("gpu_layers", 99))
+        self.ctx_spin.setEnabled(not ctx_auto)
+        self.gpu_spin.setValue(self.cfg.get("gpu_layers", DEFAULT_CONFIG["gpu_layers"]))
         self.threads_spin.setValue(self.cfg.get("threads", -1))
         self.threads_batch_spin.setValue(self.cfg.get("threads_batch", -1))
         self.parallel_spin.setValue(self.cfg.get("parallel", 4))
-        self.batch_spin.setValue(self.cfg.get("batch_size", 2048))
-        self.ubatch_spin.setValue(self.cfg.get("ubatch_size", 512))
-        self.flash_attn_cb.setChecked(self.cfg.get("flash_attn", False))
-        self.mtp_cb.setChecked(self.cfg.get("mtp_enabled", False))
-        self.mtp_max_spin.setValue(self.cfg.get("mtp_max_draft", 2))
-        self.mtp_min_spin.setValue(self.cfg.get("mtp_min_draft", 0))
+        self.batch_spin.setValue(self.cfg.get("batch_size", DEFAULT_CONFIG["batch_size"]))
+        self.ubatch_spin.setValue(self.cfg.get("ubatch_size", DEFAULT_CONFIG["ubatch_size"]))
+        self.flash_attn_cb.setChecked(self.cfg.get("flash_attn", DEFAULT_CONFIG["flash_attn"]))
+        self.kv_cache_k_combo.setCurrentText(self.cfg.get("kv_cache_type_k", "q8_0"))
+        self.kv_cache_v_combo.setCurrentText(self.cfg.get("kv_cache_type_v", "q8_0"))
+        self.mtp_cb.setChecked(self.cfg.get("mtp_enabled", DEFAULT_CONFIG["mtp_enabled"]))
+        self.mtp_max_spin.setValue(self.cfg.get("mtp_max_draft", DEFAULT_CONFIG["mtp_max_draft"]))
+        self.mtp_min_spin.setValue(self.cfg.get("mtp_min_draft", DEFAULT_CONFIG["mtp_min_draft"]))
         self.rope_base_spin.setValue(self.cfg.get("rope_freq_base", 0.0))
         self.rope_scale_spin.setValue(self.cfg.get("rope_freq_scale", 0.0))
         self.temp_spin.setValue(self.cfg.get("temperature", 0.1))
@@ -1032,6 +1054,7 @@ class SettingsDialog(QDialog):
         self.chat_mode_combo.setCurrentIndex(0 if _chat_mode == "conversation" else 1)
         self._update_chat_model_controls_state()
         self._on_model_changed(self.model_edit.text())
+        self._on_chat_model_changed(self.chat_model_edit.text())
         # Load correction modes prompts (built-ins 0-2 only).
         # Custom modes (3+) are populated directly from cfg in CorrectionModesPage._build_ui.
         modes = self.cfg.get("correction_modes", [])
@@ -1061,6 +1084,7 @@ class SettingsDialog(QDialog):
             self.cfg.set("backend_mode", self.backend_mode_combo.currentData() or "auto")
 
         self.cfg.set("chat_context_size", self.chat_ctx_spin.value())
+        self.cfg.set("chat_context_size_auto", self.chat_ctx_auto_cb.isChecked())
         self.cfg.set("chat_gpu_layers", self.chat_gpu_spin.value())
         self.cfg.set("chat_threads", self.chat_threads_spin.value())
         self.cfg.set("chat_threads_batch", self.chat_threads_batch_spin.value())
@@ -1068,6 +1092,8 @@ class SettingsDialog(QDialog):
         self.cfg.set("chat_batch_size", self.chat_batch_spin.value())
         self.cfg.set("chat_ubatch_size", self.chat_ubatch_spin.value())
         self.cfg.set("chat_flash_attn", self.chat_flash_attn_cb.isChecked())
+        self.cfg.set("chat_kv_cache_type_k", self.chat_kv_cache_k_combo.currentText())
+        self.cfg.set("chat_kv_cache_type_v", self.chat_kv_cache_v_combo.currentText())
         self.cfg.set("chat_mtp_enabled", self.chat_mtp_cb.isChecked())
         self.cfg.set("chat_mtp_max_draft", self.chat_mtp_max_spin.value())
         self.cfg.set("chat_mtp_min_draft", self.chat_mtp_min_spin.value())
@@ -1087,6 +1113,7 @@ class SettingsDialog(QDialog):
         self.cfg.set("chat_frequency_penalty", self.chat_freq_penalty_spin.value())
         self.cfg.set("chat_presence_penalty", self.chat_pres_penalty_spin.value())
         self.cfg.set("context_size", self.ctx_spin.value())
+        self.cfg.set("context_size_auto", self.ctx_auto_cb.isChecked())
         self.cfg.set("gpu_layers", self.gpu_spin.value())
         self.cfg.set("threads", self.threads_spin.value())
         self.cfg.set("threads_batch", self.threads_batch_spin.value())
@@ -1094,6 +1121,8 @@ class SettingsDialog(QDialog):
         self.cfg.set("batch_size", self.batch_spin.value())
         self.cfg.set("ubatch_size", self.ubatch_spin.value())
         self.cfg.set("flash_attn", self.flash_attn_cb.isChecked())
+        self.cfg.set("kv_cache_type_k", self.kv_cache_k_combo.currentText())
+        self.cfg.set("kv_cache_type_v", self.kv_cache_v_combo.currentText())
         self.cfg.set("mtp_enabled", self.mtp_cb.isChecked())
         self.cfg.set("mtp_max_draft", self.mtp_max_spin.value())
         self.cfg.set("mtp_min_draft", self.mtp_min_spin.value())

@@ -284,6 +284,14 @@ class ConfigManager:
             if has_missing:
                 self._needs_save = True
 
+        # Migrate context_size_auto flags if not explicitly present
+        if "context_size_auto" not in saved:
+            cfg["context_size_auto"] = cfg.get("context_size", 12800) == 12800
+            self._needs_save = True
+        if "chat_context_size_auto" not in saved:
+            cfg["chat_context_size_auto"] = cfg.get("chat_context_size", 12800) == 12800
+            self._needs_save = True
+
         return cfg
 
     def save(self):
@@ -327,7 +335,11 @@ class ConfigManager:
                 if root in seen or not root.exists():
                     continue
                 seen.add(root)
-                found.extend(sorted(p for p in root.glob("*.gguf") if _is_valid_gguf(p)))
+                models = [
+                    p for p in root.glob("*.gguf")
+                    if _is_valid_gguf(p) and not p.name.lower().startswith(("mtp-", "mtp_", "draft-", "draft_"))
+                ]
+                found.extend(sorted(models))
             return found
 
         path = self.config.get("model_path", "")
