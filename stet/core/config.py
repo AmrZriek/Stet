@@ -1,5 +1,6 @@
 import copy
 import json
+import math
 import os
 import tempfile
 
@@ -36,6 +37,74 @@ _OLD_REWRITE_POLISH_MODE_PROMPT_V2 = (
     "sound generically formal unless the original calls for it."
 )
 
+_KNOWN_DRIFTED_THRESHOLDS = {
+    0: {0.35, 0.4, 0.55, 0.7},
+    1: {0.65, 1.0},
+    2: {0.90, 1.0},
+}
+
+
+def _is_valid_threshold(val) -> bool:
+    """Check if a threshold value is a finite number in inclusive [0.0, 1.0]."""
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return False
+    if math.isnan(val) or math.isinf(val):
+        return False
+    return 0.0 <= val <= 1.0
+
+
+def _reset_drifted_thresholds(modes: list, defaults: list) -> bool:
+    """Reset drifted or invalid hallucination_threshold values on built-in correction modes.
+
+    Iterates built-in modes only, skipping non-builtin (custom) modes.
+    Resets a mode's hallucination_threshold to the default if the current value
+    is not a finite float in [0, 1], or if it matches a known drifted value for that
+    builtin mode index.
+
+    Returns True if any threshold was reset, False otherwise.
+    """
+    if not isinstance(modes, list) or not isinstance(defaults, list):
+        return False
+
+    changed = False
+    for i, default_mode in enumerate(defaults):
+        if i >= len(modes):
+            break
+        if not isinstance(default_mode, dict):
+            continue
+        if not default_mode.get("builtin", False):
+            continue
+
+        mode = modes[i]
+        if not isinstance(mode, dict):
+            continue
+
+        # Builtin mode check: mode must not be explicitly marked non-builtin
+        is_builtin = mode.get("builtin", default_mode.get("builtin", False)) is True
+        if not is_builtin:
+            continue
+
+        default_threshold = default_mode.get("hallucination_threshold")
+        if default_threshold is None:
+            continue
+
+        current_val = mode.get("hallucination_threshold")
+        drifted_set = _KNOWN_DRIFTED_THRESHOLDS.get(i, set())
+
+        is_invalid = not _is_valid_threshold(current_val)
+        is_drifted = (
+            isinstance(current_val, (int, float))
+            and not isinstance(current_val, bool)
+            and any(math.isclose(current_val, d, rel_tol=1e-9, abs_tol=1e-9) for d in drifted_set)
+        )
+
+        if is_invalid or is_drifted:
+            if mode.get("hallucination_threshold") != default_threshold:
+                mode["hallucination_threshold"] = default_threshold
+                changed = True
+
+    return changed
+
 
 class ConfigManager:
     def __init__(self):
@@ -59,14 +128,7 @@ class ConfigManager:
         # Migrate correction mode thresholds to updated defaults
         modes = cfg.get("correction_modes", [])
         if modes and isinstance(modes, list):
-            if len(modes) > 0 and isinstance(modes[0], dict) and modes[0].get("hallucination_threshold") in (0.35, 0.4, 0.55):
-                modes[0]["hallucination_threshold"] = 0.45
-                self._needs_save = True
-            if len(modes) > 1 and isinstance(modes[1], dict) and modes[1].get("hallucination_threshold") == 0.65:
-                modes[1]["hallucination_threshold"] = 0.75
-                self._needs_save = True
-            if len(modes) > 2 and isinstance(modes[2], dict) and modes[2].get("hallucination_threshold") == 0.90:
-                modes[2]["hallucination_threshold"] = 0.97
+            if _reset_drifted_thresholds(modes, DEFAULT_CONFIG.get("correction_modes", [])):
                 self._needs_save = True
 
         # Migrate legacy model keys if chat_model_path is not in saved configuration

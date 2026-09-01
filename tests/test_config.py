@@ -132,3 +132,126 @@ class TestConfigMigration:
             else:
                 assert modes[2]["prompt"] == new_prompt
                 assert "Preserve all existing formatting" in modes[2]["prompt"]
+
+    def test_migrate_drifted_thresholds_reset_to_defaults(self, temp_config_setup):
+        """Drifted builtin thresholds [0.7, 1.0, 1.0] must be reset to [0.45, 0.75, 0.97]."""
+        drifted_data = {
+            "correction_modes": [
+                {"name": "Spelling Only", "hallucination_threshold": 0.7, "builtin": True},
+                {"name": "Full Correction", "hallucination_threshold": 1.0, "builtin": True},
+                {"name": "Rewrite & Polish", "hallucination_threshold": 1.0, "builtin": True},
+            ]
+        }
+        temp_config_setup.write_text(json.dumps(drifted_data), encoding="utf-8")
+
+        cfg = ConfigManager()
+        modes = cfg.get("correction_modes")
+        assert modes[0]["hallucination_threshold"] == 0.45
+        assert modes[1]["hallucination_threshold"] == 0.75
+        assert modes[2]["hallucination_threshold"] == 0.97
+
+    def test_custom_mode_deliberate_threshold_preserved(self, temp_config_setup):
+        """Custom (non-builtin) mode with deliberate threshold must NOT be reset."""
+        custom_data = {
+            "correction_modes": [
+                {"name": "Spelling Only", "hallucination_threshold": 0.45, "builtin": True},
+                {"name": "Full Correction", "hallucination_threshold": 0.75, "builtin": True},
+                {"name": "Rewrite & Polish", "hallucination_threshold": 0.97, "builtin": True},
+                {"name": "Custom Mode", "hallucination_threshold": 0.7, "builtin": False},
+            ]
+        }
+        temp_config_setup.write_text(json.dumps(custom_data), encoding="utf-8")
+
+        cfg = ConfigManager()
+        modes = cfg.get("correction_modes")
+        assert len(modes) >= 4
+        assert modes[3]["name"] == "Custom Mode"
+        assert modes[3]["hallucination_threshold"] == 0.7
+        assert modes[3]["builtin"] is False
+
+    def test_valid_thresholds_invariant_reload(self, temp_config_setup):
+        """Valid thresholds [0.45, 0.75, 0.97] must remain unchanged across reloads."""
+        valid_data = {
+            "correction_modes": [
+                {"name": "Spelling Only", "hallucination_threshold": 0.45, "builtin": True},
+                {"name": "Full Correction", "hallucination_threshold": 0.75, "builtin": True},
+                {"name": "Rewrite & Polish", "hallucination_threshold": 0.97, "builtin": True},
+                {"name": "Custom Mode", "hallucination_threshold": 0.85, "builtin": False},
+            ]
+        }
+        temp_config_setup.write_text(json.dumps(valid_data), encoding="utf-8")
+
+        cfg1 = ConfigManager()
+        modes1 = cfg1.get("correction_modes")
+        assert [m["hallucination_threshold"] for m in modes1[:3]] == [0.45, 0.75, 0.97]
+        assert modes1[3]["hallucination_threshold"] == 0.85
+
+        # Reloading config
+        cfg2 = ConfigManager()
+        modes2 = cfg2.get("correction_modes")
+        assert [m["hallucination_threshold"] for m in modes2[:3]] == [0.45, 0.75, 0.97]
+        assert modes2[3]["hallucination_threshold"] == 0.85
+
+    def test_invalid_non_finite_thresholds_reset_to_defaults(self, temp_config_setup):
+        """Non-finite or out-of-range thresholds on builtin modes reset to defaults."""
+        invalid_data = {
+            "correction_modes": [
+                {"name": "Spelling Only", "hallucination_threshold": -0.5, "builtin": True},
+                {"name": "Full Correction", "hallucination_threshold": 1.5, "builtin": True},
+                {"name": "Rewrite & Polish", "hallucination_threshold": "not_a_number", "builtin": True},
+            ]
+        }
+        temp_config_setup.write_text(json.dumps(invalid_data), encoding="utf-8")
+
+        cfg = ConfigManager()
+        modes = cfg.get("correction_modes")
+        assert modes[0]["hallucination_threshold"] == 0.45
+        assert modes[1]["hallucination_threshold"] == 0.75
+        assert modes[2]["hallucination_threshold"] == 0.97
+
+
+class TestResetDriftedThresholdsHelper:
+    def test_helper_returns_false_for_valid_thresholds(self):
+        from stet.constants import DEFAULT_CONFIG
+        from stet.core.config import _reset_drifted_thresholds
+
+        defaults = DEFAULT_CONFIG["correction_modes"]
+        modes = [m.copy() for m in defaults]
+        assert _reset_drifted_thresholds(modes, defaults) is False
+
+    def test_helper_resets_drifted_builtin_thresholds(self):
+        from stet.constants import DEFAULT_CONFIG
+        from stet.core.config import _reset_drifted_thresholds
+
+        defaults = DEFAULT_CONFIG["correction_modes"]
+        modes = [
+            {"name": "Spelling Only", "hallucination_threshold": 0.7, "builtin": True},
+            {"name": "Full Correction", "hallucination_threshold": 1.0, "builtin": True},
+            {"name": "Rewrite & Polish", "hallucination_threshold": 1.0, "builtin": True},
+            {"name": "Custom", "hallucination_threshold": 0.7, "builtin": False},
+        ]
+        changed = _reset_drifted_thresholds(modes, defaults)
+        assert changed is True
+        assert modes[0]["hallucination_threshold"] == 0.45
+        assert modes[1]["hallucination_threshold"] == 0.75
+        assert modes[2]["hallucination_threshold"] == 0.97
+        assert modes[3]["hallucination_threshold"] == 0.7  # preserved
+
+    def test_helper_handles_invalid_inputs(self):
+        from stet.core.config import _is_valid_threshold, _reset_drifted_thresholds
+
+        assert _is_valid_threshold(0.0) is True
+        assert _is_valid_threshold(1.0) is True
+        assert _is_valid_threshold(0.5) is True
+        assert _is_valid_threshold(-0.1) is False
+        assert _is_valid_threshold(1.1) is False
+        assert _is_valid_threshold(float("nan")) is False
+        assert _is_valid_threshold(float("inf")) is False
+        assert _is_valid_threshold(None) is False
+        assert _is_valid_threshold("0.5") is False
+        assert _is_valid_threshold(True) is False
+        assert _is_valid_threshold(False) is False
+
+        assert _reset_drifted_thresholds(None, []) is False
+        assert _reset_drifted_thresholds([], None) is False
+        assert _reset_drifted_thresholds([], []) is False
