@@ -8,6 +8,7 @@ pub mod commit;
 pub mod context_guard;
 pub mod codec;
 pub mod mod_release;
+pub mod paste_observe;
 pub mod pipe_policy;
 pub mod recovery;
 pub mod redact;
