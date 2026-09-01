@@ -21,6 +21,15 @@ pub enum InputCode {
     PasteboardChangedExternally,
     PermissionDenied,
     NotAvailable,
+    // Internal outcomes (Phase 1a taxonomy) added at the wire boundary.
+    AbortedTruncated,
+    GenerationTruncated,
+    UpgradeRequired,
+    BusyDropped,
+    AbortedIntegrity,
+    SelectionChanged,
+    SelectionUnverifiable,
+    PasteUnverified,
     Error,
 }
 
