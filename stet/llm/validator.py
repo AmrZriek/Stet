@@ -96,19 +96,44 @@ class DocumentValidator:
     def __init__(self, unit: UnitValidator | None = None):
         self._unit = unit or UnitValidator()
 
-    def validate(self, paragraphs: list[str], output: str) -> DocumentResult:
-        # Per-paragraph sub-validation: each input paragraph should be
-        # represented in the output. A missing paragraph is incomplete.
-        for para in paragraphs:
+    def build_retry_plan(self, paragraphs: list[str], output: str) -> RetryPlan:
+        """Identify paragraphs missing from the output (whitespace-normalized).
+
+        Returns a RetryPlan naming the indices to re-attempt, so the engine can
+        do chunked-retry fallback rather than rejecting the document outright.
+        """
+        missing: list[int] = []
+        for i, para in enumerate(paragraphs):
             para_norm = " ".join(para.split())
             if not para_norm:
                 continue
-            if para_norm not in output and detect_prompt_injection(output).is_injected:
-                return DocumentResult(False, "adversarial output")
+            if para_norm not in " ".join(output.split()):
+                missing.append(i)
+        return RetryPlan(missing_paragraph_indices=tuple(missing))
+
+    def validate(self, paragraphs: list[str], output: str) -> DocumentResult:
+        # Per-paragraph sub-validation: each input paragraph should be
+        # represented in the output. A missing paragraph triggers chunked-retry.
+        plan = self.build_retry_plan(paragraphs, output)
+        if plan.retryable:
+            return DocumentResult(False, f"missing paragraphs: {plan.missing_paragraph_indices}")
+        # Adversarial-output guard: prompt injection in the output is always fatal.
+        if detect_prompt_injection(output).is_injected:
+            return DocumentResult(False, "adversarial output")
         # Whole-document: output must not be a fragment of the input.
-        if output and len(output) < min(len(para) for para in paragraphs):
+        if output and len(output) < min(len(p) for p in paragraphs):
             return DocumentResult(False, "output shorter than every input paragraph")
         return DocumentResult(True, "")
+
+
+@dataclass(frozen=True)
+class RetryPlan:
+    """Which paragraphs a chunked-retry should re-attempt."""
+    missing_paragraph_indices: tuple[int, ...]
+
+    @property
+    def retryable(self) -> bool:
+        return len(self.missing_paragraph_indices) > 0
 
 
 def validate_unit(input_text: str, output: str) -> UnitResult:
