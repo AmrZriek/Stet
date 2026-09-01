@@ -14,6 +14,7 @@ pub mod redact;
 pub mod snapshot;
 pub mod session;
 pub mod target_chord;
+pub mod verify;
 pub mod dispatcher;
 pub mod focus_target;
 pub mod frame;
