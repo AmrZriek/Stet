@@ -34,7 +34,6 @@ jobs:
   test-win:
     name: Test (Windows)
     runs-on: windows-latest
-    continue-on-error: true  # pre-existing Qt GC access violation on GitHub runners
 
     steps:
       - name: Checkout repository

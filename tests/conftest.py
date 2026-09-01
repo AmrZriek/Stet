@@ -262,12 +262,26 @@ def artifact_hygiene(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _cleanup_qt_events_and_gc():
     yield
-    import gc
-    gc.collect()
+    # Process Qt events BEFORE collecting. Running gc.collect() over live
+    # QObject wrappers that Qt still owns is the root cause of the
+    # "QObject: destroyed while still in the children list" access violation:
+    # a Python wrapper is collected while the C++ side (or a parent-child
+    # relationship) still references it, leaving a dangling pointer that
+    # crashes the next processEvents(). Flushing Qt's event queue first lets
+    # pending deleteLater()/deletions complete through Qt's own teardown, so
+    # the wrappers are already detached before garbage collection runs.
     try:
         from PyQt6.QtWidgets import QApplication
         qapp = QApplication.instance()
         if qapp is not None:
+            qapp.sendPostedEvents(None, 0)
             qapp.processEvents()
+    except Exception:
+        pass
+    # gc.collect() is deferred to the end and guarded: it only runs after the
+    # Qt event queue is drained, so it cannot collect wrappers Qt still owns.
+    import gc
+    try:
+        gc.collect()
     except Exception:
         pass
