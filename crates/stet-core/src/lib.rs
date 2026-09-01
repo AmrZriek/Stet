@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod codec;
 pub mod mod_release;
 pub mod pipe_policy;
+pub mod redact;
 pub mod session;
 pub mod target_chord;
 pub mod dispatcher;
