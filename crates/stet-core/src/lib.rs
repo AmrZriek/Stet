@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod chord;
 pub mod circuit;
 pub mod clipboard;
 pub mod codec;
