@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["stet-core", "stet-uia-broker"]
+
+[workspace.package]
+edition = "2021"
+authors = ["Stet"]
+
+[profile.dev]
+panic = "abort"
