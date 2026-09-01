@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -17,16 +19,56 @@ from stet.constants import APP_DATA_DIR
 from stet.core.utils import log
 
 
+@dataclass(frozen=True, slots=True)
+class UndoToken:
+    """Single-use, RAM-only undo binding (0d).
+
+    This is the safe undo path: it never reads or writes ``history.jsonl``.
+    It carries the corrected text fingerprint and target identity hash so an
+    undo can be verified against the exact correction before pasting back.
+    """
+
+    original: str
+    corrected: str
+    target_identity_hash: str
+    replacement_fingerprint: str
+    expires_at: float
+    _consumed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def is_expired(self) -> bool:
+        return time.monotonic() > self.expires_at
+
+    def consume(self) -> bool:
+        """Mark consumed once. Returns False if already used or expired."""
+        if self._consumed or self.is_expired():
+            return False
+        object.__setattr__(self, "_consumed", True)
+        return True
+
+
 class CorrectionHistory:
-    def __init__(self, path: Optional[Path] = None, limit: int = 200, enabled: bool = True):
+    def __init__(self, path: Optional[Path] = None, limit: int = 200, enabled: bool = True,
+                 consent_granted: Optional[bool] = None):
         self._path = Path(path) if path else APP_DATA_DIR / "history.jsonl"
         self._limit = max(1, int(limit))
         self._enabled = enabled
+        # 0d: history is consent-gated. Default to NOT granted (privacy-first)
+        # unless the caller explicitly opts the user in. enabled=True alone is
+        # not enough to record; consent_granted must also be True.
+        self._consent_granted = bool(consent_granted) if consent_granted is not None else False
         self._lock = threading.Lock()
+
+    @property
+    def consent_granted(self) -> bool:
+        return self._consent_granted
+
+    def grant_consent(self) -> None:
+        self._consent_granted = True
 
     def add(self, *, mode: str, strength: str, original: str, corrected: str,
             target_app: str = "") -> Optional[str]:
-        if not self._enabled or not original or original == corrected:
+        # 0d: both the enabled flag AND explicit consent are required.
+        if not self._enabled or not self._consent_granted or not original or original == corrected:
             return None
         entry = {
             "id": uuid.uuid4().hex,

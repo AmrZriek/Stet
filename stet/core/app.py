@@ -432,10 +432,14 @@ class StetApp(QObject):
         # only one hotkey flow runs at a time.
         self._hotkey_busy = threading.Lock()
         self._last_silent_history_id: str | None = None
+        # 0d: RAM-only undo token (never writes history.jsonl). Stored for the
+        # safe undo path; consumed once and expires with the review lifecycle.
+        self._last_undo_token = None
         from stet.core.history import CorrectionHistory
         self._history = CorrectionHistory(
             limit=int(self.cfg.get("history_limit", 200)),
-            enabled=bool(self.cfg.get("history_enabled", True)),
+            enabled=bool(self.cfg.get("history_enabled", False)),
+            consent_granted=bool(self.cfg.get("history_consent_granted", False)),
         )
         self._pending_panel_strength = "full_correction"
         self._last_empty_notify_ts = 0.0
@@ -1564,6 +1568,18 @@ class StetApp(QObject):
                 original=text,
                 corrected=result,
             )
+            # 0d: store a RAM-only UndoToken for the safe undo path. This is
+            # available even when history is consent-gated OFF, and never
+            # writes history.jsonl. Single-use; expires with the lifecycle.
+            from stet.core.history import UndoToken
+            from stet.core.input import sha256_fingerprint
+            self._last_undo_token = UndoToken(
+                original=text,
+                corrected=result,
+                target_identity_hash=str(getattr(self._capture_target, "title_hash", "")),
+                replacement_fingerprint=sha256_fingerprint(result),
+                expires_at=time.monotonic() + 300,  # 5 minute undo window
+            )
             self._silent_osd_signal.emit("Silently corrected", "success_undo")
             log("[Silent] done")
 
@@ -1795,28 +1811,50 @@ class StetApp(QObject):
             QTimer.singleShot(500, _restore_if_unchanged)
 
     def _undo_correction(self, entry_id: str):
-        """Paste the entry's original text back over the corrected text."""
-        entry = self._history.get(entry_id)
-        if not entry or entry.get("undone"):
-            return
+        """Paste the original text back via the RAM UndoToken (preferred, 0d).
+
+        The safe undo path uses the single-use, RAM-only ``UndoToken`` and never
+        touches history.jsonl — protecting against wrong-window paste and the
+        privacy boundary. When no token is available, it falls back to the
+        history.jsonl entry only if the user has consented to history.
+        """
+        # 0d: prefer the RAM UndoToken. It is single-use and expires.
+        token = getattr(self, "_last_undo_token", None)
+        if token is not None:
+            if not token.consume():
+                self._silent_osd_signal.emit("Undo no longer available", "warning")
+                return
+            original = token.original
+            corrected = token.corrected
+            entry = None
+        else:
+            # Fallback: history.jsonl lookup ONLY when consent is granted.
+            if not getattr(self._history, "consent_granted", False):
+                return
+            entry = self._history.get(entry_id)
+            if not entry or entry.get("undone"):
+                return
+            original = entry["original"]
+            corrected = entry["corrected"]
 
         def _worker():
             try:
                 if MACOS:
                     if self._mac_selection_target is not None:
                         self._mac_input.paste_text(
-                            entry["original"],
+                            original,
                             self._mac_selection_target,
                             self._mac_clipboard_snapshot,
                         )
                 else:
-                    self._safe_copy(entry["original"])
+                    self._safe_copy(original)
                     time.sleep(0.12)
                     _send_ctrl_chord(VK_V)
                     time.sleep(0.08)
                     time.sleep(0.5)
-                    self._safe_copy(self._old_clip or entry["corrected"])
-                self._history.mark_undone(entry_id)
+                    self._safe_copy(self._old_clip or corrected)
+                if entry is not None:
+                    self._history.mark_undone(entry_id)
                 self._silent_osd_signal.emit("Correction undone", "success")
             except Exception as e:
                 log(f"[Undo] failed: {e}")

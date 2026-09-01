@@ -321,7 +321,7 @@ DEFAULT_CONFIG: dict = {
     # Correction delivery: always "patch" (stream mode removed from settings UI)
     "correction_method": "patch",
     # Correction history (local-only record for undo and review)
-    "history_enabled": True,
+    "history_enabled": False,
     "history_limit": 200,
     # Word-count threshold above which selecting more text triggers a
     # large-document warning instead of an automatic correction.
