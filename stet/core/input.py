@@ -334,3 +334,49 @@ class TargetToken:
             return False
         object.__setattr__(self, "_consumed", True)
         return True
+
+def capture_compound_identity() -> CompoundIdentity:
+    """Capture the foreground window's compound identity on Windows.
+
+    Returns a CompoundIdentity capturing HWND, PID, session ID, window class,
+    and a hash of the window title. On non-Windows platforms, or when the
+    Win32 calls are unavailable, returns a safe no-op identity (zeros).
+    """
+    try:
+        import sys as _sys
+        if _sys.platform != "win32":
+            return CompoundIdentity(0, 0, 0, 0, "", "")
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetForegroundWindow() or 0)
+        if not hwnd:
+            return CompoundIdentity(0, 0, 0, 0, "", "")
+
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(wintypes.HWND(hwnd), ctypes.byref(pid))
+
+        klass = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(wintypes.HWND(hwnd), klass, 256)
+        title = ctypes.create_unicode_buffer(512)
+        user32.GetWindowTextW(wintypes.HWND(hwnd), title, 512)
+        title_hash = hashlib.sha256(title.value.encode("utf-8")).hexdigest()
+
+        session_id = 0
+        try:
+            import _winapi
+            session_id = int(_winapi.ProcessIdToSessionId(pid.value))
+        except Exception:
+            pass
+
+        return CompoundIdentity(
+            hwnd=hwnd,
+            pid=int(pid.value),
+            process_creation_time=0,
+            session_id=session_id,
+            window_class=klass.value,
+            title_hash=title_hash,
+        )
+    except Exception:
+        return CompoundIdentity(0, 0, 0, 0, "", "")

@@ -123,3 +123,14 @@ def test_target_token_expired():
     tok = TargetToken(capture=capture, replacement_fingerprint="repl", expires_at=time.monotonic() - 1)
     assert tok.is_expired()
     assert tok.consume() is False  # expired -> cannot consume
+
+
+def test_capture_compound_identity_returns_type():
+    """A no-op/unsupported platform identity must still be a CompoundIdentity."""
+    from stet.core.input import CompoundIdentity, capture_compound_identity
+    ident = capture_compound_identity()
+    assert isinstance(ident, CompoundIdentity)
+    assert hasattr(ident, "hwnd")
+    assert hasattr(ident, "pid")
+    assert hasattr(ident, "window_class")
+    assert hasattr(ident, "title_hash")
