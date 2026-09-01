@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod circuit;
+pub mod clipboard;
 pub mod codec;
 pub mod mod_release;
 pub mod dispatcher;
