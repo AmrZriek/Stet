@@ -80,6 +80,7 @@ if WINDOWS:
         "ExcludeClipboardContentFromClipboardHistory"
     )
     _fmt_cloud = _user32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+    _fmt_cloud_upload = _user32.RegisterClipboardFormatW("CanUploadToCloudClipboard")
 
     _kernel32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
     _kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
@@ -139,6 +140,24 @@ def _clipboard_read_text() -> str:
         _user32.CloseClipboard()
 
 
+def _set_cloud_suppression():
+    if not WINDOWS or not _fmt_cloud_upload:
+        return
+    h = _kernel32.GlobalAlloc(GMEM_MOVEABLE, 4)
+    if not h:
+        return
+    ptr = _kernel32.GlobalLock(h)
+    if ptr:
+        try:
+            ctypes.memset(ptr, 0, 4)
+        finally:
+            _kernel32.GlobalUnlock(h)
+        if not _user32.SetClipboardData(_fmt_cloud_upload, h):
+            _kernel32.GlobalFree(h)
+    else:
+        _kernel32.GlobalFree(h)
+
+
 def _clipboard_write_text(text: str) -> None:
     """Write text to the system clipboard as CF_UNICODETEXT (UTF-16-LE).
 
@@ -191,6 +210,7 @@ def _clipboard_write_text(text: str) -> None:
                         _kernel32.GlobalFree(h_cloud)
                 else:
                     _kernel32.GlobalFree(h_cloud)
+        _set_cloud_suppression()
     finally:
         _user32.CloseClipboard()
 

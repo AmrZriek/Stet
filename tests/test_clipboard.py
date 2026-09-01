@@ -257,3 +257,11 @@ def test_send_ctrl_shift_chord_releases_held_alt_win(monkeypatch):
     assert n_inputs == 7  # 1 (Alt UP) + 6 (Ctrl+Shift+C chord)
     assert arr[0].ki.wVk == clip.VK_MENU
     assert arr[0].ki.dwFlags == clip.KEYEVENTF_KEYUP
+
+
+def test_registers_cloud_suppression_format():
+    import stet.core.clipboard as cb
+
+    name = cb._fmt_cloud_upload
+    assert name is not None
+    assert isinstance(name, int) or isinstance(name, ctypes.c_uint)
