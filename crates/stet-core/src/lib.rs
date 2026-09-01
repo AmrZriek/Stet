@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod circuit;
 pub mod codec;
 pub mod mod_release;
 pub mod dispatcher;
