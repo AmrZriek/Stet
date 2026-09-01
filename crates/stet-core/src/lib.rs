@@ -5,6 +5,7 @@ pub mod chord;
 pub mod circuit;
 pub mod clipboard;
 pub mod commit;
+pub mod context_guard;
 pub mod codec;
 pub mod mod_release;
 pub mod pipe_policy;
