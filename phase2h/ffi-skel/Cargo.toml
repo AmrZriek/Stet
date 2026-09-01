@@ -1,0 +1,12 @@
+[package]
+name = "ffi-skel"
+version = "0.1.0"
+edition = "2021"
+authors = ["Stet"]
+description = "Phase 2h raw Win32 FFI skeleton: provable extern surface + layout/smoke tests"
+
+[dependencies]
+
+[features]
+default = []
+lab = []
