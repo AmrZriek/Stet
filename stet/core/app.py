@@ -1260,11 +1260,18 @@ class StetApp(QObject):
         # UIA calls are COM-based and can deadlock if the target app's UI
         # thread is frozen. Use a daemon worker and a bounded join; executor
         # shutdown waits for workers and would nullify the timeout.
-        uia_result: queue.Queue[str] = queue.Queue(maxsize=1)
+        uia_result: queue.Queue[str | None] = queue.Queue(maxsize=1)
 
         def _capture_uia_worker() -> None:
             try:
-                uia_result.put_nowait(_read_selection_uia() or "")
+                # 0c: use the structured capture so truncation/whitespace
+                # metadata is available; preserve the exact text (no strip).
+                from stet.core.clipboard import _read_selection_uia_struct
+                cap = _read_selection_uia_struct()
+                uia_result.put_nowait(cap.text if cap else "")
+                if cap is not None:
+                    self._last_capture_truncated = cap.truncated
+                    self._last_capture_newline_normalized = cap.newline_normalized
             except Exception as e:
                 log(f"[Capture] UIA capture failed: {e}")
                 try:
@@ -1284,12 +1291,14 @@ class StetApp(QObject):
             uia_text = ""
         else:
             try:
-                uia_text = uia_result.get_nowait()
+                uia_text = uia_result.get_nowait() or ""
             except queue.Empty:
                 uia_text = ""
 
         if uia_text:
             log(f"[Capture] Direct UIA capture succeeded: {uia_text[:80]!r}")
+            if getattr(self, "_last_capture_truncated", False):
+                log("[Capture] WARNING: selection truncated at MAX_TEXT_LENGTH")
             self._old_clip = self._safe_paste()
             return uia_text
 

@@ -1,4 +1,5 @@
 import time
+from dataclasses import dataclass
 
 from stet.constants import WINDOWS
 
@@ -14,6 +15,32 @@ KEYEVENTF_KEYUP = 0x0002
 INPUT_KEYBOARD = 1
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+
+# Maximum text length UIA will request in one GetText call. Selections at or
+# beyond this limit are flagged as truncated so the caller can warn the user
+# instead of silently correcting partial text (Task 0c).
+MAX_TEXT_LENGTH = 50000
+
+
+@dataclass(frozen=True, slots=True)
+class UiaCapture:
+    """Structured result of a UI Automation text capture.
+
+    text: exact captured text (never stripped or collapsed)
+    truncated: True when the selection hit MAX_TEXT_LENGTH
+    selection_range_count: number of selection text ranges (multi-range docs)
+    document_range_match: True when the selection matches the document range
+    newline_normalized: True when CRLF/CR were converted to LF in the canonical
+        view (0c). The raw text is preserved; only the canonical fingerprint
+        normalizes line-endings.
+    """
+
+    text: str
+    truncated: bool
+    selection_range_count: int
+    document_range_match: bool
+    newline_normalized: bool
+
 
 import ctypes
 
@@ -323,14 +350,17 @@ def release_com_ptr(ptr_val):
             pass
 
 
-def _read_selection_uia() -> str | None:
+def _read_selection_uia_struct() -> UiaCapture | None:
     """Read the currently selected text via UI Automation, bypassing the clipboard.
 
-    Returns the text if successful, or None on any failure (in which case the
-    caller falls back to clipboard capture).
+    Returns a structured ``UiaCapture`` (text + integrity metadata), or None on
+    any failure (in which case the caller falls back to clipboard capture). The
+    ``truncated`` flag is set when the selection reaches ``MAX_TEXT_LENGTH`` so
+    the caller can warn instead of silently correcting partial text (0c).
     """
     if not WINDOWS:
         return None
+
 
     co_init = False
     # COINIT_MULTITHREADED = 0
@@ -399,6 +429,7 @@ def _read_selection_uia() -> str | None:
         )
         if hr < 0 or length.value <= 0:
             return None
+        selection_range_count = int(length.value)
 
         # 6. Get first text range
         hr = call_com_method(
@@ -412,7 +443,6 @@ def _read_selection_uia() -> str | None:
             return None
 
         # 7. Get text from range
-        MAX_TEXT_LENGTH = 50000
         hr = call_com_method(
             p_range.value,
             12,  # GetText
@@ -446,4 +476,26 @@ def _read_selection_uia() -> str | None:
             except Exception:
                 pass
 
-    return result_text
+    if not result_text:
+        return None
+    truncated = len(result_text) >= MAX_TEXT_LENGTH
+    newline_normalized = "\r\n" in result_text or "\r" in result_text
+    return UiaCapture(
+        text=result_text,
+        truncated=truncated,
+        selection_range_count=selection_range_count,
+        document_range_match=True,
+        newline_normalized=newline_normalized,
+    )
+
+
+def _read_selection_uia() -> str | None:
+    """Backward-compatible wrapper returning only the captured text (or None).
+
+    Existing callers and tests use the text-returning form; the structured
+    ``_read_selection_uia_struct`` is preferred for new code (0c).
+    """
+    cap = _read_selection_uia_struct()
+    if cap is None:
+        return None
+    return cap.text

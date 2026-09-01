@@ -1316,10 +1316,11 @@ class TestStetAppCaptureSelection:
         monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         
-        # Monkeypatch UIA reader and terminal guard
+        # Monkeypatch the structured UIA reader and terminal guard (0c)
+        from stet.core.clipboard import UiaCapture
         monkeypatch.setattr(
-            "stet.core.clipboard._read_selection_uia",
-            lambda: "uia selected text"
+            "stet.core.clipboard._read_selection_uia_struct",
+            lambda: UiaCapture(text="uia selected text", truncated=False, selection_range_count=1, document_range_match=True, newline_normalized=False)
         )
         mock_terminal_guard = MagicMock()
         monkeypatch.setattr("stet.core.app._is_terminal_or_ide", mock_terminal_guard)
@@ -1340,7 +1341,7 @@ class TestStetAppCaptureSelection:
         app = StetApp()
 
         monkeypatch.setattr(
-            "stet.core.clipboard._read_selection_uia",
+            "stet.core.clipboard._read_selection_uia_struct",
             lambda: None
         )
         mock_terminal_guard = MagicMock(return_value=True)
@@ -1367,7 +1368,7 @@ class TestStetAppCaptureSelection:
         app = StetApp()
 
         monkeypatch.setattr(
-            "stet.core.clipboard._read_selection_uia",
+            "stet.core.clipboard._read_selection_uia_struct",
             lambda: None
         )
         monkeypatch.setattr("stet.core.app._is_terminal_or_ide", MagicMock(return_value=True))
@@ -1393,7 +1394,7 @@ class TestStetAppCaptureSelection:
         app = StetApp()
 
         monkeypatch.setattr(
-            "stet.core.clipboard._read_selection_uia",
+            "stet.core.clipboard._read_selection_uia_struct",
             lambda: None
         )
         monkeypatch.setattr("stet.core.app._is_terminal_or_ide", MagicMock(return_value=True))
@@ -1422,7 +1423,7 @@ class TestStetAppCaptureSelection:
         app = StetApp()
 
         monkeypatch.setattr(
-            "stet.core.clipboard._read_selection_uia",
+            "stet.core.clipboard._read_selection_uia_struct",
             lambda: None
         )
         monkeypatch.setattr("stet.core.app._is_terminal_or_ide", MagicMock(return_value=True))
@@ -1448,7 +1449,7 @@ class TestStetAppCaptureSelection:
         app = StetApp()
         
         monkeypatch.setattr(
-            "stet.core.clipboard._read_selection_uia",
+            "stet.core.clipboard._read_selection_uia_struct",
             lambda: None
         )
         mock_terminal_guard = MagicMock(return_value=False)
@@ -1496,7 +1497,7 @@ class TestStetAppCaptureSelection:
                 return True
 
         monkeypatch.setattr("stet.core.app.threading.Thread", HangingThread)
-        monkeypatch.setattr("stet.core.clipboard._read_selection_uia", lambda: None)
+        monkeypatch.setattr("stet.core.clipboard._read_selection_uia_struct", lambda: None)
         monkeypatch.setattr("stet.core.app._is_terminal_or_ide", MagicMock(return_value=False))
         monkeypatch.setattr("time.sleep", lambda t: None)
         app._safe_paste = MagicMock(side_effect=["old clip", "", "fallback selection"])
