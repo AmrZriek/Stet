@@ -7,6 +7,7 @@ pub mod commit;
 pub mod codec;
 pub mod mod_release;
 pub mod pipe_policy;
+pub mod recovery;
 pub mod redact;
 pub mod session;
 pub mod target_chord;
