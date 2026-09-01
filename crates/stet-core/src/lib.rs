@@ -4,6 +4,7 @@ pub mod circuit;
 pub mod clipboard;
 pub mod codec;
 pub mod mod_release;
+pub mod session;
 pub mod dispatcher;
 pub mod frame;
 pub mod hotkey;
