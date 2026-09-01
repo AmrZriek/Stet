@@ -9,6 +9,7 @@ pub mod pipe_policy;
 pub mod session;
 pub mod target_chord;
 pub mod dispatcher;
+pub mod focus_target;
 pub mod frame;
 pub mod hotkey;
 pub mod handshake;
