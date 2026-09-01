@@ -13,6 +13,7 @@ pub mod recovery;
 pub mod redact;
 pub mod snapshot;
 pub mod session;
+pub mod sticky_keys;
 pub mod target_chord;
 pub mod verify;
 pub mod dispatcher;
