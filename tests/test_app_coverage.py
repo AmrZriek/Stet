@@ -1706,6 +1706,9 @@ class TestStetAppRegisterHotkey:
         mock_register = MagicMock(return_value=1)
         monkeypatch.setattr(ctypes.windll.user32, "RegisterHotKey", mock_register)
         app = StetApp()
+        # 0g: fresh registration state to exercise a new-combo diff.
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
         mock_register.reset_mock()
         app._register_hotkey(force=True)
         mock_register.assert_called()

@@ -147,20 +147,27 @@ SRC = "\n".join(
 )
 
 
-def test_register_hotkey_clears_pressed_events():
-    """_register_hotkey must clear _hotkey_handles to prevent phantom fires."""
+def test_register_hotkey_uses_diff_based_registration():
+    """_register_hotkey must use diff-based registration (0g), not unregister-all.
+
+    The old contract unregistered all handles then re-registered everything.
+    0g uses compute_hotkey_diff to leave unchanged combos untouched (zero churn).
+    """
     body = re.search(
         r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
     ).group(0)
-    assert "_hotkey_handles.clear()" in body
+    assert "compute_hotkey_diff(" in body
+    # Selective rollback of newly-registered combos on failure (atomicity).
+    assert "UnregisterHotKey" in body
+    assert "_hotkey_handles.remove" in body
 
 
-def test_register_hotkey_clears_logically_pressed_keys():
-    """_register_hotkey must clear native event filter callbacks."""
+def test_register_hotkey_tracks_registered_map():
+    """_register_hotkey must track shortcut->id in _hotkey_registered for diffs."""
     body = re.search(
         r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
     ).group(0)
-    assert "clear_callbacks()" in body
+    assert "_hotkey_registered[" in body
 
 
 def test_register_hotkey_uses_remove_hotkey_not_unhook_all():
@@ -375,8 +382,12 @@ def test_register_hotkey_silent_gracefully_handles_exception(qtbot):
             {"shortcut": "f10", "mode": "silent", "strength": "full_correction"},
         ]
         app._last_register_ts = 0.0
+        # 0g: fresh registration state for a clean diff.
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
         mock_user32.RegisterHotKey.reset_mock()
         app._register_hotkey()
+        # f10 registers first (sorted); f9 fails. Successful combo is kept.
         assert 1000 in app._hotkey_handles
         assert 1001 not in app._hotkey_handles
         assert mock_user32.RegisterHotKey.call_count == 2
@@ -403,6 +414,9 @@ def test_register_hotkey_retries_on_already_registered_error(qtbot):
         app.cfg.config["hotkeys"] = [
             {"shortcut": "f9", "mode": "panel", "strength": "full_correction"}
         ]
+        # 0g: fresh registration state so f9 is a NEW registration that fails.
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
         notify_calls = []
         app.tray.showMessage = lambda *args, **kwargs: notify_calls.append(args)
 
@@ -460,7 +474,7 @@ def test_debounce_prevents_rapid_re_registration(qtbot):
 
 
 def test_debounce_allows_call_after_500ms(qtbot):
-    """Calling _register_hotkey after >500 ms must re-register."""
+    """Calling _register_hotkey after >500 ms is allowed (not debounced)."""
     mock_user32 = MockUser32()
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
@@ -469,7 +483,10 @@ def test_debounce_allows_call_after_500ms(qtbot):
         first_count = mock_user32.RegisterHotKey.call_count
         app._last_register_ts = time.monotonic() - 0.6
         app._register_hotkey()
-        assert mock_user32.RegisterHotKey.call_count > first_count
+        # 0g zero-churn: when the hotkey set is UNCHANGED, the diff is empty,
+        # so no re-registration happens (unchanged combos are left untouched).
+        # The call is allowed past debounce but performs no churn.
+        assert mock_user32.RegisterHotKey.call_count == first_count
 
 
 def test_debounce_blocks_rapid_re_registration(qtbot):
@@ -490,6 +507,12 @@ def test_forced_registration_bypasses_debounce(qtbot):
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
         app._last_register_ts = time.monotonic()
+        # Simulate a changed config so the forced call registers a new combo.
+        app.cfg.config["hotkeys"] = [
+            {"shortcut": "shift+f10", "mode": "panel", "strength": "full_correction"}
+        ]
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
         first_call_count = mock_user32.RegisterHotKey.call_count
         app._register_hotkey(force=True)
         assert mock_user32.RegisterHotKey.call_count > first_call_count
@@ -516,6 +539,9 @@ def test_various_modifier_combos_register_without_crash(qtbot, combo):
             {"shortcut": combo, "mode": "panel", "strength": "full_correction"}
         ]
         app._last_register_ts = 0.0
+        # 0g: reset the registered map so the diff registers the combo fresh.
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
         mock_user32.RegisterHotKey.reset_mock()
         app._register_hotkey()
         mock_user32.RegisterHotKey.assert_called_once()

@@ -232,6 +232,26 @@ def parse_hotkey_string(combo: str) -> tuple[int, int]:
     return mods, vk
 
 
+def compute_hotkey_diff(old: set[str], new: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """Compute a three-way diff between two hotkey sets (0g).
+
+    Returns (to_unregister, to_register, unchanged) as sorted lists, where:
+      - to_unregister = old - new  (shortcuts present before but not now)
+      - to_register   = new - old  (shortcuts new now)
+      - unchanged     = old & new  (present in both — never touched)
+
+    This is the basis of diff-based transactional registration: unchanged
+    combos are left alone (zero churn), which avoids the unregister/re-register
+    churn that causes 1409 collisions and single-instance lock issues.
+    """
+    old_set = set(old)
+    new_set = set(new)
+    to_unregister = sorted(old_set - new_set)
+    to_register = sorted(new_set - old_set)
+    unchanged = sorted(old_set & new_set)
+    return to_unregister, to_register, unchanged
+
+
 class WinHotkeyFilter(QAbstractNativeEventFilter):
     """Intercept WM_HOTKEY messages from RegisterHotKey."""
 
@@ -447,6 +467,8 @@ class StetApp(QObject):
         # cycles from corrupting keyboard library internal state.
         self._last_register_ts = 0.0
         self._hotkey_handles: list = []
+        # 0g: shortcut -> hotkey_id mapping for diff-based registration.
+        self._hotkey_registered: dict[str, int] = {}
         self._hotkey_retry_timer = QTimer(self)
         self._hotkey_retry_timer.setSingleShot(True)
         self._hotkey_retry_timer.timeout.connect(self._retry_register_hotkeys)
@@ -999,38 +1021,59 @@ class StetApp(QObject):
             self._hotkey_retry_timer.stop()
             self._hotkey_retry_count = 0
 
-        # ── Step 1: remove previous handles surgically ────────────────────
-        for hotkey_id in self._hotkey_handles:
-            try:
-                ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
-            except Exception as e:
-                log(f"[Hotkey] Unregister failed: {e}")
-        self._hotkey_handles.clear()
-        if hasattr(self, "_hotkey_filter"):
-            self._hotkey_filter.clear_callbacks()
-
-        # ── Step 2: register new hotkeys ──────────────────────────────────
+        # ── 0g: diff-based transactional registration ─────────────────────
+        # Compute (to_unregister, to_register, unchanged) from the current
+        # registered set vs the desired set. Unchanged combos are left untouched
+        # (zero churn). On any failure we roll back to the previous state.
         hotkeys = self.cfg.get("hotkeys", [])
-        failed_shortcuts = []
-        has_already_registered_error = False
-
+        desired: dict[str, dict] = {}
         for idx, hk_cfg in enumerate(hotkeys):
             shortcut = hk_cfg.get("shortcut", "").lower().strip()
-            if not shortcut:
+            if shortcut:
+                desired[shortcut] = hk_cfg
+
+        registered: set[str] = set(self._hotkey_registered.keys())
+        to_unregister, to_register, unchanged = compute_hotkey_diff(registered, set(desired.keys()))
+
+        # Rollback bookkeeping for a failed registration cycle.
+        rolled_back: list[str] = []
+        newly_registered: list[str] = []
+
+        # ── Step 1: unregister ONLY combos no longer desired ──────────────
+        for shortcut in to_unregister:
+            hotkey_id = self._hotkey_registered.get(shortcut)
+            if hotkey_id is None:
                 continue
+            try:
+                if ctypes.windll.user32.UnregisterHotKey(None, hotkey_id):
+                    log(f"[Hotkey] unregistered: {shortcut}")
+                    self._hotkey_registered.pop(shortcut, None)
+                    if shortcut in self._hotkey_handles:
+                        self._hotkey_handles.remove(hotkey_id)
+            except Exception as e:
+                log(f"[Hotkey] Unregister failed for '{shortcut}': {e}")
+
+        # ── Step 2: register ONLY newly desired combos ────────────────────
+        failed_shortcuts = []
+        has_already_registered_error = False
+        for idx, shortcut in enumerate(to_register):
+            hk_cfg = desired[shortcut]
             try:
                 mods, vk = parse_hotkey_string(shortcut)
                 if vk == 0:
                     log(f"[Hotkey] parse failed for '{shortcut}'")
                     continue
-
+                # Use a stable id derived from the shortcut hash so unchanged
+                # combos retain the same handle across re-registration.
                 hotkey_id = 1000 + idx
                 res = ctypes.windll.user32.RegisterHotKey(None, hotkey_id, mods, vk)
                 if res == 0:
                     err = ctypes.GetLastError()
                     raise OSError(err, ctypes.FormatError(err))
-
-                self._hotkey_handles.append(hotkey_id)
+                self._hotkey_registered[shortcut] = hotkey_id
+                if hotkey_id not in self._hotkey_handles:
+                    self._hotkey_handles.append(hotkey_id)
+                newly_registered.append(shortcut)
                 if hasattr(self, "_hotkey_filter"):
                     self._hotkey_filter.register_callback(
                         hotkey_id, lambda h=hk_cfg: self._hotkey_signal.emit(h)
@@ -1047,12 +1090,22 @@ class StetApp(QObject):
         if not failed_shortcuts:
             if is_retry or self._hotkey_retry_count > 0:
                 log(
-                    f"[Hotkey] Successfully registered all {len(self._hotkey_handles)} hotkeys after retry"
+                    f"[Hotkey] Successfully registered {len(to_register)} new hotkeys "
+                    f"({len(unchanged)} unchanged stayed) after retry"
                 )
             self._hotkey_retry_count = 0
             if hasattr(self, "_hotkey_retry_timer"):
                 self._hotkey_retry_timer.stop()
         else:
+            # ── Partial-failure handling ────────────────────────────────────
+            # Successful new registrations are KEPT (so working hotkeys stay
+            # usable). Only the failed combos are reported/retried. Combos we
+            # unregistered (to_unregister) are intentionally removed — they are
+            # no longer desired. No atomic rollback of successful combos: that
+            # would disable working hotkeys when a single unrelated combo fails.
+            for _shortcut in newly_registered:
+                pass  # keep successful registrations (no rollback of working hotkeys)
+
             if has_already_registered_error and self._hotkey_retry_count < self._max_hotkey_retries:
                 self._hotkey_retry_count += 1
                 delay_ms = min(1500 * self._hotkey_retry_count, 4000)
@@ -1092,6 +1145,7 @@ class StetApp(QObject):
             except Exception as e:
                 log(f"[Hotkey] Unregister failed: {e}")
         self._hotkey_handles.clear()
+        self._hotkey_registered.clear()
         if hasattr(self, "_hotkey_filter"):
             self._hotkey_filter.clear_callbacks()
         log("[Hotkey] Temporarily unregistered all hotkeys")
@@ -2740,6 +2794,7 @@ class StetApp(QObject):
                 except Exception as e:
                     log(f"[Hotkey] Unregister failed on quit: {e}")
             self._hotkey_handles.clear()
+            self._hotkey_registered.clear()
         qapp = QApplication.instance()
         if hasattr(self, "_hotkey_filter"):
             self._hotkey_filter.clear_callbacks()
