@@ -7,7 +7,9 @@ PyObjC installed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import time
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Generic, Optional, Protocol, Sequence, Tuple, TypeVar
 
@@ -254,3 +256,81 @@ class NullInputBackend:
 
     def close(self) -> None:
         return None
+
+
+def sha256_fingerprint(text: str) -> str:
+    """SHA-256 hex digest of a string's UTF-8 bytes.
+
+    Used for both the raw (exact) and canonical selection fingerprints per the
+    0b fingerprint contract. Deterministic; never mutates the input.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical_selection(text: str) -> str:
+    """Canonicalize a selection for cross-source verification.
+
+    Changes ONLY CRLF/CR to LF. It never strips leading/trailing whitespace,
+    never collapses internal whitespace, never applies Unicode normalization,
+    and never mutates the text shown to the user.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+@dataclass(frozen=True)
+class CompoundIdentity:
+    """Compounded, platform-neutral target identity captured at hotkey trigger.
+
+    Captured before capture begins so the paste can verify the same target
+    still owns the foreground (tiered matching). On non-Windows platforms the
+    HWND/session fields may be 0/unsupported — a valid no-op identity.
+    """
+
+    hwnd: int
+    pid: int
+    process_creation_time: int
+    session_id: int
+    window_class: str
+    title_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionCapture:
+    """A captured selection with its target identity and fingerprints.
+
+    Stores BOTH the raw (exact) and canonical fingerprints per the 0b contract.
+    """
+
+    text: str
+    target: CompoundIdentity
+    raw_selection_fingerprint: str
+    selection_fingerprint: str
+    capture_source: str
+    fingerprint_policy: str
+    newline_policy: str
+    session_mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class TargetToken:
+    """Single-use, expiry-bound paste token binding a correction to its target.
+
+    A token is created after capture and consumed exactly once, either at paste
+    time (hard-identity match) or abandoned when the review/undo lifecycle ends.
+    """
+
+    capture: SelectionCapture
+    replacement_fingerprint: str
+    expires_at: float
+    version: str = "v1"
+    _consumed: bool = field(default=False, init=False, repr=False, compare=False)
+
+    def is_expired(self) -> bool:
+        return time.monotonic() > self.expires_at
+
+    def consume(self) -> bool:
+        """Atomically mark consumed once. Returns False if already used/expired."""
+        if self._consumed or self.is_expired():
+            return False
+        object.__setattr__(self, "_consumed", True)
+        return True
