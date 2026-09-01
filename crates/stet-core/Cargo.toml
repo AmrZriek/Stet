@@ -11,5 +11,6 @@ thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 sha2 = "0.10"
 hmac = "0.12"
+base64 = "0.22"
 
 [dev-dependencies]
