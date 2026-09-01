@@ -45,7 +45,7 @@ from stet.core.clipboard import (
     _send_ctrl_shift_chord,
 )
 from stet.core.config import ConfigManager
-from stet.core.input import HotkeySpec, InputCode, PermissionStatus
+from stet.core.input import HotkeySpec, InputCode, PermissionStatus, capture_compound_identity
 from stet.core.utils import _release_zip_asset, friendly_name, log
 from stet.llm.model_manager import ModelManager
 from stet.llm.utils import _find_shipped_llama_server
@@ -418,6 +418,9 @@ class StetApp(QObject):
         self._status_lbl = QLabel("● AC: Offline")
         self._chat_status_lbl = QLabel("● Chat: Offline")
         self._old_clip = ""
+        # Compound target identity captured at hotkey trigger (0b) — used for
+        # tiered matching at paste time to prevent wrong-window pastes.
+        self._capture_target = None
         self._mac_input = MacOSInputBackend() if MACOS else None
         self._mac_input_monitoring_requested = False
         self._mac_selection_target = None
@@ -1105,6 +1108,31 @@ class StetApp(QObject):
             return
         _clipboard_write_text(text)
 
+    def _foreground_identity_matches(self) -> bool:
+        """True iff the current foreground identity still matches _capture_target (0b).
+
+        On Windows (HWND available) this compares the live foreground HWND/PID
+        against the snapshot taken at capture time. If no snapshot exists (e.g.
+        non-Windows, no capture), it returns True (do not block paste) so the
+        existing flow is unchanged. Returns False only on a confirmed mismatch.
+        """
+        target = getattr(self, "_capture_target", None)
+        if target is None:
+            return True
+        try:
+            current = capture_compound_identity()
+        except Exception:
+            return True
+        # Trust the strongest signal available: HWND+pid. If both are zero
+        # (unsupported/no-op identity), defer to the existing flow.
+        if target.hwnd == 0 and target.pid == 0:
+            return True
+        if current.hwnd and target.hwnd and current.hwnd != target.hwnd:
+            return False
+        if current.pid and target.pid and current.pid != target.pid:
+            return False
+        return True
+
     def _restore_macos_clipboard(self):
         """Return clipboard fallback captures to their prior multi-format state."""
 
@@ -1210,6 +1238,11 @@ class StetApp(QObject):
         Saves the previous clipboard content to self._old_clip and restores it
         only when no selection is found.
         """
+        # 0b: snapshot the foreground compound identity BEFORE capture, so the
+        # paste path can verify the same target still owns the foreground and
+        # discard if ownership changed during capture (wrong-window protection).
+        target_identity = capture_compound_identity()
+        self._capture_target = target_identity
         if MACOS:
             result = self._mac_input.capture_selection()
             self._mac_selection_target = result.target
@@ -1718,6 +1751,16 @@ class StetApp(QObject):
             threading.Thread(target=_paste_macos, name="StetMacPaste", daemon=True).start()
             return
         seq_before = _clipboard_sequence_number()
+        # 0b tiered matching (hard signals): abort the paste if the foreground
+        # target no longer matches the compound identity captured at hotkey
+        # trigger — this prevents pasting corrected text into the WRONG window
+        # when the user switched apps during correction.
+        if not self._foreground_identity_matches():
+            self._notify.emit(
+                "The original app changed while correcting. Paste aborted to avoid overwriting the wrong window.",
+                "warn",
+            )
+            return
         target_is_terminal = getattr(self, "_target_is_terminal", False)
         def _paste_worker():
             # We're in a background thread — just sleep instead of
