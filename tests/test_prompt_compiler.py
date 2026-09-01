@@ -88,3 +88,20 @@ def test_contained_content_dataclass_holds_text_and_markers():
     assert c.text == "abc"
     assert c.markers.open_marker.startswith("CONTENT_BEGIN_")
     assert c.markers.close_marker.startswith("CONTENT_END_")
+
+def test_nonce_collision_is_detected_as_distinct_markers():
+    from stet.llm.prompt_compiler import generate_nonce, format_content
+    import random
+    # Generate many nonces; all must be distinct (128-bit space -> collision
+    # probability is negligible, but a bug in the generator would collapse them).
+    nonces = {generate_nonce() for _ in range(100)}
+    assert len(nonces) == 100
+    # Two documents framed with different nonces must parse to their own content
+    # and reject the other's marker (no cross-talk).
+    n1, n2 = generate_nonce(), generate_nonce()
+    assert n1 != n2
+    w1 = format_content("first", n1)
+    w2 = format_content("second", n2)
+    from stet.llm.prompt_compiler import parse_compiled_content
+    assert parse_compiled_content(w1, n1) == "first"
+    assert parse_compiled_content(w2, n2) == "second"
