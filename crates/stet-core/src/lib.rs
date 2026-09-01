@@ -9,5 +9,6 @@ pub mod dispatcher;
 pub mod frame;
 pub mod hotkey;
 pub mod handshake;
+pub mod input_class;
 pub mod index_types;
 pub mod timeout;
