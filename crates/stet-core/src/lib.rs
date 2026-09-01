@@ -1,5 +1,6 @@
 pub mod engine;
 pub mod codec;
+pub mod mod_release;
 pub mod dispatcher;
 pub mod frame;
 pub mod hotkey;
