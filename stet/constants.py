@@ -380,7 +380,11 @@ DEFAULT_CONFIG: dict = {
                 "shorten, or rewrite sentences whenever that improves the result.\n\n"
                 "Preserve the author's intended meaning, factual claims, names, numbers, "
                 "tone, and level of formality. Do not invent information or make the text "
-                "sound generically formal unless the original calls for it."
+                "sound generically formal unless the original calls for it.\n\n"
+                "Preserve all existing formatting: markdown headings (#, ##, ###), bold (**), "
+                "italic (*), bullet points (-, *), numbered lists, indentation, and line "
+                "breaks. Rewrite the text within formatted elements but do not remove or "
+                "change the formatting structure itself."
             ),
             "hallucination_threshold": 0.97,
             "builtin": True,

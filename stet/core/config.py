@@ -22,6 +22,20 @@ _OLD_REWRITE_POLISH_MODE_PROMPT = "You are an expert editor and text-correction 
 
 _OLD_REWRITE_POLISH_TEMPLATE_PROMPT = "Rewrite the text to sound highly professional, eloquent, and sophisticated. Match the author's intended formality level. Improve flow, sentence structure, and vocabulary choices. Output ONLY the polished text without preamble or explanation."
 
+# Pre-1.3.0 Rewrite & Polish prompt: granted rewrite freedom but said nothing
+# about formatting, and its structural wrapper contradicted the rewrite
+# instruction — the model stripped markdown headings/bold/bullets.
+_OLD_REWRITE_POLISH_MODE_PROMPT_V2 = (
+    "Rewrite and polish the text into its strongest clear, natural version.\n\n"
+    "Fix all errors. Improve sentence flow, word choice, word placement, "
+    "transitions, clarity, rhythm, and concision. Remove filler, redundancy, "
+    "repeated ideas, and unnecessary sentences. You may combine, split, reorder, "
+    "shorten, or rewrite sentences whenever that improves the result.\n\n"
+    "Preserve the author's intended meaning, factual claims, names, numbers, "
+    "tone, and level of formality. Do not invent information or make the text "
+    "sound generically formal unless the original calls for it."
+)
+
 
 class ConfigManager:
     def __init__(self):
@@ -214,7 +228,10 @@ class ConfigManager:
                 modes.append(default_modes[len(modes)].copy())
             cfg["correction_modes"] = modes
             self._needs_save = True
-        if len(modes) > 2 and modes[2].get("prompt") == _OLD_REWRITE_POLISH_MODE_PROMPT:
+        if len(modes) > 2 and modes[2].get("prompt") in (
+            _OLD_REWRITE_POLISH_MODE_PROMPT,
+            _OLD_REWRITE_POLISH_MODE_PROMPT_V2,
+        ):
             modes[2]["prompt"] = DEFAULT_CONFIG["correction_modes"][2]["prompt"]
             self._needs_save = True
         # Update all three built-in prompts if the old strict Spelling Only one is detected

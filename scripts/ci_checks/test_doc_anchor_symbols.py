@@ -1,4 +1,4 @@
-"""Doc anchor lint — Phase 5 guard (docs/ANCHORING_PLAN.md §5).
+"""Doc anchor lint — Phase 5 guard (archive/docs-2026-09-01/ANCHORING_PLAN.md §5).
 
 Verifies that every comma-pair code anchor in the pipeline docs
 
@@ -102,7 +102,7 @@ def test_no_line_anchors_remain():
             for m in LINE_ANCHOR_RE.finditer(line):
                 offenders.append(f"{doc.name}:{i}: {m.group(0)}")
     assert not offenders, (
-        "Line-number anchors are banned (docs/ANCHORING_PLAN.md §3). "
+        "Line-number anchors are banned (archive/docs-2026-09-01/ANCHORING_PLAN.md §3). "
         "Use (`symbol`, `file.py`) pairs instead:\n  " + "\n  ".join(offenders)
     )
 

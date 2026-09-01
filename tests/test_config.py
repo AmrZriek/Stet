@@ -102,3 +102,33 @@ class TestConfigMigration:
             cfg = ConfigManager()
             modes = cfg.get("correction_modes")
             assert modes[0]["hallucination_threshold"] == 0.45
+
+    def test_migrate_rewrite_polish_prompt_to_formatting_version(self, temp_config_setup):
+        """Both pre-1.3.0 Rewrite & Polish prompt generations must migrate to
+        the formatting-preserving default; customized prompts stay untouched."""
+        from stet.constants import DEFAULT_CONFIG
+        from stet.core.config import (
+            _OLD_REWRITE_POLISH_MODE_PROMPT,
+            _OLD_REWRITE_POLISH_MODE_PROMPT_V2,
+        )
+
+        new_prompt = DEFAULT_CONFIG["correction_modes"][2]["prompt"]
+        assert new_prompt != _OLD_REWRITE_POLISH_MODE_PROMPT_V2
+
+        for old_prompt in (_OLD_REWRITE_POLISH_MODE_PROMPT, _OLD_REWRITE_POLISH_MODE_PROMPT_V2, "my custom polish"):
+            legacy_data = {
+                "correction_modes": [
+                    {"name": "Spelling Only", "prompt": "fix typos", "builtin": True},
+                    {"name": "Full Correction", "prompt": "fix everything", "builtin": True},
+                    {"name": "Rewrite & Polish", "prompt": old_prompt, "builtin": True},
+                ]
+            }
+            temp_config_setup.write_text(json.dumps(legacy_data), encoding="utf-8")
+
+            cfg = ConfigManager()
+            modes = cfg.get("correction_modes")
+            if old_prompt == "my custom polish":
+                assert modes[2]["prompt"] == "my custom polish"
+            else:
+                assert modes[2]["prompt"] == new_prompt
+                assert "Preserve all existing formatting" in modes[2]["prompt"]
