@@ -13,4 +13,7 @@ sha2 = "0.10"
 hmac = "0.12"
 base64 = "0.22"
 
+[target.'cfg(windows)'.dependencies]
+ffi-skel = { path = "../stet-win32" }
+
 [dev-dependencies]

@@ -269,7 +269,7 @@ DEFAULT_CONFIG: dict = {
     "presence_penalty": 0.0,
     "rope_freq_base": 0.0,
     "rope_freq_scale": 0.0,
-    "parallel": 4,
+    "parallel": 1,
     "threads_batch": -1,
     "keep_model_loaded": True,
     "idle_timeout_seconds": 300,

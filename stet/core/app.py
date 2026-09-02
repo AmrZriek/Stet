@@ -1,3 +1,4 @@
+import functools
 import json
 import os
 import queue
@@ -438,6 +439,17 @@ class StetApp(QObject):
         self._status_lbl = QLabel("● AC: Offline")
         self._chat_status_lbl = QLabel("● Chat: Offline")
         self._old_clip = ""
+        self._ipc_client = None
+        if self.cfg.get("use_native_daemon", False):
+            try:
+                from stet.core.ipc_client import IpcClient
+                client = IpcClient()
+                if client.connect():
+                    self._ipc_client = client
+                    log("[IPC] Connected to native Stet core daemon v2.0")
+            except Exception as e:
+                log(f"[IPC] Native daemon connection failed (falling back to direct Win32): {e}")
+                self._ipc_client = None
         # Compound target identity captured at hotkey trigger (0b) — used for
         # tiered matching at paste time to prevent wrong-window pastes.
         self._capture_target = None
@@ -663,11 +675,8 @@ class StetApp(QObject):
             "QMenu::indicator{left:10px;width:12px;height:12px;}"
             "QMenu::icon{left:10px;width:12px;height:12px;}"
             "QMenu::right-arrow{image:none;width:0px;height:0px;}"
-            "QMenu::separator{height:1px;background:#28292c;margin:8px 0;}"
-            "QMenu::item:disabled{color:#88898c;}"
         )
 
-        # Status header (non-clickable, shows model load state)
         header_widget = QWidget()
         header_widget.setStyleSheet("background:transparent;")
         header_lay = QVBoxLayout(header_widget)
@@ -692,17 +701,34 @@ class StetApp(QObject):
         menu.addAction(header_act)
         menu.addSeparator()
 
-        act_home = QAction("Open Home", self)
+        # Phase 5a Tray-First Core Actions
+        act_correct = QAction("Correct selected text (F9)", self)
+        act_correct.triggered.connect(lambda: self._handle_hotkey_fired({"mode": "panel", "strength": "full_correction"}))
+        menu.addAction(act_correct)
+
+        act_rewrite = QAction("Rewrite selected text (Shift+F9)", self)
+        act_rewrite.triggered.connect(lambda: self._handle_hotkey_fired({"mode": "panel", "strength": "rewrite_polish"}))
+        menu.addAction(act_rewrite)
+
+        self._saved_actions_menu = menu.addMenu("Saved actions")
+        self._saved_actions_menu.setStyleSheet(menu.styleSheet())
+        self._rebuild_saved_actions_menu()
+        self._saved_actions_menu.aboutToShow.connect(self._rebuild_saved_actions_menu)
+
+        act_undo_last = QAction("Undo last replacement", self)
+        act_undo_last.triggered.connect(self._undo_last_replacement)
+        menu.addAction(act_undo_last)
+
+        menu.addSeparator()
+
+        act_home = QAction("Open Stet", self)
         font = act_home.font()
         font.setBold(True)
         act_home.setFont(font)
         act_home.triggered.connect(self._show_welcome)
         menu.addAction(act_home)
 
-
-
         menu.addSeparator()
-
         self._llm_menu = menu.addMenu("Model: Offline")
         self._llm_menu_action = self._llm_menu.menuAction()
         self._llm_menu_action.setIcon(make_left_arrow_icon())
@@ -870,6 +896,52 @@ class StetApp(QObject):
             act.triggered.connect(lambda checked, p=path: self._select_model(p))
             self._llm_menu.addAction(act)
 
+    def _rebuild_saved_actions_menu(self):
+        if not hasattr(self, "_saved_actions_menu"):
+            return
+        self._saved_actions_menu.clear()
+        templates = self.cfg.get("custom_templates", [])
+        if not templates:
+            act_none = QAction("No saved templates", self)
+            act_none.setEnabled(False)
+            self._saved_actions_menu.addAction(act_none)
+            return
+
+        for t in templates:
+            name = t.get("name", "Custom")
+            prompt = t.get("prompt", "")
+            act = QAction(name, self)
+            act.triggered.connect(
+                lambda checked=False, p=prompt: self._handle_hotkey_fired(
+                    {"mode": "panel", "strength": "custom", "custom_prompt": p}
+                )
+            )
+            self._saved_actions_menu.addAction(act)
+
+    def _undo_last_replacement(self):
+        """RAM-only target-verified undo for the most recent correction."""
+        if hasattr(self, "_last_replacement_original") and self._last_replacement_original:
+            orig_text = self._last_replacement_original
+            def _worker():
+                try:
+                    self._safe_copy(orig_text)
+                    time.sleep(0.12)
+                    _send_ctrl_chord(VK_V)
+                    self._silent_osd_signal.emit("Correction undone", "success")
+                except Exception as e:
+                    log(f"[Undo] failed: {e}")
+                    self._silent_osd_signal.emit("Undo failed — use Ctrl+Z in the app", "warning")
+            threading.Thread(target=_worker, name="StetUndoRAM", daemon=True).start()
+            return
+
+        entries = self._history.entries if hasattr(self._history, "entries") else []
+        if entries:
+            last = next((e for e in reversed(entries) if not e.get("undone")), None)
+            if last:
+                self._undo_correction(last["id"])
+                return
+        self._silent_osd_signal.emit("Nothing to undo", "info")
+
     def _tray_load_model(self):
         self._cancel_model_retry()
         threading.Thread(target=self.ac_model.load_model, daemon=True).start()
@@ -877,7 +949,6 @@ class StetApp(QObject):
     def _tray_unload_model(self):
         self._cancel_model_retry()
         self.ac_model.unload_model()
-
     def _update_llm_menu_initial_text(self):
         if not hasattr(self, "_llm_menu_action"):
             return
@@ -1311,6 +1382,15 @@ class StetApp(QObject):
                 return result.text
             log(f"[Capture] macOS capture failed: {result.code.value}: {result.message}")
             return ""
+        if self._ipc_client and self._ipc_client.is_connected():
+            try:
+                res = self._ipc_client.capture_selection(timeout_ms=1500)
+                if res and res.get("text"):
+                    log(f"[Capture] Native daemon capture succeeded: {res['text'][:80]!r}")
+                    return res["text"]
+            except Exception as e:
+                log(f"[Capture] Native daemon error ({e}), falling back to Win32 in-process")
+
 
         # Try UIA direct text capture first (bypassing the clipboard)
         from stet.core.clipboard import _read_selection_uia
@@ -1609,13 +1689,12 @@ class StetApp(QObject):
             # QTimer.singleShot, which would crash from a non-Qt thread.
             if not MACOS and self._old_clip and self._old_clip != result:
                 time.sleep(0.5)
-                seq_now = _clipboard_sequence_number()
-                # Restore only if the clipboard hasn't been changed by another app
-                if seq_before == 0 or seq_now == seq_before + 1:
+                current = _clipboard_read_text()
+                # Restore if the clipboard still contains the pasted result
+                if current == result:
                     self._safe_copy(self._old_clip)
                 else:
                     log("[Silent] Clipboard was modified externally — skipping restore")
-
             self._last_silent_history_id = self._history.add(
                 mode="silent",
                 strength=strength,
@@ -1696,11 +1775,11 @@ class StetApp(QObject):
         # Capture the exact wrapper: PyQt6 emits `destroyed` with a fresh
         # wrapper of the dying object, so identity is checked against the
         # captured instance.
-        osd.destroyed.connect(lambda *_, w=osd: self._on_osd_destroyed(w))
+        osd.destroyed.connect(functools.partial(self._on_osd_destroyed, osd))
         # Loading state stays visible until replaced; others auto-dismiss
         osd.show_animated(auto_dismiss=(state != "loading"))
 
-    def _on_osd_destroyed(self, osd):
+    def _on_osd_destroyed(self, osd, *args, **kwargs):
         """Clear _osd_widget when the OSD's C++ object is destroyed.
 
         The OSD auto-dismisses via WA_DeleteOnClose on its own timer, so
@@ -1829,6 +1908,15 @@ class StetApp(QObject):
 
             threading.Thread(target=_paste_macos, name="StetMacPaste", daemon=True).start()
             return
+        if self._ipc_client and self._ipc_client.is_connected():
+            try:
+                res = self._ipc_client.paste_text(text=text, verify_target=True)
+                if res and res.get("status") == "pasted":
+                    log(f"[Paste] Native daemon paste succeeded for {len(text)} chars")
+                    return
+            except Exception as e:
+                log(f"[Paste] Native daemon error ({e}), falling back to Win32 in-process")
+
         seq_before = _clipboard_sequence_number()
         # 0b tiered matching (hard signals): abort the paste if the foreground
         # target no longer matches the compound identity captured at hotkey
@@ -1856,11 +1944,10 @@ class StetApp(QObject):
         if self._old_clip and self._old_clip != text:
             clip_to_restore = self._old_clip
             def _restore_if_unchanged():
-                seq_now = _clipboard_sequence_number()
                 current = _clipboard_read_text()
-                if (seq_before == 0 or seq_now == seq_before + 1) and current == text:
+                if current == text:
                     _clipboard_write_text(clip_to_restore)
-                elif current != text or (seq_before != 0 and seq_now != seq_before + 1):
+                else:
                     log("[Paste] Clipboard was modified externally or text changed — skipping restore")
             QTimer.singleShot(500, _restore_if_unchanged)
 

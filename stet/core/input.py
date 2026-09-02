@@ -1,6 +1,6 @@
 """Platform-neutral contracts for global input and selection transactions.
 
-The concrete platform adapters are intentionally not imported here.  This module
+The concrete platform adapters are intentionally not imported here. This module
 is safe to import on every supported platform, including machines without
 PyObjC installed.
 """
@@ -31,6 +31,18 @@ class InputCode(str, Enum):
     NOT_AVAILABLE = "not_available"
     ERROR = "error"
 
+    # Wire error taxonomy (Phase 1a)
+    ABORTED_WRONG_TARGET = "aborted_wrong_target"
+    ABORTED_CLIPBOARD_CONFLICT = "aborted_clipboard_conflict"
+    ABORTED_TRUNCATED = "aborted_truncated"
+    GENERATION_TRUNCATED = "generation_truncated"
+    UPGRADE_REQUIRED = "upgrade_required"
+    BUSY_DROPPED = "busy_dropped"
+    ABORTED_INTEGRITY = "aborted_integrity"
+    SELECTION_CHANGED = "selection_changed"
+    SELECTION_UNVERIFIABLE = "selection_unverifiable"
+    PASTE_UNVERIFIED = "paste_unverified"
+
 
 T = TypeVar("T")
 
@@ -45,7 +57,7 @@ class Outcome(Generic[T]):
 
     @property
     def ok(self) -> bool:
-        return self.code is InputCode.OK
+        return self.code is InputCode.OK or self.code is InputCode.SUCCESS
 
     @classmethod
     def success(cls, value: Optional[T] = None, message: str = "") -> "Outcome[T]":
@@ -59,6 +71,7 @@ class Outcome(Generic[T]):
 class SelectionSource(str, Enum):
     ACCESSIBILITY = "accessibility"
     CLIPBOARD = "clipboard"
+    UIA = "uia"
 
 
 class PermissionStatus(str, Enum):
@@ -164,19 +177,126 @@ class ClipboardSnapshot:
     items: Tuple[PasteboardItemSnapshot, ...] = ()
 
 
+def sha256_fingerprint(text: str) -> str:
+    """SHA-256 hex digest of a string's UTF-8 bytes.
+
+    Used for both the raw (exact) and canonical selection fingerprints per the
+    0b fingerprint contract. Deterministic; never mutates the input.
+    """
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical_selection(text: str) -> str:
+    """Canonicalize a selection for cross-source verification.
+
+    Changes ONLY CRLF/CR to LF. It never strips leading/trailing whitespace,
+    never collapses internal whitespace, never applies Unicode normalization,
+    and never mutates the text shown to the user.
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+@dataclass(frozen=True)
+class CompoundIdentity:
+    """Compounded, platform-neutral target identity captured at hotkey trigger.
+
+    Captured before capture begins so the paste can verify the same target
+    still owns the foreground (tiered matching). On non-Windows platforms the
+    HWND/session fields may be 0/unsupported — a valid no-op identity.
+    """
+
+    hwnd: int
+    pid: int
+    process_creation_time: int
+    session_id: int
+    window_class: str
+    title_hash: str
+
+
+@dataclass(frozen=True)
+class TargetToken:
+    """Single-use, expiry-bound paste token binding a correction to its target.
+
+    Carries full compound identity and dual fingerprints (raw exact + canonical).
+    """
+
+    pid: int
+    process_creation_time: int
+    session_id: int
+    window_handle: int
+    control_identity: str
+    title_hash: str
+    capture_source: SelectionSource
+    session_mode: str
+    selection_fingerprint: str
+    raw_selection_fingerprint: str
+    fingerprint_policy: str = "line_endings_only_v1"
+    newline_policy: str = "target_default"
+    captured_at_monotonic: float = field(default_factory=time.monotonic)
+
+
+@dataclass(frozen=True)
+class UndoToken:
+    """RAM-only, target-verified undo token. Single use, expires with review."""
+
+    target_token: TargetToken
+    replacement_fingerprint: str
+    created_at_monotonic: float = field(default_factory=time.monotonic)
+
+
+@dataclass(frozen=True)
+class SelectionCapture:
+    """A captured selection with exact text, source metadata, and dual fingerprints."""
+
+    text: str
+    source: SelectionSource
+    selection_range_count: int = 1
+    document_range_match: Optional[bool] = None
+    selection_fingerprint: str = ""
+    raw_selection_fingerprint: str = ""
+    fingerprint_policy: str = "line_endings_only_v1"
+    truncated: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.raw_selection_fingerprint and self.text is not None:
+            object.__setattr__(self, "raw_selection_fingerprint", sha256_fingerprint(self.text))
+        if not self.selection_fingerprint and self.text is not None:
+            object.__setattr__(
+                self, "selection_fingerprint", sha256_fingerprint(canonical_selection(self.text))
+            )
+
+
 @dataclass(frozen=True)
 class SelectionResult:
     code: InputCode
     text: Optional[str] = None
     source: Optional[SelectionSource] = None
+    target_token: Optional[TargetToken] = None
+    capture: Optional[SelectionCapture] = None
+    truncated: bool = False
+    message: str = ""
     target: Optional[AppIdentity] = None
     original_clipboard: Optional[ClipboardSnapshot] = None
     clipboard_change_count: Optional[int] = None
+
+    @property
+    def ok(self) -> bool:
+        return (self.code is InputCode.OK or self.code is InputCode.SUCCESS) and self.text is not None
+
+
+@dataclass(frozen=True)
+class PasteResult:
+    """Wire status returned by native core and input adapters for paste operations."""
+
+    code: InputCode
+    status: str = "aborted"  # pasted | unverified | aborted
+    transaction_id: str = ""
+    undo_token: Optional[UndoToken] = None
     message: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.code is InputCode.OK and self.text is not None
+        return (self.code is InputCode.OK or self.code is InputCode.SUCCESS) and self.status == "pasted"
 
 
 @dataclass(frozen=True)
@@ -187,7 +307,7 @@ class HotkeyResult:
 
     @property
     def ok(self) -> bool:
-        return self.code is InputCode.OK
+        return self.code is InputCode.OK or self.code is InputCode.SUCCESS
 
 
 class InputBackend(Protocol):
@@ -258,90 +378,8 @@ class NullInputBackend:
         return None
 
 
-def sha256_fingerprint(text: str) -> str:
-    """SHA-256 hex digest of a string's UTF-8 bytes.
-
-    Used for both the raw (exact) and canonical selection fingerprints per the
-    0b fingerprint contract. Deterministic; never mutates the input.
-    """
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def canonical_selection(text: str) -> str:
-    """Canonicalize a selection for cross-source verification.
-
-    Changes ONLY CRLF/CR to LF. It never strips leading/trailing whitespace,
-    never collapses internal whitespace, never applies Unicode normalization,
-    and never mutates the text shown to the user.
-    """
-    return text.replace("\r\n", "\n").replace("\r", "\n")
-
-
-@dataclass(frozen=True)
-class CompoundIdentity:
-    """Compounded, platform-neutral target identity captured at hotkey trigger.
-
-    Captured before capture begins so the paste can verify the same target
-    still owns the foreground (tiered matching). On non-Windows platforms the
-    HWND/session fields may be 0/unsupported — a valid no-op identity.
-    """
-
-    hwnd: int
-    pid: int
-    process_creation_time: int
-    session_id: int
-    window_class: str
-    title_hash: str
-
-
-@dataclass(frozen=True, slots=True)
-class SelectionCapture:
-    """A captured selection with its target identity and fingerprints.
-
-    Stores BOTH the raw (exact) and canonical fingerprints per the 0b contract.
-    """
-
-    text: str
-    target: CompoundIdentity
-    raw_selection_fingerprint: str
-    selection_fingerprint: str
-    capture_source: str
-    fingerprint_policy: str
-    newline_policy: str
-    session_mode: str
-
-
-@dataclass(frozen=True, slots=True)
-class TargetToken:
-    """Single-use, expiry-bound paste token binding a correction to its target.
-
-    A token is created after capture and consumed exactly once, either at paste
-    time (hard-identity match) or abandoned when the review/undo lifecycle ends.
-    """
-
-    capture: SelectionCapture
-    replacement_fingerprint: str
-    expires_at: float
-    version: str = "v1"
-    _consumed: bool = field(default=False, init=False, repr=False, compare=False)
-
-    def is_expired(self) -> bool:
-        return time.monotonic() > self.expires_at
-
-    def consume(self) -> bool:
-        """Atomically mark consumed once. Returns False if already used/expired."""
-        if self._consumed or self.is_expired():
-            return False
-        object.__setattr__(self, "_consumed", True)
-        return True
-
 def capture_compound_identity() -> CompoundIdentity:
-    """Capture the foreground window's compound identity on Windows.
-
-    Returns a CompoundIdentity capturing HWND, PID, session ID, window class,
-    and a hash of the window title. On non-Windows platforms, or when the
-    Win32 calls are unavailable, returns a safe no-op identity (zeros).
-    """
+    """Capture the foreground window's compound identity on Windows."""
     try:
         import sys as _sys
         if _sys.platform != "win32":

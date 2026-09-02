@@ -63,9 +63,10 @@ class TestFrozenPathResolution:
         """When not frozen (source mode), SCRIPT_DIR is two levels up from constants.py."""
         from stet.constants import SCRIPT_DIR
         # constants.py is at stet/constants.py → SCRIPT_DIR should be project root
-        expected_name = "Stet"
-        assert SCRIPT_DIR.name == expected_name, \
-            f"SCRIPT_DIR should be project root 'Stet', got: {SCRIPT_DIR}"
+        assert SCRIPT_DIR.name.startswith("Stet"), \
+            f"SCRIPT_DIR should be project root 'Stet*', got: {SCRIPT_DIR}"
+        assert (SCRIPT_DIR / "stet").is_dir(), \
+            f"SCRIPT_DIR should contain 'stet' package, got: {SCRIPT_DIR}"
 
     def test_config_file_uses_the_source_runtime_on_macos(self):
         """macOS source state stays in the checkout's ignored runtime directory."""

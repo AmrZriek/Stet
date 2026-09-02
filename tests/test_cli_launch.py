@@ -1,5 +1,7 @@
 """Tests for stet.main — entry point, boot logging, single-instance lock."""
 
+import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -49,7 +51,8 @@ class TestLogFilePath:
     def test_log_file_is_in_project_root(self):
         # _LOG_FILE should be <project_root>/app_debug.log
         assert _LOG_FILE.name == "app_debug.log"
-        assert _LOG_FILE.parent.name == "Stet"
+        assert _LOG_FILE.parent.name.startswith("Stet")
+        assert (_LOG_FILE.parent / "stet").is_dir()
 
 
 # ── Single-instance lock ─────────────────────────────────────────────────
@@ -132,22 +135,26 @@ class TestModuleLevelImports:
 
 
 class TestMainFunction:
-    """Tests that exercise main() logic paths directly."""
+    """main() orchestration: lock acquisition, crash logging, clean exit."""
 
     @pytest.fixture(autouse=True)
-    def _exercise_the_legacy_qsharedmemory_path(self, monkeypatch):
-        """These mocks assert the Windows/Linux branch, even on a Mac test host."""
-        monkeypatch.setattr("stet.main.sys.platform", "win32")
+    def preserve_excepthooks(self, monkeypatch):
+        from stet import main as main_module
+        monkeypatch.setattr("stet.ui.utils.get_app_icon", lambda: MagicMock(isNull=lambda: True))
+        orig_sys = sys.excepthook
+        orig_thread = getattr(threading, "excepthook", None)
+        yield
+        sys.excepthook = orig_sys
+        if orig_thread is not None:
+            threading.excepthook = orig_thread
 
     def test_main_installs_excepthooks(self, monkeypatch):
-        """main() sets sys.excepthook and threading.excepthook."""
         from stet import main as main_module
 
         mock_mem = MagicMock()
         mock_mem.attach.return_value = True  # triggers sys.exit(0)
 
         monkeypatch.setattr(main_module, "_boot_log", lambda msg: None)
-
         with (
             patch("PyQt6.QtCore.QSharedMemory", return_value=mock_mem),
             pytest.raises(SystemExit) as exc_info,

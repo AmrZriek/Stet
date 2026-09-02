@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["stet-core", "stet-uia-broker"]
+members = ["stet-core", "stet-uia-broker", "stet-win32"]
 
 [workspace.package]
 edition = "2021"

@@ -12,6 +12,7 @@ import pytest
 from stet.core.input import (
     CompoundIdentity,
     SelectionCapture,
+    SelectionSource,
     TargetToken,
     canonical_selection,
     sha256_fingerprint,
@@ -69,61 +70,38 @@ def test_selection_capture_records_fingerprints_and_policies():
     raw = "The quick\r\nbrown fox.\r\n"
     capture = SelectionCapture(
         text=raw,
-        target=CompoundIdentity(hwnd=1, pid=2, process_creation_time=3, session_id=4, window_class="W", title_hash="h"),
+        source=SelectionSource.CLIPBOARD,
         raw_selection_fingerprint=sha256_fingerprint(raw),
         selection_fingerprint=sha256_fingerprint(canonical_selection(raw)),
-        capture_source="clipboard",
-        fingerprint_policy="both",
-        newline_policy="normalize",
-        session_mode="panel",
+        fingerprint_policy="line_endings_only_v1",
     )
     assert capture.raw_selection_fingerprint == sha256_fingerprint(raw)
     assert capture.selection_fingerprint == sha256_fingerprint("The quick\nbrown fox.\n")
-    assert capture.capture_source == "clipboard"
-    assert capture.fingerprint_policy == "both"
-    assert capture.newline_policy == "normalize"
-    assert capture.session_mode == "panel"
+    assert capture.source == SelectionSource.CLIPBOARD
+    assert capture.fingerprint_policy == "line_endings_only_v1"
 
 
-def test_target_token_single_use_and_expiry():
-    """TargetToken is single-use and expires at its deadline."""
-    capture = SelectionCapture(
-        text="x",
-        target=CompoundIdentity(hwnd=1, pid=2, process_creation_time=3, session_id=4, window_class="W", title_hash="h"),
-        raw_selection_fingerprint="raw",
-        selection_fingerprint="sel",
-        capture_source="clipboard",
-        fingerprint_policy="both",
-        newline_policy="preserve",
-        session_mode="panel",
+def test_target_token_fields_and_fingerprints():
+    """TargetToken carries full compound identity and dual fingerprints."""
+    tok = TargetToken(
+        pid=123,
+        process_creation_time=456,
+        session_id=1,
+        window_handle=789,
+        control_identity="Edit",
+        title_hash="thash",
+        capture_source=SelectionSource.CLIPBOARD,
+        session_mode="local",
+        selection_fingerprint="sel_fp",
+        raw_selection_fingerprint="raw_fp",
+        fingerprint_policy="line_endings_only_v1",
+        newline_policy="target_default",
     )
-    tok = TargetToken(capture=capture, replacement_fingerprint="repl", expires_at=time.monotonic() + 60)
-    assert tok.version == "v1"
-    assert tok.capture is capture
-    assert tok.replacement_fingerprint == "repl"
-    assert tok.expires_at > time.monotonic()
-    # Single-use: first consume flags it; second is rejected.
-    consumed = tok.consume()
-    assert consumed is True
-    assert tok.consume() is False  # already used
-
-
-def test_target_token_expired():
-    """A token past its deadline is not usable."""
-    capture = SelectionCapture(
-        text="x",
-        target=CompoundIdentity(hwnd=1, pid=2, process_creation_time=3, session_id=4, window_class="W", title_hash="h"),
-        raw_selection_fingerprint="raw",
-        selection_fingerprint="sel",
-        capture_source="clipboard",
-        fingerprint_policy="both",
-        newline_policy="preserve",
-        session_mode="panel",
-    )
-    tok = TargetToken(capture=capture, replacement_fingerprint="repl", expires_at=time.monotonic() - 1)
-    assert tok.is_expired()
-    assert tok.consume() is False  # expired -> cannot consume
-
+    assert tok.pid == 123
+    assert tok.window_handle == 789
+    assert tok.control_identity == "Edit"
+    assert tok.selection_fingerprint == "sel_fp"
+    assert tok.raw_selection_fingerprint == "raw_fp"
 
 def test_capture_compound_identity_returns_type():
     """A no-op/unsupported platform identity must still be a CompoundIdentity."""

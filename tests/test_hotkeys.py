@@ -956,8 +956,8 @@ def test_silent_hotkey_profile_strength_reaches_patch_worker(qtbot, monkeypatch)
 
     mock_user32 = MockUser32()
     with patch("ctypes.windll.user32", new=mock_user32):
+        monkeypatch.setattr(StetApp, "_show_silent_osd", lambda *args, **kwargs: None)
         app = StetApp()
-        app._show_silent_osd = lambda *args, **kwargs: None
         app._capture_selection = lambda: "teh text"
         app._safe_copy = lambda text: None
         app._old_clip = ""

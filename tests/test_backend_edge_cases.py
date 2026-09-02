@@ -346,8 +346,10 @@ def test_gpu_loaded_detection(monkeypatch, tmp_path):
     monkeypatch.setattr(builtins, "open", mock_open)
 
     # Use existing files for path checks
+    fake_exe = tmp_path / "llama-server.exe"
+    fake_exe.write_text("stub", encoding="utf-8")
     cfg.set("model_path", __file__)
-    cfg.set("llama_server_path", __file__)
+    cfg.set("llama_server_path", str(fake_exe))
 
     res = mgr.load_model()
 

@@ -1022,7 +1022,7 @@ class SettingsDialog(QDialog):
         self.gpu_spin.setValue(self.cfg.get("gpu_layers", DEFAULT_CONFIG["gpu_layers"]))
         self.threads_spin.setValue(self.cfg.get("threads", -1))
         self.threads_batch_spin.setValue(self.cfg.get("threads_batch", -1))
-        self.parallel_spin.setValue(self.cfg.get("parallel", 4))
+        self.parallel_spin.setValue(self.cfg.get("parallel", DEFAULT_CONFIG["parallel"]))
         self.batch_spin.setValue(self.cfg.get("batch_size", DEFAULT_CONFIG["batch_size"]))
         self.ubatch_spin.setValue(self.cfg.get("ubatch_size", DEFAULT_CONFIG["ubatch_size"]))
         self.flash_attn_cb.setChecked(self.cfg.get("flash_attn", DEFAULT_CONFIG["flash_attn"]))

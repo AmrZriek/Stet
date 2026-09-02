@@ -389,7 +389,7 @@ def _apply_tooltips(dialog, prefix: str = ""):
         "ctx_auto_cb": "Auto-derive context window from the model's training context (min(trained ctx, 12800), floor 2048).",
         "kv_cache_k_combo": "KV cache quantization for keys. Default: q8_0.",
         "kv_cache_v_combo": "KV cache quantization for values. Default: q8_0.",
-        "parallel_spin": "Parallel request slots. Default: 4. Process more text at once.",
+        "parallel_spin": "Parallel request slots. Default: 1. Set to 1 for full model context.",
         "flash_attn_cb": "Faster attention computation — requires GPU support. Default: on (when GPU available).",
         "batch_spin": "How many tokens are processed together. Default: 512.",
         "rope_base_spin": "RoPE base frequency. Default: Auto (0.0). Only change for specific models.",

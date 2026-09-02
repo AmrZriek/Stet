@@ -242,7 +242,38 @@ def _clipboard_write_text(text: str) -> None:
         _user32.CloseClipboard()
 
 
-def _send_ctrl_chord(vk: int) -> None:
+def _wait_for_modifiers_released(timeout_sec: float = 0.20) -> bool:
+    """Wait up to timeout_sec for physical Shift/Alt/Win modifiers to be released.
+
+    Prevents modifier collisions in Chromium/Electron/WinUI where a physical
+    Shift held down during a Shift+F9 hotkey causes synthetic Ctrl+C to conflict
+    with hardware key state or deselect text.
+    """
+    if not WINDOWS:
+        return True
+    deadline = time.perf_counter() + timeout_sec
+    conflict_mods = (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN)
+    while time.perf_counter() < deadline:
+        if not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods):
+            return True
+        time.sleep(0.01)
+    return not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods)
+
+
+def _wait_for_alt_win_released(timeout_sec: float = 0.20) -> bool:
+    """Wait up to timeout_sec for physical Alt/Win modifiers to be released."""
+    if not WINDOWS:
+        return True
+    deadline = time.perf_counter() + timeout_sec
+    conflict_mods = (VK_MENU, VK_LWIN, VK_RWIN)
+    while time.perf_counter() < deadline:
+        if not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods):
+            return True
+        time.sleep(0.01)
+    return not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods)
+
+
+def _send_ctrl_chord(vk: int, wait_mods: bool = True) -> None:
     """Press Ctrl, press `vk`, release `vk`, release Ctrl — atomically.
 
     Ensures any physically held modifier keys (like Shift from Shift+F9 hotkeys,
@@ -251,6 +282,8 @@ def _send_ctrl_chord(vk: int) -> None:
     Ctrl+Shift+C (which opens DevTools / Inspect Element in browsers instead of copying).
     """
     if WINDOWS:
+        if wait_mods:
+            _wait_for_modifiers_released(0.20)
         events: list[tuple[int, int]] = []
         # Prepend key-ups for any physically depressed modifiers that could interfere
         for mod in (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN):
@@ -274,9 +307,11 @@ def _send_ctrl_chord(vk: int) -> None:
         raise NotImplementedError("Stet only supports Windows native input simulation.")
 
 
-def _send_ctrl_shift_chord(vk: int) -> None:
+def _send_ctrl_shift_chord(vk: int, wait_mods: bool = True) -> None:
     """Press Ctrl+Shift+`vk` and release in reverse order as one input batch."""
     if WINDOWS:
+        if wait_mods:
+            _wait_for_alt_win_released(0.20)
         events: list[tuple[int, int]] = []
         # Prepend key-up for Alt/Win if held
         for mod in (VK_MENU, VK_LWIN, VK_RWIN):
@@ -299,7 +334,6 @@ def _send_ctrl_shift_chord(vk: int) -> None:
         _user32.SendInput(len(events), arr, ctypes.sizeof(INPUT))
     else:
         raise NotImplementedError("Stet only supports Windows native input simulation.")
-
 
 # ── Windows UI Automation (COM via ctypes) ───────────────────────────────
 

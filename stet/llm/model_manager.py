@@ -421,10 +421,11 @@ class ModelManager(QObject):
             from requests.adapters import HTTPAdapter
 
             session = requests.Session()
-            parallel_slots = self._get_param("parallel", 4)
+            parallel_slots = self._get_param("parallel", 1)
+            pool_conn = max(4, parallel_slots)
             adapter = HTTPAdapter(
-                pool_connections=parallel_slots,
-                pool_maxsize=parallel_slots * 2,
+                pool_connections=pool_conn,
+                pool_maxsize=pool_conn * 2,
             )
             # mount() is part of the real requests.Session API; some tests
             # monkeypatch requests.Session with a stub that lacks it. In that
@@ -556,7 +557,7 @@ class ModelManager(QObject):
         can't prevent model load from completing.
         """
         try:
-            parallel_slots = self._get_param("parallel", 4)
+            parallel_slots = self._get_param("parallel", 1)
             strengths = []
             for hotkey in self.cfg.get("hotkeys", []):
                 if isinstance(hotkey, dict) and hotkey.get("strength"):
@@ -812,7 +813,7 @@ class ModelManager(QObject):
             "--port",
             str(port),
             "--parallel",
-            str(self._get_param("parallel", 4)),
+            str(self._get_param("parallel", 1)),
             "--reasoning",
             "off",
             "--reasoning-budget",
