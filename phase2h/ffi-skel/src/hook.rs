@@ -65,7 +65,7 @@ pub unsafe fn install_winevent_hook(proc: WINEVENTPROC) -> Result<HWINEVENTHOOK,
         proc,
         0,
         0,
-        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS | WINEVENT_SKIPOWNTHREAD,
+        WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
     );
     if hook.is_null() {
         Err(crate::pipe::last_error())

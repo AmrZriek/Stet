@@ -18,9 +18,8 @@ use ffi_skel::types::*;
 #[ignore]
 fn lab_pipe_roundtrip() {
     // Create a server with a restrictive DACL, connect a client, write a frame, read it.
-    let name = ffi_skel::pipe::pipe_name("\\\\\\.\\\\pipe\\\\stet_ipc_v2_lab_test");
+    let name = ffi_skel::pipe::pipe_name(r"\\.\pipe\stet_ipc_v2_lab_test");
     let server = ffi_skel::pipe::create_pipe_server(&name, core::ptr::null()).expect("create server");
-    // Standard security descriptor (no restrictive DACL for the pure round-trip probe).
     let client = ffi_skel::pipe::connect_client(&name).expect("connect client");
     ffi_skel::pipe::accept_client(server).expect("accept");
     let payload = b"{jsonrpc:2.0}";
@@ -42,21 +41,22 @@ fn lab_pipe_roundtrip() {
 #[test]
 #[ignore]
 fn lab_pipe_dacl_build() {
-    // Build a user SID for the current process and a restrictive DACL allowing only it.
     unsafe {
+        use core::mem::MaybeUninit;
         let token = ffi_skel::security::open_current_token().expect("open token");
         let user_sid = ffi_skel::security::token_user_sid(token).expect("token user sid");
-        let mut acl: [u8; 256] = [0u8; 256];
+        // ACL and SECURITY_DESCRIPTOR contain pointers -> must be 8-byte aligned.
+        let mut acl: MaybeUninit<ffi_skel::security::ACL> = MaybeUninit::<ffi_skel::security::ACL>::zeroed();
         ffi_skel::security::build_acl_allow_only(
-            acl.as_mut_ptr() as *mut ffi_skel::security::ACL,
+            acl.as_mut_ptr(),
             256,
             user_sid,
             ffi_skel::security::PIPE_ALL_ACCESS,
         ).expect("build ACL");
-        let mut sd: [u8; 128] = [0u8; 128];
+        let mut sd: MaybeUninit<ffi_skel::security::SECURITY_DESCRIPTOR> = MaybeUninit::<ffi_skel::security::SECURITY_DESCRIPTOR>::zeroed();
         ffi_skel::security::init_security_descriptor(
-            sd.as_mut_ptr() as *mut ffi_skel::security::SECURITY_DESCRIPTOR,
-            acl.as_mut_ptr() as *const ffi_skel::security::ACL,
+            sd.as_mut_ptr(),
+            acl.as_ptr(),
         ).expect("init SD");
     }
 }
@@ -68,11 +68,9 @@ fn lab_clipboard_snapshot_restore() {
     ffi_skel::clipboard::ole_initialize();
     let before = ffi_skel::clipboard::clipboard_sequence();
     let obj = ffi_skel::clipboard::ole_get_clipboard();
-    // On a desktop there is always an IDataObject (even if empty).
     let _ = obj;
     ffi_skel::clipboard::ole_flush_clipboard();
     let after = ffi_skel::clipboard::clipboard_sequence();
-    // We did not modify the clipboard, so the sequence must be unchanged.
     assert_eq!(before, after, "clipboard sequence must be unchanged when not modified");
     ffi_skel::clipboard::ole_uninitialize();
 }
@@ -81,7 +79,6 @@ fn lab_clipboard_snapshot_restore() {
 #[test]
 #[ignore]
 fn lab_sendinput_checked_chord() {
-    // Inject a Ctrl+C chord into the focused target with the Stet self-tag.
     let tag = ffi_skel::types::STET_DW_EXTRA_INFO;
     let evs = unsafe {
         [
@@ -93,7 +90,6 @@ fn lab_sendinput_checked_chord() {
     };
     let injected = unsafe { ffi_skel::input::send_events(&evs) };
     assert!(injected > 0, "SendInput must inject at least one event on a live desktop");
-    // Queueing is NOT proof of consumption; the lab asserts the observable result.
 }
 
 // ── §2b WH_KEYBOARD_LL hook install/remove (self-tag filter) ──
@@ -126,9 +122,7 @@ fn lab_winevent_hook_lifecycle() {
 #[test]
 #[ignore]
 fn lab_message_only_window() {
-    // Skeleton: the message-only window host shell.
     let _ = ffi_skel::window::current_module();
-    // Register/unregister a hotkey id that is very unlikely to collide (0x5E71).
     let hwnd: HWND = core::ptr::null_mut();
     let ok = ffi_skel::window::register_hotkey(hwnd, 0x5E71, MOD_CONTROL | MOD_SHIFT, VK_F9);
     if ok {
@@ -136,20 +130,16 @@ fn lab_message_only_window() {
     }
 }
 
-// ── §3.1 rule 1 launcher Job Object (create/assign/terminate) ──
+// ── §3.1 rule 1 launcher Job Object (create/assign; do NOT terminate) ──
 #[test]
 #[ignore]
 fn lab_launcher_job_object() {
     unsafe {
         let job = ffi_skel::launcher::create_job_object().expect("create job");
         ffi_skel::launcher::set_kill_on_close(job).expect("set kill-on-close");
-        // Assign the current process to the job, then terminate it (removes the job).
         let proc_h = ffi_skel::launcher::open_process(ffi_skel::launcher::current_process_id()).expect("open proc");
-        ffi_skel::launcher::assign_to_job(job, proc_h).expect("assign to job");
-        
-        // terminate_job kills everything in the job; do NOT do that here or we kill the test.
-        // Instead, close the job handle (kill-on-close). Actually calling TerminateJobObject
-        // on a job containing the current thread would kill the harness — skip it.
+        // Assign the current process to the job. Do NOT call TerminateJobObject here.
+        let _ = ffi_skel::launcher::assign_to_job(job, proc_h).expect("assign to job");
         let _ = proc_h;
         let _ = job;
     }

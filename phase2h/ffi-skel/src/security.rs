@@ -145,19 +145,21 @@ pub unsafe fn create_well_known_sid(wk: u32, sid_buf: *mut BYTE, cb_sid: *mut DW
 /// Get the current process' user SID from an OPEN process token.
 /// SAFETY: token_handle must be a valid OPEN process token.
 pub unsafe fn token_user_sid(token_handle: HANDLE) -> Result<PSID, DWORD> {
-    let mut buf: [u8; 512] = [0u8; 512];
+    // GetTokenInformation writes a TOKEN_USER whose first field (SID_AND_ATTRIBUTES.Sid)
+    // is a pointer -> needs 8-byte alignment. A [u64; N] is 8-aligned; a [u8; N] is not.
+    let mut buf: [u64; 128] = [0u64; 128];
     let mut ret: DWORD = 0;
     let ok = GetTokenInformation(
         token_handle,
         TokenUser,
         buf.as_mut_ptr() as *mut core::ffi::c_void,
-        buf.len() as DWORD,
+        (std::mem::size_of_val(&buf)) as DWORD,
         &mut ret,
     );
     if ok == 0 {
         return Err(crate::pipe::last_error());
     }
-    let user = &*(buf.as_ptr() as *const TOKEN_USER);
+    let user = &*(buf.as_ptr() as *const core::ffi::c_void as *const TOKEN_USER);
     Ok(user.User.Sid)
 }
 
@@ -193,7 +195,7 @@ pub unsafe fn build_acl_allow_only(
 }
 
 /// Initialize a security descriptor and attach a restrictive DACL.
-/// SAFETY: sd must point to at least `sd_len` writable bytes.
+/// SAFETY: sd must point to at least the size of SECURITY_DESCRIPTOR bytes.
 pub unsafe fn init_security_descriptor(
     sd: *mut SECURITY_DESCRIPTOR,
     dacl: *const ACL,
