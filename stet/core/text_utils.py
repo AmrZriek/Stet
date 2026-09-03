@@ -16,15 +16,17 @@ from stet.core.typos import (
 )
 
 _INLINE_HAZARD_RE = re.compile(
-    r'\b(?:https?://|ftp://|ssh://|file:///)\S+'  # Standard scheme URIs
-    r'|(?:(?<=\s)|^)file:///\S+'                   # file:/// at line start
-    r'|\b(?:www\.)\S+\b'                           # www. URLs
-    r'|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'  # Emails
-    r'|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b'  # Windows absolute backslash paths
-    r'|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b'   # Windows absolute slash paths
-    r'|(?:(?<=[\s"\'(])|^)/[/\w.-]+/[/\w.-]+\b'              # Unix absolute paths
-    r'|(?:(?<=[\s"\'(])|^)\.\.?/[/\w.-]+/[/\w.-]+\b'         # Unix relative paths
-    r'|(?:(?<=[\s"\'(])|^)\.\.?\\[\\\w.-]+\\[\\\w.-]+\b'  # Windows relative backslash paths
+    r"```[\s\S]*?```"                             # Code fences (multi-line code blocks)
+    r"|`[^`\n]+`"                                 # Inline code snippets
+    r"|\b(?:https?://|ftp://|ssh://|file:///)\S+"  # Standard scheme URIs
+    r"|(?:(?<=\s)|^)file:///\S+"                   # file:/// at line start
+    r"|\b(?:www\.)\S+\b"                           # www. URLs
+    r"|\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"  # Emails
+    r"|\b[a-zA-Z]:\\[\w.-]+(?:\\[\w.-]+)*(?:\.\w+)?\b"  # Windows absolute backslash paths
+    r"|\b[a-zA-Z]:/[\w.-]+(?:/[\w.-]+)*(?:\.\w+)?\b"   # Windows absolute slash paths
+    r"|(?:(?<=[\s\"\'(])|^)/[/\w.-]+/[/\w.-]+\b"              # Unix absolute paths
+    r"|(?:(?<=[\s\"\'(])|^)\.\.?/[/\w.-]+/[/\w.-]+\b"         # Unix relative paths
+    r"|(?:(?<=[\s\"\'(])|^)\.\.?\\[\\\w.-]+\\[\\\w.-]+\b"  # Windows relative backslash paths
 )
 
 
@@ -268,20 +270,39 @@ def strip_meta_commentary(text: str, original: str = "") -> str:
 
 
 def looks_like_prose(text: str) -> bool:
-    lines = text.splitlines() or [text]
-    sym = sum(text.count(c) for c in '{}=<>\\|#$@`~') / max(len(text), 1)
-    indented = sum(1 for line in lines if line[:1] in (' ', '\t') and line.strip())
-    words = re.findall(r"[A-Za-z']+", text)
+    if not text or not text.strip():
+        return False
+    # Strip sentinels and placeholders before measuring prose characteristics
+    cleaned = re.sub(r"__STET_PROTECTED_\d+__", " ", text)
+    cleaned = re.sub(r"\[REF\d+\]", " ", cleaned)
+    lines = cleaned.splitlines() or [cleaned]
+    non_empty_lines = [l for l in lines if l.strip()]
+    if not non_empty_lines:
+        return False
+
+    sym = sum(cleaned.count(c) for c in "{}=<>\\|#$@`~") / max(len(cleaned), 1)
+    indented = sum(1 for line in lines if line[:1] in (" ", "\t") and line.strip())
+    words = re.findall(r"[A-Za-z']+", cleaned)
     if not words:
         return False
-    mid_caps_count = sum(1 for w in words if re.search(r'[a-z][A-Z]', w))
+
+    mid_caps_count = sum(1 for w in words if re.search(r"[a-z][A-Z]", w))
     avg_caps_mid = mid_caps_count / len(words)
+
     if sym > 0.04 or indented >= 2 or (mid_caps_count >= 2 and avg_caps_mid > 0.15):
         return False
-    if re.search(r'^\s*(def\s+\w+\s*\(|class\s+\w+\s*[:\(]|function\s+\w*\s*\(|(?:const|let|var)\s+\w+\s*=|import\s+[\w{]|\$\s+[a-z_])', text, re.M):
+
+    # Standalone code definition / import statements
+    if re.search(
+        r"^\s*(def\s+\w+\s*\(|class\s+\w+\s*[:\(]|function\s+\w*\s*\(|(?:const|let|var)\s+\w+\s*=|import\s+[\w{]|\$\s+[a-z_])",
+        cleaned,
+        re.M,
+    ):
         return False
-    if re.search(r'\d{2}:\d{2}:\d{2}|0x[0-9a-fA-F]+|^\s*\[(DEBUG|INFO|WARN|ERROR)', text, re.M):
+
+    if re.search(r"\d{2}:\d{2}:\d{2}|0x[0-9a-fA-F]+|^\s*\[(DEBUG|INFO|WARN|ERROR)", cleaned, re.M):
         return False
+
     return True
 
 

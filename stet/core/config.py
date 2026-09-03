@@ -386,11 +386,27 @@ class ConfigManager:
                 json.dump(self.config, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_name, CONFIG_FILE)
-            temp_name = None
+
+            # Retry loop for Windows file locks / WinError 5 Access is denied
+            replaced = False
+            for attempt in range(5):
+                try:
+                    os.replace(temp_name, CONFIG_FILE)
+                    replaced = True
+                    temp_name = None
+                    break
+                except OSError as err:
+                    if getattr(err, "winerror", None) == 5 or "Access is denied" in str(err):
+                        time.sleep(0.02 * (attempt + 1))
+                    else:
+                        raise
+
+            if not replaced and temp_name is not None:
+                # Direct write fallback if atomic replace failed on Windows
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(self.config, f, indent=2)
         except Exception as e:
             log(f"Config save error: {e}")
-        finally:
             if temp_name is not None:
                 try:
                     os.unlink(temp_name)

@@ -809,3 +809,36 @@ def test_markdown_link_protected_as_construct(monkeypatch):
         assert "](" not in span, f"LLM saw link syntax in span: {span!r}"
         assert "https://example.com/page" not in span, f"LLM saw URL in span: {span!r}"
         assert "example.com" not in span, f"LLM saw URL fragment in span: {span!r}"
+
+
+def test_inline_code_and_code_blocks_masked_and_restored(monkeypatch):
+    """Markdown inline code (`code`) and code blocks must be protected as atoms,
+    pass looks_like_prose, and be restored verbatim without non-prose rejection.
+    """
+    from stet.core.config import ConfigManager
+    mgr = ModelManager(ConfigManager())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+    captured = []
+
+    def mock_rewrite(chunk, custom_sys, chunk_idx, total_chunks, strength, cancel_event, mode_prompt_override, session, profile):
+        captured.append(chunk)
+        return chunk.replace("skeleten", "skeleton")
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "- Wired raw Win32 FFI skeleten (`ffi-skel`) as `crates/stet-win32` in the `crates` workspace."
+    res = mgr.correct_text_patch(original, strength="full_correction")
+    result = res.text_or_none if hasattr(res, "text_or_none") else res[0]
+    assert len(captured) == 1
+    assert "__STET_PROTECTED_" in captured[0]
+    assert "`ffi-skel`" not in captured[0]
+    assert "`crates/stet-win32`" not in captured[0]
+    assert "`crates`" not in captured[0]
+
+    # Exact restored output with typo fixed and code preserved
+    assert "`ffi-skel`" in result
+    assert "`crates/stet-win32`" in result
+    assert "`crates`" in result
+    assert "skeleton" in result
+    assert "skeleten" not in result

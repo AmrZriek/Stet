@@ -1610,7 +1610,6 @@ class ModelManager(QObject):
                     not chunk_text.strip()
                     or not editable_text.strip()
                     or not looks_like_prose(editable_text)
-                    or not looks_like_prose(chunk_text)
                 ):
                     corrected_parts[idx] = (chunk_text, sep)
                     if chunk_text.strip():
