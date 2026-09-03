@@ -1,6 +1,5 @@
 import sys
 import time
-import json
 import itertools
 import difflib
 from unittest.mock import patch, MagicMock
@@ -11,6 +10,7 @@ import concurrent.futures
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from stet.llm.model_manager import ModelManager
+from tests.conftest import MockResponse
 from stet.core.config import ConfigManager
 from stet.core import text_utils
 
@@ -48,19 +48,6 @@ class BenchStats:
         self.rejected_chunks = 0
 
 stats = BenchStats()
-
-class MockResponse:
-    def __init__(self, json_data):
-        self.json_data = json_data
-        self.ok = True
-        self.status_code = 200
-        self.text = json.dumps(json_data)
-        
-    def raise_for_status(self):
-        pass
-        
-    def json(self):
-        return self.json_data
 
 def mock_post(url, json=None, **kwargs):
     global stats

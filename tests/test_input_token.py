@@ -5,9 +5,7 @@ canonical fingerprints per the spec, and bind a correction to its target via a
 single-use expiry-bound TargetToken.
 """
 
-import time
 
-import pytest
 
 from stet.core.input import (
     CompoundIdentity,

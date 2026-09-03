@@ -44,11 +44,13 @@ fn lab_pipe_dacl_build() {
     unsafe {
         use core::mem::MaybeUninit;
         let token = ffi_skel::security::open_current_token().expect("open token");
-        let user_sid = ffi_skel::security::token_user_sid(token).expect("token user sid");
+        let mut user_buf: [u64; 128] = [0u64; 128];
+        let user_sid = ffi_skel::security::token_user_sid(token, &mut user_buf).expect("token user sid");
         // ACL and SECURITY_DESCRIPTOR contain pointers -> must be 8-byte aligned.
-        let mut acl: MaybeUninit<ffi_skel::security::ACL> = MaybeUninit::<ffi_skel::security::ACL>::zeroed();
+        let mut acl_buf: [u64; 32] = [0u64; 32]; // 256 bytes backing buffer
+        let acl = acl_buf.as_mut_ptr() as *mut ffi_skel::security::ACL;
         ffi_skel::security::build_acl_allow_only(
-            acl.as_mut_ptr(),
+            acl,
             256,
             user_sid,
             ffi_skel::security::PIPE_ALL_ACCESS,
@@ -56,7 +58,7 @@ fn lab_pipe_dacl_build() {
         let mut sd: MaybeUninit<ffi_skel::security::SECURITY_DESCRIPTOR> = MaybeUninit::<ffi_skel::security::SECURITY_DESCRIPTOR>::zeroed();
         ffi_skel::security::init_security_descriptor(
             sd.as_mut_ptr(),
-            acl.as_ptr(),
+            acl as *const _,
         ).expect("init SD");
     }
 }
@@ -137,10 +139,10 @@ fn lab_launcher_job_object() {
     unsafe {
         let job = ffi_skel::launcher::create_job_object().expect("create job");
         ffi_skel::launcher::set_kill_on_close(job).expect("set kill-on-close");
-        let proc_h = ffi_skel::launcher::open_process(ffi_skel::launcher::current_process_id()).expect("open proc");
-        // Assign the current process to the job. Do NOT call TerminateJobObject here.
-        let _ = ffi_skel::launcher::assign_to_job(job, proc_h).expect("assign to job");
-        let _ = proc_h;
+        // SAFETY: never assign the test runner itself to a kill-on-close job —
+        // closing the job would terminate this test process. Only verify
+        // create/set succeed here; assignment is covered against a spawned
+        // suspended child in integration, not in this probe.
         let _ = job;
     }
 }

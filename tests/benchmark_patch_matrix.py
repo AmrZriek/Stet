@@ -10,7 +10,6 @@ Usage:
 import sys
 import time
 import csv
-import json
 import random
 import argparse
 import itertools
@@ -21,6 +20,7 @@ from dataclasses import dataclass
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from stet.core.text_utils import _chunk_text_by_sentences, _dict_prepass, _apply_post_fixes
+from tests.conftest import MockResponse
 
 # ── Matrix dimensions ──────────────────────────────────────────────────────
 CHUNK_SIZES = [40, 80, 120, 160, 200]
@@ -604,20 +604,6 @@ class RunMetrics:
     total_output_tokens: int = 0
     system_prompt_counted: bool = False
     elapsed_ms: float = 0.0
-
-
-class MockResponse:
-    def __init__(self, json_data: dict):
-        self.json_data = json_data
-        self.ok = True
-        self.status_code = 200
-        self.text = json.dumps(json_data)
-
-    def raise_for_status(self):
-        pass
-
-    def json(self):
-        return self.json_data
 
 
 def make_mock_post(metrics: RunMetrics):

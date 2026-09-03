@@ -22,7 +22,7 @@ from typing import Callable, List, Optional, Tuple
 from stet.core.engine_types import BudgetPolicy
 from stet.core.prompt_compiler import CompiledPrompt, PromptCompiler
 
-_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
+_SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+|(?<=[。！？])\s*")
 
 
 class PlanRegime(str, Enum):

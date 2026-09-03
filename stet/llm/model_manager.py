@@ -758,6 +758,10 @@ class ModelManager(QObject):
                 f"n_ctx_train={info.n_ctx_train}"
             )
 
+        if getattr(self, "_dynamic_context_size", None) is not None:
+            ctx = max(ctx, self._dynamic_context_size)
+            log(f"[{self.label}] Using dynamic expanded context_size: {ctx}")
+
         # Proactive VRAM pre-check: estimate memory requirements and warn if tight
         if gpu_detected and gpu_layers > 0:
             free_vram = query_free_vram_mb()
@@ -831,6 +835,10 @@ class ModelManager(QObject):
             str(self._get_param("min_p", 0.05)),
             "--repeat-penalty",
             str(self._get_param("repeat_penalty", 1.0)),
+            "--frequency-penalty",
+            str(self._get_param("frequency_penalty", 0.0)),
+            "--presence-penalty",
+            str(self._get_param("presence_penalty", 0.0)),
         ]
 
         # Generic hard-prime sanitization (replaces the old LFM-2.5 path
@@ -893,10 +901,10 @@ class ModelManager(QObject):
         if cache_v:
             cmd.extend(["--cache-type-v", cache_v])
         
-        if mtp_enabled:
+        if mtp_enabled and not disable_mtp and not force_cpu:
             draft_model_path = _find_mtp_draft_model(model_path)
             if draft_model_path and Path(draft_model_path).exists():
-                draft_ngl = "0" if force_cpu else str(gpu_layers)
+                draft_ngl = str(gpu_layers)
                 cmd.extend([
                     "--model-draft",
                     str(draft_model_path),
@@ -924,10 +932,10 @@ class ModelManager(QObject):
                     str(mtp_p_min),
                 ])
 
-        # NOTE: frequency-penalty and presence-penalty are omitted from CLI
-        # because not all llama-server builds support them. They are still
-        # sent in every API payload (see make_stream_worker) so user
-        # settings are honoured for all requests.
+        # NOTE: frequency-penalty and presence-penalty are sent both on CLI
+        # (supported since well before b10639 — see --help) and in every
+        # API payload, so user settings are honoured for all requests
+        # including non-SDK /completion callers that only honor CLI values.
 
         log(f"[{self.label}] Server command: {' '.join(cmd)}")
 
@@ -1451,6 +1459,93 @@ class ModelManager(QObject):
             with self._lock:
                 self._recycle_in_progress = False
 
+    def ensure_context_for_tokens(self, token_count: int) -> bool:
+        """Ensure the running server has enough context for the input text.
+
+        Invariant:
+        Default context window is 12,800.
+        Only if estimated input tokens exceed 0.4 of base context (e.g. > 5,120 for 12,800)
+        should it reload with an expanded context window.
+        """
+        import math
+        current_ctx = self.actual_ctx_size or self._get_param("context_size", 12800)
+        threshold = int(max(12800, current_ctx) * 0.4)
+        if token_count <= threshold:
+            return True
+
+        if not self.is_loaded():
+            return True
+
+        target_ctx = math.ceil((token_count / 0.4) / 1024) * 1024
+        target_ctx = max(12800, min(131072, target_ctx))
+        if target_ctx <= current_ctx:
+            return True
+
+        log(
+            f"[{self.label}] Input text (~{token_count} tokens) exceeds 0.4 of context "
+            f"({current_ctx}) — expanding context window to {target_ctx} and reloading"
+        )
+        self._dynamic_context_size = target_ctx
+        self.unload_model()
+        return self.load_model()
+    def get_correction_engine(self):
+        """Return a Phase 3 CorrectionEngineImpl wired to this ModelManager's server."""
+        from stet.core.engine import CorrectionEngineImpl
+        def _inference_call(messages: list[dict], max_tokens: int):
+            session = self._get_session()
+            req_timeout = 120 if getattr(self, "actual_backend_type", "cpu") in ("cpu", "unknown") else 60
+            payload = {
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": self._get_param("correction_temperature", 0.0),
+                "top_k": self._get_param("correction_top_k", 1),
+                "top_p": self._get_param("correction_top_p", 0.95),
+                "min_p": self._get_param("correction_min_p", 0.0),
+                # Parity with correct_text_patch payload: previously this
+                # test/engine path sent only 4 sampling fields, so seed /
+                # penalties / typical / mirostat silently differed from
+                # production behavior.
+                "seed": self._get_param("seed", -1),
+                "typical_p": self._get_param("typical_p", 1.0),
+                "mirostat": self._get_param("mirostat", 0),
+                "mirostat_tau": self._get_param("mirostat_tau", 5.0),
+                "mirostat_eta": self._get_param("mirostat_eta", 0.1),
+                "repeat_penalty": self._get_param("repeat_penalty", 1.0),
+                "frequency_penalty": self._get_param("frequency_penalty", 0.0),
+                "presence_penalty": self._get_param("presence_penalty", 0.0),
+                "stream": False,
+                "think": False,
+                "reasoning_budget": 0,
+                "chat_template_kwargs": {"enable_thinking": False},
+                "cache_prompt": self._get_param("cache_prompt", True),
+            }
+            r = session.post(self._chat_url(), json=payload, timeout=req_timeout)
+            r.raise_for_status()
+            data = r.json()
+            raw, finish = _extract_content_from_response(data)
+            usage = data.get("usage", {})
+            return raw, finish, usage
+
+        return CorrectionEngineImpl(inference_provider=_inference_call)
+
+    def correct_text_engine(self, request):
+        """Execute request using the Phase 3 Unified Correction Engine."""
+        from stet.core.engine_types import CorrectionResult
+        if not self.is_loaded():
+            if not self.load_model():
+                return CorrectionResult(
+                    text=request.text,
+                    changed=False,
+                    status="error",
+                    message="Model failed to load",
+                )
+        self.mark_used()
+        est_tokens = len(request.text.split()) * 4 // 3 + 64
+        self.ensure_context_for_tokens(est_tokens)
+        engine = self.get_correction_engine()
+        return engine.run(request)
+
+
     # ── patch correction (dict pre-pass + parallel sentence rewrite) ──────
     def correct_text_patch(
         self,
@@ -1470,6 +1565,11 @@ class ModelManager(QObject):
         """
         _t0 = time.monotonic()
         self.last_patch_error = None
+        # Ensure context window sizing: default 12,800.
+        # Only reload if input tokens exceed 0.4 of current context (> 5,120 for 12,800).
+        est_tokens = len(text.split()) * 4 // 3 + 64
+        self.ensure_context_for_tokens(est_tokens)
+
         if not self.is_loaded():
             if not self.load_model():
                 self.last_patch_error = "Model failed to load"
@@ -1549,10 +1649,11 @@ class ModelManager(QObject):
         # can't fit a 250-word rewrite plus thinking budget plus answer in one
         # slot; sentence-boundary chunking already guarantees cohesion at
         # 120 words. Mirrors the per-unit slot_limit computation below.
+        parallel_slots = max(1, self._get_param("parallel", 1))
         slot_tokens = (
             self.actual_ctx_size
             if self.actual_ctx_size is not None
-            else self._get_param("context_size", 12800) // self._get_param("parallel", 4)
+            else self._get_param("context_size", 12800) // parallel_slots
         )
         chunk_word_cap = (
             min(profile.chunk_words, 120) if slot_tokens < 2048 else profile.chunk_words
@@ -1578,8 +1679,6 @@ class ModelManager(QObject):
         _completed = 0
         units_corrected = 0
 
-        from stet.core.text_utils import looks_like_prose
-
         # Config-driven threshold — single source of truth, mirroring the
         # streaming fallback in main_window.py. The correction_modes row for
         # this strength is authoritative; fall back to the profile value when
@@ -1594,14 +1693,13 @@ class ModelManager(QObject):
         if threshold is None:
             threshold = profile.hallucination_threshold
 
-        max_workers = min(len(chunks), self._get_param("parallel", 4)) if chunks else 1
+        max_workers = min(len(chunks), parallel_slots) if chunks else 1
 
         shared_session = self._get_session()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
         # Track which chunks have protected atoms so we can attempt span-only
         # recovery on sentinel validation failure.
         _chunks_with_sentinels: dict[int, str] = {}  # idx -> original chunk text
-        non_prose_bypassed = False
         try:
             futures = {}
             for idx, (chunk_text, sep) in enumerate(chunks):
@@ -1609,11 +1707,8 @@ class ModelManager(QObject):
                 if (
                     not chunk_text.strip()
                     or not editable_text.strip()
-                    or not looks_like_prose(editable_text)
                 ):
                     corrected_parts[idx] = (chunk_text, sep)
-                    if chunk_text.strip():
-                        non_prose_bypassed = True
                     _completed += 1
                     if progress_cb is not None:
                         try:
@@ -1621,7 +1716,6 @@ class ModelManager(QObject):
                         except Exception:
                             pass
                     continue
-
                 # Record chunks that contain sentinels for recovery.
                 if _INLINE_SENTINEL_RE.search(chunk_text):
                     _chunks_with_sentinels[idx] = chunk_text
@@ -1927,17 +2021,17 @@ class ModelManager(QObject):
                     protected_atom_count=len(masked_entities),
                     reason=_reason, elapsed_s=_elapsed,
                 )
-            elif non_prose_bypassed or any_preserved:
+            elif any_preserved:
                 log(
-                    f"[{self.label}] Patch: non-prose unit(s) "
-                    f"preserved original — outcome=UNCHANGED_NON_PROSE "
+                    f"[{self.label}] Patch: protected atom unit(s) "
+                    f"preserved original — outcome=UNCHANGED_PROTECTED "
                     f"elapsed={_elapsed:.2f}s"
                 )
                 return CorrectionResult(
-                    text=text, outcome=CorrectionOutcome.UNCHANGED_NON_PROSE,
+                    text=text, outcome=CorrectionOutcome.UNCHANGED_PROTECTED,
                     units_processed=len(chunks), units_corrected=0,
-                    protected_atom_count=0,
-                    reason="Non-prose content preserved", elapsed_s=_elapsed,
+                    protected_atom_count=len(masked_entities),
+                    reason="Protected content preserved", elapsed_s=_elapsed,
                 )
             else:
                 if not self.last_patch_error:
@@ -1968,8 +2062,6 @@ class ModelManager(QObject):
         if not changed:
             if masked_entities:
                 outcome = CorrectionOutcome.UNCHANGED_PROTECTED
-            elif non_prose_bypassed:
-                outcome = CorrectionOutcome.UNCHANGED_NON_PROSE
             elif self.last_patch_error:
                 outcome = CorrectionOutcome.UNCHANGED_PROTECTED
 
@@ -2246,7 +2338,7 @@ class ModelManager(QObject):
         slot_limit = (
             self.actual_ctx_size
             if self.actual_ctx_size is not None
-            else self._get_param("context_size", 12800) // self._get_param("parallel", 4)
+            else self._get_param("context_size", 12800) // max(1, self._get_param("parallel", 1))
         )
         max_tokens = min(max(int(est_input_tokens * 3.0) + 128, 512), 2048)
         # Prevent slot overflow by capping max_tokens to the remaining slot budget
@@ -2279,7 +2371,11 @@ class ModelManager(QObject):
             ),
             "seed": self._get_param("seed", -1),
             "typical_p": self._get_param("typical_p", 1.0),
-            "tfs_z": self._get_param("tfs_z", 1.0),
+            # NOTE (b10639): TFS-Z sampler removed upstream — bundled
+            # llama-server parses no tfs_z key (0 hits in
+            # llama-server-impl.dll / llama-common.dll). GUI knob kept
+            # for back-compat but deliberately NOT sent: server would
+            # silently ignore it, pretending the setting works.
             "mirostat": self._get_param("mirostat", 0),
             "mirostat_tau": self._get_param("mirostat_tau", 5.0),
             "mirostat_eta": self._get_param("mirostat_eta", 0.1),
@@ -2498,7 +2594,11 @@ class ModelManager(QObject):
             "min_p": self._get_param("min_p", 0.05),
             "seed": self._get_param("seed", -1),
             "typical_p": self._get_param("typical_p", 1.0),
-            "tfs_z": self._get_param("tfs_z", 1.0),
+            # NOTE (b10639): TFS-Z sampler removed upstream — bundled
+            # llama-server parses no tfs_z key (0 hits in
+            # llama-server-impl.dll / llama-common.dll). GUI knob kept
+            # for back-compat but deliberately NOT sent: server would
+            # silently ignore it, pretending the setting works.
             "mirostat": self._get_param("mirostat", 0),
             "mirostat_tau": self._get_param("mirostat_tau", 5.0),
             "mirostat_eta": self._get_param("mirostat_eta", 0.1),

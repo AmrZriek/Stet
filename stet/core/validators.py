@@ -11,7 +11,7 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass
-from typing import Optional, Set
+from typing import List, Optional, Set
 
 from stet.core.engine_types import GuardSet
 
@@ -59,8 +59,10 @@ class UnitValidator:
 
         # 2. Reference marker preservation ([REF1], [REF2], ...)
         if guard_set.preserve_reference_markers:
-            in_placeholders: Set[str] = set(_PLACEHOLDER_RE.findall(input_text))
-            out_placeholders: Set[str] = set(_PLACEHOLDER_RE.findall(cleaned))
+            in_list: List[str] = _PLACEHOLDER_RE.findall(input_text)
+            out_list: List[str] = _PLACEHOLDER_RE.findall(cleaned)
+            in_placeholders: Set[str] = set(in_list)
+            out_placeholders: Set[str] = set(out_list)
             missing = in_placeholders - out_placeholders
             if missing:
                 return ValidationOutcome(
@@ -68,7 +70,20 @@ class UnitValidator:
                     cleaned_text=input_text,
                     reason=f"Protected reference markers missing: {sorted(missing)}",
                 )
-
+            extra = out_placeholders - in_placeholders
+            if extra:
+                return ValidationOutcome(
+                    valid=False,
+                    cleaned_text=input_text,
+                    reason=f"Hallucinated reference markers detected: {sorted(extra)}",
+                )
+            for ph in in_placeholders:
+                if out_list.count(ph) > in_list.count(ph):
+                    return ValidationOutcome(
+                        valid=False,
+                        cleaned_text=input_text,
+                        reason=f"Protected reference marker duplicated: {ph}",
+                    )
         # 3. Code fence preservation (```)
         if guard_set.preserve_code_blocks:
             in_fences = input_text.count("```")
@@ -127,16 +142,26 @@ class DocumentValidator:
         if not assembled_doc and original_doc:
             return ValidationOutcome(valid=False, cleaned_text=original_doc, reason="Assembled document is empty")
 
-        # Verify all original reference markers are present
+        # Post-restore there should be no [REFn] left unless the user typed
+        # it literally in the original. Any other leftover is a hallucinated
+        # or un-restored marker leaking to the user.
         if guard_set.preserve_reference_markers:
-            orig_placeholders = set(_PLACEHOLDER_RE.findall(original_doc))
-            assem_placeholders = set(_PLACEHOLDER_RE.findall(assembled_doc))
-            missing = orig_placeholders - assem_placeholders
-            if missing:
+            orig_literals = set(_PLACEHOLDER_RE.findall(original_doc))
+            assem_placeholders = _PLACEHOLDER_RE.findall(assembled_doc)
+            assem_set = set(assem_placeholders)
+            extra = assem_set - orig_literals
+            if extra:
                 return ValidationOutcome(
                     valid=False,
                     cleaned_text=original_doc,
-                    reason=f"Document missing protected markers: {sorted(missing)}",
+                    reason=f"Document has hallucinated markers: {sorted(extra)}",
                 )
+            for ph in assem_set & orig_literals:
+                if assem_placeholders.count(ph) > original_doc.count(ph):
+                    return ValidationOutcome(
+                        valid=False,
+                        cleaned_text=original_doc,
+                        reason=f"Document has duplicated marker: {ph}",
+                    )
 
         return ValidationOutcome(valid=True, cleaned_text=assembled_doc)

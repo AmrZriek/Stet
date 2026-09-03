@@ -3,6 +3,7 @@ import json
 import math
 import os
 import tempfile
+import time
 
 from stet.constants import (
     CONFIG_FILE,
@@ -124,7 +125,21 @@ class ConfigManager:
                 cfg.update(saved)
             except Exception as e:
                 log(f"Config load error: {e}")
-
+                try:
+                    import shutil
+                    from datetime import datetime
+                    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    backup_path = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.corrupt.{stamp}.bak")
+                    shutil.copy2(CONFIG_FILE, backup_path)
+                    # Keep a stable pointer for support/debugging.
+                    stable = CONFIG_FILE.with_name(f"{CONFIG_FILE.name}.corrupt.bak")
+                    try:
+                        shutil.copy2(CONFIG_FILE, stable)
+                    except Exception:
+                        pass
+                    log(f"Backed up corrupted config file to {backup_path}")
+                except Exception as bkp_err:
+                    log(f"Failed to backup corrupted config: {bkp_err}")
         # Migrate correction mode thresholds to updated defaults
         modes = cfg.get("correction_modes", [])
         if modes and isinstance(modes, list):

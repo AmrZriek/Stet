@@ -157,6 +157,17 @@ class TestPhase1bIpcProtocol:
         assert verify_auth_proof(wrong_secret, proto_ver, min_core, pid, nonce, proof) is False
         assert verify_auth_proof(secret, proto_ver, min_core, pid + 1, nonce, proof) is False
 
+    def test_ipc_client_defaults_and_disconnected_methods(self):
+        from stet.core.ipc_client import IpcClient
+        client = IpcClient()
+        assert client.secret is not None
+        assert len(client.secret) >= 16
+        assert client.is_connected() is False
+        assert client.capture_selection() is None
+        assert client.paste_text("test") is None
+        client.close()
+        assert client.is_connected() is False
+
 
 class TestPhase1cEngineProtocol:
     """Test TaskSpec and CorrectionRequest/Result contracts."""
@@ -164,7 +175,7 @@ class TestPhase1cEngineProtocol:
     def test_task_spec_defaults(self):
         spec = TaskSpec()
         assert spec.task_type == TaskType.CORRECT
-        assert spec.budget_policy.context_size == 4096
+        assert spec.budget_policy.context_size == 12800
         assert spec.guard_set.preserve_code_blocks is True
 
     def test_correction_request_and_result(self):

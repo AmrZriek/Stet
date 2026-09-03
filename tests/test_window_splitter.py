@@ -7,12 +7,9 @@ the overlap is context only. The reassembler discards output outside the
 owning interval. Part of the sequential windowed pass regime.
 """
 
-import pytest
 
 from stet.llm.window_splitter import (
-    SplitError,
     WindowSplitter,
-    Window,
 )
 
 

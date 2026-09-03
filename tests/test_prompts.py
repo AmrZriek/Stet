@@ -1,4 +1,5 @@
 from stet.constants import DEFAULT_CONFIG
+from tests.conftest import MockResponse
 from stet.ui.main_window import CorrectionWindow
 
 
@@ -180,17 +181,11 @@ def test_gemma_model_messages_format(monkeypatch):
 
     captured_payload = None
 
-    class MockResponse:
-        def json(self):
-            return {"choices": [{"message": {"content": "corrected"}}]}
-        def raise_for_status(self):
-            pass
-
     class MockSession:
         def post(self, url, json, timeout):
             nonlocal captured_payload
             captured_payload = json
-            return MockResponse()
+            return MockResponse({"choices": [{"message": {"content": "corrected"}}]})
         def close(self):
             pass
 

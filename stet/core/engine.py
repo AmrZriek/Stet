@@ -107,6 +107,12 @@ class CorrectionEngineImpl(CorrectionEngine):
                 window.compiled_prompt,
             )
 
+            if not markers_found:
+                # Truncated or preamble/injection outside markers — never
+                # reassemble untrusted text. Retain original for this unit.
+                window_outputs.append(window.context_text)
+                continue
+
             # Validate unit
             val = UnitValidator.validate(
                 input_text=window.context_text,
@@ -128,7 +134,20 @@ class CorrectionEngineImpl(CorrectionEngine):
             protected_doc=protected_doc,
         )
 
-        # 5. Whole-document validation
+        if not all_atoms_preserved:
+            # A protected atom (URL/code/email) was dropped by the model.
+            # Never silently delete user data — fall back to original.
+            return CorrectionResult(
+                text=original_text,
+                changed=False,
+                status="atoms_dropped",
+                finish_reason=last_finish_reason,
+                token_usage=total_tokens,
+                message="Protected content dropped by model; retained original",
+            )
+
+        # 5. Whole-document validation (post-restore: no stray [REFn]
+        # unless the user typed it literally).
         doc_val = DocumentValidator.validate(
             original_doc=original_text,
             assembled_doc=assembled_text,

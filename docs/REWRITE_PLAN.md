@@ -1,7 +1,7 @@
 # Stet v2.0 Rewrite — Master Specification & Progress Tracker
 
 > Canonical Document: `docs/REWRITE_PLAN.md`  
-> Last Updated: 2026-09-02  
+> Last Updated: 2026-09-03
 > Status: **PHASES 0, 1, 3, 5 COMPLETE & VERIFIED** | **PHASE 2 & 6 FINAL INTEGRATION**
 
 ---
@@ -26,7 +26,7 @@ The Stet v2.0 Rewrite re-architects Stet from a synchronous monolithic Python sc
 │  ┌────────────────────────┐         ┌───────────────────────────────┐  │
 │  │   IPC Wire Protocol    │         │      llama.cpp Backend        │  │
 │  │   (HMAC-SHA256 Auth,   │         │  (CUDA / Metal / CPU, Q4_K_XL │  │
-│  │    4 MiB Framed JSON)  │         │   parallel=1, n_ctx=4096)     │  │
+│  │    4 MiB Framed JSON)  │         │   parallel=1, n_ctx=12800)    │  │
 │  └────────────────────────┘         └───────────────────────────────┘  │
 └───────────────┬────────────────────────────────────────────────────────┘
                 │ Named Pipe (`\\.\pipe\stet_ipc_v2`)
@@ -111,7 +111,7 @@ The Stet v2.0 Rewrite re-architects Stet from a synchronous monolithic Python sc
 
 | Test Suite / Target | Location | Result | Execution Proof |
 | :--- | :--- | :--- | :--- |
-| **Python Main Checkout** | `D:/Projects/Software/Stet` | **1,293 passed, 0 failed, 3 skipped** | `pytest -q` |
+| **Python Main Checkout** | `D:/Projects/Software/Stet` | **1,428 passed, 0 failed, 4 skipped** | `pytest -q` |
 | **Python Worktree Sandbox** | `D:/Projects/Software/Stet-wt-phase0` | **1,403 passed, 0 failed, 9 skipped** | `pytest -q` |
 | **Rust Native Workspace** | `crates/` (12 suites) | **189 passed, 0 failed** | `cargo test -j 1` |
 | **Win32 Lab Probes** | `crates/stet-win32` | **8 passed, 0 failed** | `cargo test --features lab -j 1` |

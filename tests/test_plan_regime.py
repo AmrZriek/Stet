@@ -7,10 +7,8 @@ to the generation reservation. This module decides which regeneration regime to
 use and the pre-pass summary budget.
 """
 
-import pytest
 
 from stet.llm.plan_regime import (
-    PrepassDecision,
     PlanRegime,
     RegimeSelector,
     summary_budget,

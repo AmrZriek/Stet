@@ -85,7 +85,8 @@ pub const EXTENDED_STARTUPINFO_PRESENT: DWORD = 0x0008_0000;
 pub const JobObjectExtendedLimitInformation: u32 = 9;
 
 /// PROC_THREAD_ATTRIBUTE_HANDLE_LIST (the explicit inherited-handle list).
-pub const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0002_0000;
+/// ProcThreadAttributeValue(2, FALSE, TRUE, FALSE) = 0x60002.
+pub const PROC_THREAD_ATTRIBUTE_HANDLE_LIST: usize = 0x0006_0002;
 
 /// Desired access for OpenProcess on the target.
 pub const PROCESS_ALL_ACCESS: DWORD = 0x001F_0FFF;
@@ -132,13 +133,19 @@ pub unsafe fn terminate_job(job: HANDLE, code: u32) -> bool {
     TerminateJobObject(job, code) != 0
 }
 
-/// Initialize a proc-thread attribute list. Returns the required size as a pointer
-/// for the first call (can be null to query size).
+/// Initialize a proc-thread attribute list. First call with null buf queries
+/// the required size (ERROR_INSUFFICIENT_BUFFER is success for sizing).
 /// SAFETY: first call with null to get size, second call fills.
 pub unsafe fn init_attribute_list(buf: *mut core::ffi::c_void, count: u32, size: &mut usize) -> Result<(), DWORD> {
     let ok = InitializeProcThreadAttributeList(buf, count, 0, size as *mut usize);
     if ok == 0 {
-        Err(crate::pipe::last_error())
+        let err = crate::pipe::last_error();
+        // Sizing query: buffer too small is the expected signal, not failure.
+        // ERROR_INSUFFICIENT_BUFFER = 122.
+        if buf.is_null() && err == 122 {
+            return Ok(());
+        }
+        Err(err)
     } else {
         Ok(())
     }
@@ -171,12 +178,22 @@ pub unsafe fn delete_attribute_list(list: *mut core::ffi::c_void) {
     DeleteProcThreadAttributeList(list);
 }
 
-/// Suspend/Resume.
-pub unsafe fn resume_thread(thread: HANDLE) -> u32 {
-    ResumeThread(thread)
+/// Suspend/Resume. Returns previous suspend count; Err on failure (-1).
+pub unsafe fn resume_thread(thread: HANDLE) -> Result<u32, DWORD> {
+    let rc = ResumeThread(thread);
+    if rc == u32::MAX {
+        Err(crate::pipe::last_error())
+    } else {
+        Ok(rc)
+    }
 }
-pub unsafe fn suspend_thread(thread: HANDLE) -> u32 {
-    SuspendThread(thread)
+pub unsafe fn suspend_thread(thread: HANDLE) -> Result<u32, DWORD> {
+    let rc = SuspendThread(thread);
+    if rc == u32::MAX {
+        Err(crate::pipe::last_error())
+    } else {
+        Ok(rc)
+    }
 }
 
 /// Get the current process id.

@@ -493,6 +493,16 @@ class CorrectionWindow(QWidget):
                 idx = (self.strength_combo.currentIndex() + 1) % 3
                 self.strength_combo.setCurrentIndex(idx)
                 return True
+            # Plain Tab inside the diff view → jump to next change.
+            # Everywhere else Tab keeps native focus traversal (WCAG 2.1.1).
+            if (
+                key == Qt.Key.Key_Tab
+                and not (event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+                and obj is getattr(self, "corr_edit", None)
+                and not getattr(self, "_edit_text_mode", False)
+            ):
+                if self._jump_to_next_change():
+                    return True
             # Enter routing for chat_input: send if text, accept if empty.
             if obj is self.chat_input and key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
                 if self.chat_input.text().strip():
@@ -501,6 +511,31 @@ class CorrectionWindow(QWidget):
                     self._accept()
                 return True  # consumed — don't let QLineEdit fire returnPressed
         return super().eventFilter(obj, event)
+
+    def _jump_to_next_change(self) -> bool:
+        """Jump cursor to the next difference in corr_edit and highlight it."""
+        changes = getattr(self, "_diff_changes", [])
+        if not changes:
+            return False
+        idx = getattr(self, "_current_change_nav_idx", -1) + 1
+        if idx >= len(changes):
+            idx = 0
+        self._current_change_nav_idx = idx
+
+        target_change = changes[idx]
+        char_j1 = target_change.get("char_j1", 0)
+        char_j2 = target_change.get("char_j2", char_j1)
+
+        doc_len = max(0, self.corr_edit.document().characterCount() - 1)
+        char_j1 = min(max(0, char_j1), doc_len)
+        char_j2 = min(max(0, char_j2), doc_len)
+        from PyQt6.QtGui import QTextCursor
+        cursor = self.corr_edit.textCursor()
+        cursor.setPosition(char_j1)
+        cursor.setPosition(char_j2, QTextCursor.MoveMode.KeepAnchor)
+        self.corr_edit.setTextCursor(cursor)
+        self.corr_edit.ensureCursorVisible()
+        return True
 
     def _on_escape(self):
         if hasattr(self, "_shortcuts_overlay") and self._shortcuts_overlay.isVisible():
@@ -647,6 +682,15 @@ class CorrectionWindow(QWidget):
             if self.accept_btn.isEnabled():
                 self._accept()
                 return
+        # 'E' key when not in text edit mode and not typing in chat_input → toggle edit mode
+        if (
+            e.key() == Qt.Key.Key_E
+            and not (e.modifiers() & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier))
+            and not getattr(self, "_edit_text_mode", False)
+            and not self.chat_input.hasFocus()
+        ):
+            self._toggle_edit_text_mode()
+            return
         super().keyPressEvent(e)
 
     def _make_sep(self):
@@ -694,15 +738,12 @@ class CorrectionWindow(QWidget):
         self.method_badge.setObjectName("methodBadge")
         hdr.addWidget(self.method_badge)
 
-        hdr.addStretch()
-
         self.status_lbl = QLabel("● Idle")
         self.status_lbl.setObjectName("statusLabel")
         self._status_label = self.status_lbl
-        # Reserve room for the shortest status states ("● Idle" / "✓  Done")
-        # so the mark has consistent breathing room on narrow windows.
-        self.status_lbl.setMinimumWidth(80)
         hdr.addWidget(self.status_lbl)
+
+        hdr.addStretch()
 
         self.edit_text_btn = QPushButton("Edit text")
         self.edit_text_btn.setObjectName("editTextBtn")
@@ -993,6 +1034,33 @@ class CorrectionWindow(QWidget):
         btn_row.addWidget(self.accept_btn)
 
         lay.addWidget(footer)
+
+        # Monospace keyboard navigation helper footer bar
+        shortcut_footer = QWidget()
+        shortcut_footer.setObjectName("shortcutNavFooter")
+        sf_lay = QHBoxLayout(shortcut_footer)
+        sf_lay.setContentsMargins(16, 6, 16, 6)
+        sf_lay.setSpacing(0)
+
+        self._shortcut_nav_label = QLabel(
+            '<span style="color:#d4a373; font-weight:bold;">[Enter]</span> '
+            '<span style="color:#88898c;">Accept &amp; Replace</span>'
+            '&nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp;'
+            '<span style="color:#d4a373; font-weight:bold;">[Esc]</span> '
+            '<span style="color:#88898c;">Discard &amp; Close</span>'
+            '&nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp;'
+            '<span style="color:#d4a373; font-weight:bold;">[Tab]</span> '
+            '<span style="color:#88898c;">Next Change</span>'
+            '&nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp;'
+            '<span style="color:#d4a373; font-weight:bold;">[E]</span> '
+            '<span style="color:#88898c;">Edit Text</span>'
+        )
+        self._shortcut_nav_label.setObjectName("shortcutNavLabel")
+        self._shortcut_nav_label.setTextFormat(Qt.TextFormat.RichText)
+        self._shortcut_nav_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sf_lay.addWidget(self._shortcut_nav_label)
+
+        lay.addWidget(shortcut_footer)
 
     def _chat_transcript_html(self, final_result: str | None = None) -> str:
         parts = [
@@ -1554,7 +1622,7 @@ class CorrectionWindow(QWidget):
         self._update_status("⚠  Could not correct", "error")
         self.corr_edit.setPlainText(self.original)
         self.corrected = self.original
-        self.accept_btn.setEnabled(True)
+        self.accept_btn.setEnabled(False)
         self.copy_btn.setEnabled(True)
         self.send_btn.setEnabled(True)
         if hasattr(self, "edit_text_btn") and not getattr(self, "_is_chat_mode", False):
@@ -1577,7 +1645,7 @@ class CorrectionWindow(QWidget):
         self._update_status(f"⚠  {error_msg}", "error")
         self.corr_edit.setPlainText(self.original)
         self.corrected = self.original
-        self.accept_btn.setEnabled(True)
+        self.accept_btn.setEnabled(False)
         self.copy_btn.setEnabled(True)
         self.send_btn.setEnabled(True)
         if hasattr(self, "edit_text_btn") and not getattr(self, "_is_chat_mode", False):
@@ -2436,6 +2504,9 @@ class CorrectionWindow(QWidget):
                 self.corrected = self.corr_edit.toPlainText()
             self._exit_edit_text_mode(apply_changes=True)
         text = self.corrected
+        if not (text or "").strip():
+            self._update_status("⚠  Nothing to accept — text is empty", "error")
+            return
         # WA_DeleteOnClose (set in __init__) would destroy the C++ object
         # during close(), killing the deferred emit below — app._paste_text
         # still reads window state (strength, original) when the signal

@@ -52,6 +52,36 @@ def _detect_strength_from_messages(messages: list) -> str:
     return "full_correction"
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-live",
+        action="store",
+        nargs="?",
+        const="base",
+        default=None,
+        metavar="BASE|FULL",
+        help="Run live LLM tests against a real llama-server (default: skip). "
+        "Use '--run-live' for the baseline smoke matrix, '--run-live=full' "
+        "for the full model x setting x corpus sweep (slow).",
+    )
+
+
+def _live_opt_out(request) -> bool:
+    """True when this node is a live test explicitly enabled via --run-live.
+
+    Central gate so the autouse isolation fixtures (mock HTTP, blocked model
+    load, temp config) step aside for live-matrix tests only. Normal runs are
+    unaffected: without --run-live the live tests skip in their fixture.
+    """
+    marker = request.node.get_closest_marker("live")
+    if marker is None:
+        return False
+    try:
+        return request.config.getoption("run_live") is not None
+    except ValueError:
+        return False
+
+
 class MockResponse:
     def __init__(self, json_data, status_code=200):
         self.json_data = json_data
@@ -70,7 +100,7 @@ class MockResponse:
 
 
 @pytest.fixture(autouse=True)
-def mock_llm_post(monkeypatch):
+def mock_llm_post(monkeypatch, request):
     """Intercept HTTP calls and return strength-appropriate mock responses.
 
     Inspects the request payload to detect correction strength from the
@@ -98,6 +128,8 @@ def mock_llm_post(monkeypatch):
             return MockResponse({"prompt": "<|im_start|>assistant\n"})
         return original_post(self, url, *args, **kwargs)
 
+    if _live_opt_out(request):
+        return  # live-matrix tests talk to the real server
     monkeypatch.setattr(requests.Session, "post", mock_post)
 
 
@@ -109,7 +141,8 @@ def block_model_load(monkeypatch, request):
     # subprocess.Popen patched out. nodeid carries the class, so check it
     # (node.name alone is just the function name).
     if (
-        "test_gpu_" in request.node.name
+        _live_opt_out(request)
+        or "test_gpu_" in request.node.name
         or "TestServerLaunchCommand" in request.node.nodeid
         or "TestMtpLoadingAndFallback" in request.node.nodeid
         or "TestAuditEnhancements" in request.node.nodeid
@@ -159,7 +192,7 @@ def isolate_debug_log(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def isolate_config(request, tmp_path, monkeypatch):
     """Redirect config file & APP_DATA_DIR to a temp file so tests never pollute root."""
-    if "test_frozen_compat" in request.module.__name__:
+    if "test_frozen_compat" in request.module.__name__ or _live_opt_out(request):
         return
     temp_config = tmp_path / "config.json"
     temp_app_data = tmp_path / "app_data"
@@ -200,8 +233,10 @@ def mock_macos_system_tray(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def mock_llm_get(monkeypatch):
+def mock_llm_get(monkeypatch, request):
     """Intercept HTTP GET calls to health endpoints in tests to prevent 180s hangs."""
+    if _live_opt_out(request):
+        return  # live-matrix tests need real health checks
     original_get = requests.get
 
     def mock_get(url, *args, **kwargs):

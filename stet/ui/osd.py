@@ -21,6 +21,7 @@ class SilentCorrectionOSD(QWidget):
         "success": "#4ade80",
         "success_undo": "#4ade80",
         "warning": "#f87171",
+        "info": "#38bdf8",
     }
 
     def __init__(self, message: str, state: str = "success", parent=None,

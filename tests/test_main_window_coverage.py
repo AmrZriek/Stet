@@ -792,7 +792,7 @@ class TestCorrectionCallbacks:
         cw = _make_cw(cfg, qtbot)
         cw._correction_cancelled = False
         cw._on_correction_failed()
-        assert cw.accept_btn.isEnabled()
+        assert not cw.accept_btn.isEnabled()
 
     def test_on_correction_failed_cancelled(self, qtbot, cfg):
         cw = _make_cw(cfg, qtbot)

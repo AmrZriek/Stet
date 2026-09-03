@@ -8,7 +8,6 @@ the wrong order relative to event processing. The cleanup fixture must:
 3. stay a safe no-op when no QApplication exists (headless/offscreen).
 """
 
-import gc
 
 
 def test_cleanup_fixture_processes_events_before_gc():
@@ -16,8 +15,6 @@ def test_cleanup_fixture_processes_events_before_gc():
 
     This encodes the ordering that prevents the Qt GC access violation.
     """
-    import conftest
-    import pytest
     from PyQt6.QtWidgets import QApplication
 
     qapp = QApplication.instance()

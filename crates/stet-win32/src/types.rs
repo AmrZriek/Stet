@@ -178,6 +178,7 @@ pub const WAIT_ABANDONED: u32 = 0x80;
 pub const WAIT_TIMEOUT: u32 = 0x102;
 pub const WAIT_FAILED: u32 = 0xFFFFFFFF;
 pub const ERROR_ACCESS_DENIED: u32 = 5;
+pub const ERROR_INVALID_PARAMETER: u32 = 87;
 pub const ERROR_BROKEN_PIPE: u32 = 109;
 pub const ERROR_PIPE_BUSY: u32 = 231;
 pub const ERROR_NO_DATA: u32 = 232;
@@ -186,7 +187,8 @@ pub const ERROR_SUCCESS: u32 = 0;
 
 /// Security descriptor / ACL control bits.
 pub const DACL_SECURITY_INFORMATION: u32 = 0x00000004;
-pub const SE_OBJECT_TYPE: u32 = 0;
+// NOTE: canonical SE_OBJECT_TYPE for pipes lives in security.rs
+// (SE_FILE_OBJECT = 1). No duplicate here to prevent drift.
 pub const SECURITY_ATTRIBUTES_FLAG: u32 = 1;
 
 // ─────────────────────────────── structures ───────────────────────────────

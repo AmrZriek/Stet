@@ -1,7 +1,6 @@
 """Tests for llama-server freeze auto-recovery, single-owner CAS, ReadTimeout retry, and GPU detection."""
 
 import json
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest

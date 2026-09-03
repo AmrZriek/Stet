@@ -271,7 +271,7 @@ class DownloadProgressDialog(QDialog):
         title_bar_lay.setContentsMargins(16, 12, 16, 12)
         title_bar_lay.setSpacing(0)
 
-        title_lbl = QLabel("STET DOWNLOADER")
+        title_lbl = QLabel("STET — OFFLINE ENGINE SETUP")
         title_lbl.setObjectName("downloadHeaderTitle")
         title_bar_lay.addWidget(title_lbl)
         title_bar_lay.addStretch()
@@ -474,19 +474,17 @@ class DownloadProgressDialog(QDialog):
         num_files = len(self._downloads)
         current_download = self._downloads[file_index]
         label_text = current_download.get("label", Path(current_download["dest"]).name)
-        self._file_lbl.setText(f"Downloading ({file_index + 1}/{num_files}): {label_text}")
+        self._file_lbl.setText(f"Downloading component ({file_index + 1} of {num_files}): {label_text}")
 
         if total_bytes > 0:
             self._progress_bar.setRange(0, total_bytes)
             self._progress_bar.setValue(bytes_downloaded)
-            remaining_bytes = total_bytes - bytes_downloaded
-            remaining_str = format_bytes(remaining_bytes)
+            done_str = format_bytes(bytes_downloaded)
             total_str = format_bytes(total_bytes)
-            self._stats_lbl.setText(f"Speed: {speed_str} | Remaining: {remaining_str} of {total_str}")
+            self._stats_lbl.setText(f"{done_str} of {total_str} • {speed_str}")
         else:
             self._progress_bar.setRange(0, 0)
-            self._stats_lbl.setText(f"Speed: {speed_str} | Downloaded: {format_bytes(bytes_downloaded)}")
-
+            self._stats_lbl.setText(f"{format_bytes(bytes_downloaded)} downloaded • {speed_str}")
     def _on_finished(self, success, error_message):
         self._cleanup_partial_files()
 
@@ -498,7 +496,19 @@ class DownloadProgressDialog(QDialog):
         if success:
             self.accept()
         else:
-            self._error_lbl.setText(f"Error: {error_message}")
+            friendly_msg = error_message
+            err_lower = error_message.lower()
+            if "11001" in error_message or "getaddrinfo" in err_lower or "name resolution" in err_lower:
+                friendly_msg = "No internet connection detected. Please check your network and retry."
+            elif "timed out" in err_lower or "timeout" in err_lower:
+                friendly_msg = "Connection timed out. The download server may be busy or unreachable."
+            elif "10054" in error_message or "forcibly closed" in err_lower:
+                friendly_msg = "Connection was reset by the server. Please click Retry."
+            elif "no space left" in err_lower or "errno 28" in err_lower:
+                friendly_msg = "Not enough disk space to download and extract the model files."
+            elif "404" in error_message:
+                friendly_msg = "Model file not found on remote server (HTTP 404)."
+            self._error_lbl.setText(f"{friendly_msg}")
             self._error_lbl.show()
             self._stats_lbl.setText("Download failed.")
             self._cancel_btn.setText("Close")

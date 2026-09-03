@@ -81,8 +81,9 @@ pub const FILE_SHARE_WRITE: u32 = 0x00000002;
 /// Round-trip unit for a small buffer write/read. Returns the number of bytes.
 /// SAFETY: caller guarantees the pointers are valid for `len` bytes.
 pub unsafe fn write_bytes(handle: HANDLE, buf: *const u8, len: usize) -> Result<usize, DWORD> {
+    let count: DWORD = u32::try_from(len).map_err(|_| ERROR_INVALID_PARAMETER)?;
     let mut written: DWORD = 0;
-    let ok = WriteFile(handle, buf as *const core::ffi::c_void, len as DWORD, &mut written, core::ptr::null_mut());
+    let ok = WriteFile(handle, buf as *const core::ffi::c_void, count, &mut written, core::ptr::null_mut());
     if ok == 0 {
         Err(last_error())
     } else {
@@ -93,8 +94,9 @@ pub unsafe fn write_bytes(handle: HANDLE, buf: *const u8, len: usize) -> Result<
 /// Round-trip unit for a bounded read.
 /// SAFETY: caller guarantees the buffer points to at least `cap` bytes of writable memory.
 pub unsafe fn read_bytes(handle: HANDLE, buf: *mut u8, cap: usize) -> Result<usize, DWORD> {
+    let count: DWORD = u32::try_from(cap).map_err(|_| ERROR_INVALID_PARAMETER)?;
     let mut read: DWORD = 0;
-    let ok = ReadFile(handle, buf as *mut core::ffi::c_void, cap as DWORD, &mut read, core::ptr::null_mut());
+    let ok = ReadFile(handle, buf as *mut core::ffi::c_void, count, &mut read, core::ptr::null_mut());
     if ok == 0 {
         Err(last_error())
     } else {
@@ -104,7 +106,9 @@ pub unsafe fn read_bytes(handle: HANDLE, buf: *mut u8, cap: usize) -> Result<usi
 
 /// Create the Stet IPC pipe server with §3.1 security. Returns the server handle.
 /// On failure returns the last-error code.
+/// `name` must be NUL-terminated UTF-16 (see `pipe_name`).
 pub fn create_pipe_server(name: &[u16], security: *const SECURITY_ATTRIBUTES) -> Result<HANDLE, DWORD> {
+    debug_assert!(name.last() == Some(&0), "pipe name must be NUL-terminated");
     let handle = unsafe {
         CreateNamedPipeW(
             name.as_ptr(),

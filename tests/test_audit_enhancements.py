@@ -1,6 +1,5 @@
 """Tests for audit-driven architecture enhancements and hardening."""
 
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 

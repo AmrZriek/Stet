@@ -24,7 +24,6 @@ from stet.core.app import (
     AppUpdateChecker,
 )
 from stet.core.config import ConfigManager
-from stet.llm.model_manager import ModelManager
 
 import stet.core.app as _app_module
 
@@ -516,7 +515,6 @@ class TestIsTerminalOrIde:
 class TestStetAppTrayRetry:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_tray_when_available(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         mock_tray_cls.isSystemTrayAvailable.return_value = True
         mock_tray = MagicMock()
         mock_tray.isVisible.return_value = True
@@ -526,7 +524,6 @@ class TestStetAppTrayRetry:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_tray_retry_then_succeed(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         mock_tray = MagicMock()
         mock_tray.isVisible.side_effect = [False, False, True]
         mock_tray_cls.return_value = mock_tray
@@ -538,7 +535,6 @@ class TestStetAppTrayRetry:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_tray_retry_exhaustion(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         mock_tray = MagicMock()
         mock_tray.isVisible.return_value = False
         mock_tray_cls.return_value = mock_tray
@@ -553,7 +549,6 @@ class TestStetAppTrayRetry:
 class TestStetAppSetTrayIcon:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_set_tray_icon(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._set_tray_icon("#3b82f6")
         app.tray.setIcon.assert_called()
@@ -562,14 +557,12 @@ class TestStetAppSetTrayIcon:
 class TestStetAppStatusHandlers:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_ac_status_updates_label(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_ac_status("correcting")
         assert "correcting" in app._status_lbl.text()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_ac_status_no_label(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         if hasattr(app, "_status_lbl"):
             delattr(app, "_status_lbl")
@@ -579,28 +572,24 @@ class TestStetAppStatusHandlers:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_chat_status_ready(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_chat_status("Model ready")
         app.tray.setIcon.assert_called()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_chat_status_loading(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_chat_status("loading model")
         app.tray.setIcon.assert_called()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_chat_status_error(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_chat_status("error: model not found")
         app.tray.setIcon.assert_called()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_chat_status_idle(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_chat_status("idle")
         app.tray.setIcon.assert_called()
@@ -609,7 +598,6 @@ class TestStetAppStatusHandlers:
 class TestStetAppRebuildRecentMenu:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_rebuild_recent_menu(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._llm_menu = MagicMock()
         app._rebuild_llm_menu()
@@ -620,21 +608,18 @@ class TestStetAppRebuildRecentMenu:
 class TestStetAppNotifications:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_notify_warn(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._show_notify("Test warning", "warn")
         app.tray.showMessage.assert_called()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_notify_info(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._show_notify("Test info", "info")
         app.tray.showMessage.assert_called()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_model_warning(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._show_model_warning("Model is tiny")
         app.tray.showMessage.assert_called()
@@ -645,7 +630,6 @@ class TestStetAppShowWindow:
     def test_show_window_creates_correction_window(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch("stet.core.app.CorrectionWindow") as mock_cw:
             mock_win = MagicMock()
@@ -657,7 +641,6 @@ class TestStetAppShowWindow:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_window_closes_old(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         old_win = MagicMock()
         app._window = old_win
@@ -670,7 +653,6 @@ class TestStetAppShowWindow:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_window_handles_crash(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch("stet.core.app.CorrectionWindow", side_effect=Exception("crash")):
             app._show_window("text")
@@ -679,7 +661,6 @@ class TestStetAppShowWindow:
 class TestStetAppWindowDestroyed:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_clears_reference(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         win = QObject()
         app._window = win
@@ -696,7 +677,6 @@ class TestStetAppWindowDestroyed:
     def test_old_destroyed_does_not_clobber_new_window(self, mock_tray_cls, qtbot, monkeypatch):
         """A late `destroyed` signal from an old window must not clear a
         freshly created _window reference (captured-wrapper guard)."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         old_win = QObject()
         new_win = QObject()
@@ -723,7 +703,6 @@ class TestStetAppPasteText:
     def test_paste_text_no_old_clip(
         self, mock_timer, mock_chord, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._old_clip = ""
         app._safe_copy = MagicMock()
@@ -737,7 +716,6 @@ class TestStetAppPasteText:
     def test_paste_text_restores_old_clip(
         self, mock_timer, mock_chord, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._old_clip = "original"
         app._safe_copy = MagicMock()
@@ -750,7 +728,6 @@ class TestStetAppPasteText:
 class TestStetAppOpenSettings:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_open_settings(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch("stet.core.app.SettingsDialog") as mock_dlg:
             mock_dlg_instance = MagicMock()
@@ -762,7 +739,6 @@ class TestStetAppOpenSettings:
 class TestStetAppOnSettingsSaved:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_settings_saved_reload_model(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._register_hotkey = MagicMock()
         app.ac_model.is_loaded = MagicMock(return_value=True)
@@ -772,7 +748,6 @@ class TestStetAppOnSettingsSaved:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_on_settings_saved_ac_same_as_chat(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.cfg.set("ac_same_as_chat", True)
         app.cfg.set("model_path", "/some/model.gguf")
@@ -785,7 +760,6 @@ class TestStetAppBrowseModel:
     @patch("stet.core.app.QSystemTrayIcon")
     @patch("stet.core.app.QFileDialog")
     def test_browse_model_selects(self, mock_fd, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._select_model = MagicMock()
         mock_fd.getOpenFileName.return_value = ("/path/model.gguf", "")
@@ -795,7 +769,6 @@ class TestStetAppBrowseModel:
     @patch("stet.core.app.QSystemTrayIcon")
     @patch("stet.core.app.QFileDialog")
     def test_browse_model_cancel(self, mock_fd, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._select_model = MagicMock()
         mock_fd.getOpenFileName.return_value = ("", "")
@@ -806,7 +779,6 @@ class TestStetAppBrowseModel:
 class TestStetAppSelectModel:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_select_model_sets_config(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.chat_model.unload_model = MagicMock()
         app.ac_model.is_loaded = MagicMock(return_value=False)
@@ -815,7 +787,6 @@ class TestStetAppSelectModel:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_select_model_ac_same_as_chat(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.cfg.set("ac_same_as_chat", True)
         app.chat_model.unload_model = MagicMock()
@@ -828,7 +799,6 @@ class TestStetAppSelectModel:
 class TestStetAppCheckAppUpdate:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_check_app_update_skips_if_running(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         mock_checker = MagicMock()
         mock_checker.isRunning.return_value = True
@@ -838,7 +808,6 @@ class TestStetAppCheckAppUpdate:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_app_update_checker_class(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         checker = AppUpdateChecker()
         assert hasattr(checker, "update_available")
         assert hasattr(checker, "check_done")
@@ -847,14 +816,12 @@ class TestStetAppCheckAppUpdate:
 class TestStetAppOnUpdateAvailable:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_updates_action_text(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_update_available("v9.9.9", "https://example.com", "notes")
         assert "v9.9.9" in app._update_action.text()
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_shows_tray_message(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_update_available("v1.0.0", "https://example.com", "notes")
         app.tray.showMessage.assert_called()
@@ -864,7 +831,6 @@ class TestStetAppOnUpdateAvailable:
 class TestStetAppUpdaterCommand:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_updater_command_source(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(sys, "frozen", False, raising=False)
         app = StetApp()
         cmd = app._updater_command()
@@ -873,7 +839,6 @@ class TestStetAppUpdaterCommand:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_updater_command_frozen(self, mock_tray_cls, qtbot, monkeypatch, tmp_path):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         updater_path = tmp_path / "StetUpdater.exe"
         updater_path.write_text("fake")
@@ -886,7 +851,6 @@ class TestStetAppUpdaterCommand:
     def test_updater_command_frozen_missing_raises(
         self, mock_tray_cls, qtbot, monkeypatch, tmp_path
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr("stet.core.app.SCRIPT_DIR", tmp_path)
         app = StetApp()
@@ -898,7 +862,6 @@ class TestStetAppUpdaterCommand:
 class TestStetAppStartAppUpdate:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_decline_update(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch(
             "stet.core.app.QMessageBox.question",
@@ -911,7 +874,6 @@ class TestStetAppStartAppUpdate:
     def test_accept_update_launches_updater(
         self, mock_popen, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._updater_command = MagicMock(return_value=["updater", "--app"])
         app._quit = MagicMock()
@@ -925,7 +887,6 @@ class TestStetAppStartAppUpdate:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_accept_update_launch_failure(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._updater_command = MagicMock(side_effect=Exception("launch fail"))
         with (
@@ -942,7 +903,6 @@ class TestStetAppStartAppUpdate:
 class TestStetAppQuit:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_quit_unregisters_hotkeys(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._hotkey_handles = [1000, 1001]
         app.ac_model.unload_model = MagicMock()
@@ -965,7 +925,6 @@ class TestStetAppQuit:
 
         import stet.core.app as app_module
 
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.ac_model.unload_model = MagicMock()
         app.chat_model.unload_model = MagicMock()
@@ -998,7 +957,6 @@ class TestStetAppQuit:
     ):
         """The finished handler must drop the checker reference so a later
         _quit() never touches a deleted C++ QThread."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._update_checker = AppUpdateChecker()
         app._on_update_check_finished()
@@ -1008,7 +966,6 @@ class TestStetAppQuit:
 class TestStetAppShowFirstRun:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_bail_if_model_set(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.cfg.set("model_path", "/some/model.gguf")
         with patch("stet.core.app.QMessageBox") as mock_mb:
@@ -1085,7 +1042,6 @@ class TestStetAppRunDownloadScript:
     def test_script_missing_shows_message(
         self, mock_tray_cls, qtbot, monkeypatch, tmp_path
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr("stet.core.app.SCRIPT_DIR", tmp_path)
         app = StetApp()
         app._run_download_script()
@@ -1096,7 +1052,6 @@ class TestStetAppRunDownloadScript:
     def test_script_exists_launches(
         self, mock_popen, mock_tray_cls, qtbot, monkeypatch, tmp_path
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr("stet.core.app.WINDOWS", True)
         script = tmp_path / "download_model.bat"
         script.write_text("echo hi")
@@ -1110,7 +1065,6 @@ class TestStetAppRunDownloadScript:
     def test_script_launch_failure(
         self, mock_popen, mock_tray_cls, qtbot, monkeypatch, tmp_path
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr("stet.core.app.WINDOWS", True)
         script = tmp_path / "download_model.bat"
         script.write_text("echo hi")
@@ -1129,7 +1083,6 @@ class TestStetAppStartupToggle:
         self, mock_winreg, mock_tray_cls, mock_run, qtbot, monkeypatch
     ):
         mock_run.return_value = MagicMock(returncode=1)
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._act_startup = MagicMock()
         mock_winreg.OpenKey.return_value = MagicMock()
@@ -1144,7 +1097,6 @@ class TestStetAppStartupToggle:
         self, mock_winreg, mock_tray_cls, mock_run, qtbot, monkeypatch
     ):
         mock_run.return_value = MagicMock(returncode=1)
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._act_startup = MagicMock()
         mock_winreg.OpenKey.return_value = MagicMock()
@@ -1159,7 +1111,6 @@ class TestStetAppStartupToggle:
         self, mock_winreg, mock_tray_cls, mock_run, qtbot, monkeypatch
     ):
         mock_run.return_value = MagicMock(returncode=1)
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._act_startup = MagicMock()
         mock_winreg.OpenKey.side_effect = Exception("reg error")
@@ -1173,7 +1124,6 @@ class TestStetAppStartupToggle:
         self, mock_winreg, mock_tray_cls, mock_run, qtbot, monkeypatch
     ):
         mock_run.return_value = MagicMock(returncode=1)
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         mock_winreg.OpenKey.return_value = MagicMock()
         app._toggle_startup(True)
@@ -1186,7 +1136,6 @@ class TestStetAppStartupToggle:
         self, mock_winreg, mock_tray_cls, mock_run, qtbot, monkeypatch
     ):
         mock_run.return_value = MagicMock(returncode=1)
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         mock_winreg.OpenKey.return_value = MagicMock()
         app._toggle_startup(False)
@@ -1199,7 +1148,6 @@ class TestStetAppStartupToggle:
         self, mock_winreg, mock_tray_cls, mock_run, qtbot, monkeypatch
     ):
         mock_run.return_value = MagicMock(returncode=1)
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         mock_winreg.OpenKey.side_effect = Exception("reg error")
         app._toggle_startup(True)
@@ -1209,14 +1157,12 @@ class TestStetAppStartupToggle:
 class TestStetAppIsModelReady:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_not_loaded(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.ac_model.is_ready = MagicMock(return_value=False)
         assert app._is_model_ready() is False
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_loaded_health_ok(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.ac_model.is_ready = MagicMock(return_value=True)
         app.ac_model._health_url = MagicMock(
@@ -1229,7 +1175,6 @@ class TestStetAppIsModelReady:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_loaded_health_fail(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.ac_model.is_ready = MagicMock(return_value=True)
         app.ac_model._health_url = MagicMock(
@@ -1242,7 +1187,6 @@ class TestStetAppIsModelReady:
 class TestStetAppShowSilentOsd:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_silent_osd_loading(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch("stet.core.app.SilentCorrectionOSD") as mock_osd_cls:
             mock_osd = MagicMock()
@@ -1252,7 +1196,6 @@ class TestStetAppShowSilentOsd:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_silent_osd_success(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch("stet.core.app.SilentCorrectionOSD") as mock_osd_cls:
             mock_osd = MagicMock()
@@ -1262,7 +1205,6 @@ class TestStetAppShowSilentOsd:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_show_silent_osd_closes_previous(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         prev_osd = MagicMock()
         app._osd_widget = prev_osd
@@ -1275,14 +1217,12 @@ class TestStetAppShowSilentOsd:
 class TestStetAppIsWindowAlive:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_no_window(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._window = None
         assert app._is_window_alive() is False
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_window_visible(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         mock_win = MagicMock()
         mock_win.isVisible.return_value = True
@@ -1293,14 +1233,12 @@ class TestStetAppIsWindowAlive:
 class TestStetAppSafeClipboard:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_safe_paste_success(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._safe_paste = MagicMock(return_value="clipboard text")
         assert app._safe_paste() == "clipboard text"
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_safe_copy_success(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._safe_copy = MagicMock()
         app._safe_copy("text")
@@ -1313,7 +1251,6 @@ class TestStetAppCaptureSelection:
     def test_capture_selection_uia_success(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         
         # Monkeypatch the structured UIA reader and terminal guard (0c)
@@ -1337,7 +1274,6 @@ class TestStetAppCaptureSelection:
     def test_capture_selection_uia_fail_terminal(
         self, mock_send_shift_chord, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
 
         monkeypatch.setattr(
@@ -1364,7 +1300,6 @@ class TestStetAppCaptureSelection:
         self, mock_send_shift_chord, mock_tray_cls, qtbot, monkeypatch
     ):
         """Terminal path detects success by clipboard CHANGE, not non-empty."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
 
         monkeypatch.setattr(
@@ -1390,7 +1325,6 @@ class TestStetAppCaptureSelection:
         self, mock_send_shift_chord, mock_tray_cls, qtbot, monkeypatch
     ):
         """When new clipboard content equals old, fallback returns it."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
 
         monkeypatch.setattr(
@@ -1419,7 +1353,6 @@ class TestStetAppCaptureSelection:
         self, mock_send_shift_chord, mock_tray_cls, qtbot, monkeypatch
     ):
         """Terminal path: clipboard stays empty → returns empty, no restore needed."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
 
         monkeypatch.setattr(
@@ -1445,7 +1378,6 @@ class TestStetAppCaptureSelection:
     def test_capture_selection_uia_fail_non_terminal(
         self, mock_send_chord, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         
         monkeypatch.setattr(
@@ -1473,7 +1405,6 @@ class TestStetAppCaptureSelection:
     def test_capture_selection_uia_timeout_uses_daemon_fallback(
         self, mock_send_chord, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         created_threads = []
 
@@ -1544,7 +1475,6 @@ class TestStetAppCaptureSelection:
 class TestStetAppTrayActivated:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_double_click_opens_settings(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._open_settings = MagicMock()
         import stet.core.app
@@ -1555,7 +1485,6 @@ class TestStetAppTrayActivated:
     @patch("stet.core.app.QSystemTrayIcon")
     @pytest.mark.skipif(sys.platform != "win32", reason="Windows tray menu path")
     def test_single_click_does_nothing(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._open_settings = MagicMock()
         app._tray_menu.exec = MagicMock()
@@ -1599,7 +1528,6 @@ class TestAppUpdateChecker:
 class TestStetAppHandleHotkeyFired:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_panel_mode_window_already_open(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         mock_win = MagicMock()
         mock_win.isVisible.return_value = True
@@ -1610,7 +1538,6 @@ class TestStetAppHandleHotkeyFired:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_busy_hotkey_ignored(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._hotkey_busy.acquire(blocking=False)
         hk_cfg = {"mode": "panel", "strength": "full_correction"}
@@ -1619,7 +1546,6 @@ class TestStetAppHandleHotkeyFired:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_silent_mode_starts_thread(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         # The production macOS path constructs a native OSD window; this test
         # only verifies dispatch into the worker thread.
@@ -1637,7 +1563,6 @@ class TestStetAppHandleHotkeyFired:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_large_doc_warning_signal_exists(self, mock_tray_cls, qtbot, monkeypatch):
         """_large_doc_warning_signal must be defined on StetApp."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         assert hasattr(app, "_large_doc_warning_signal")
         # Verify it's a signal (has emit method)
@@ -1646,7 +1571,6 @@ class TestStetAppHandleHotkeyFired:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_large_doc_warning_emitted(self, mock_tray_cls, qtbot, monkeypatch):
         """Selecting >1000 words emits _large_doc_warning_signal."""
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
 
         # Build text > 1000 words
@@ -1681,7 +1605,6 @@ class TestStetAppHandleHotkeyFired:
 class TestStetAppInitSignals:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_model_loaded_signals_set_color(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.ac_model.model_loaded.emit()
         app.chat_model.model_loaded.emit()
@@ -1690,7 +1613,6 @@ class TestStetAppInitSignals:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_model_warning_signal(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app.ac_model.model_warning.emit("tiny model")
         app.tray.showMessage.assert_called()
@@ -1700,7 +1622,6 @@ class TestStetAppInitSignals:
 class TestStetAppRegisterHotkey:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_register_hotkey_success(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         import ctypes
 
         mock_register = MagicMock(return_value=1)
@@ -1715,7 +1636,6 @@ class TestStetAppRegisterHotkey:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_register_hotkey_debounced(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         import ctypes
 
         mock_register = MagicMock(return_value=1)
@@ -1733,7 +1653,6 @@ class TestStetAppRegisterHotkey:
 class TestStetAppTrayUpdateAction:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_update_action_added_to_tray_menu(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         assert app._update_action in app._tray_menu.actions()
         assert "Check for Updates" in app._update_action.text()
@@ -1743,7 +1662,6 @@ class TestStetAppTrayUpdateAction:
     def test_update_action_triggered_installs_when_available(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._available_update = ("v9.9.9", "https://example.com")
         app._start_app_update = MagicMock()
@@ -1756,7 +1674,6 @@ class TestStetAppTrayUpdateAction:
     def test_update_action_triggered_checks_manually_when_idle(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(
             _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
         )
@@ -1770,7 +1687,6 @@ class TestStetAppTrayUpdateAction:
 class TestStetAppUpdateAvailableState:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_action_becomes_prominent(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._on_update_available("v9.9.9", "https://example.com", "notes")
         assert "Update available" in app._update_action.text()
@@ -1780,7 +1696,6 @@ class TestStetAppUpdateAvailableState:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_settings_label_updated(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._settings_dlg = MagicMock()
         app._on_update_available("v9.9.9", "https://example.com", "notes")
@@ -1790,7 +1705,6 @@ class TestStetAppUpdateAvailableState:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_tray_dot_uses_update_color(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         with patch("stet.core.app.make_tray_icon") as mock_mti:
             app._on_update_available("v9.9.9", "https://example.com", "notes")
@@ -1802,7 +1716,6 @@ class TestStetAppUpdateDot:
     def test_model_status_change_keeps_update_dot(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._available_update = ("v9.9.9", "https://example.com")
         app.tray.setIcon.reset_mock()
@@ -1812,7 +1725,6 @@ class TestStetAppUpdateDot:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_dot_restored_after_update_resolved(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._available_update = ("v9.9.9", "https://example.com")
         app._tray_status_color = "#a78bfa"
@@ -1829,7 +1741,6 @@ class TestStetAppUpdatePopup:
     def test_popup_shown_once_for_automatic_check(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._available_update = ("v9.9.9", "https://example.com")
         app._start_app_update = MagicMock()
@@ -1847,7 +1758,6 @@ class TestStetAppUpdatePopup:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_popup_not_shown_for_manual_check(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._available_update = ("v9.9.9", "https://example.com")
         with patch("stet.core.app.QMessageBox") as mock_mb:
@@ -1856,7 +1766,6 @@ class TestStetAppUpdatePopup:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_popup_install_now_starts_update(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         app._available_update = ("v9.9.9", "https://example.com")
         app._start_app_update = MagicMock()
@@ -1876,7 +1785,6 @@ class TestStetAppUpdatePopup:
 class TestStetAppUpdateCheckThrottle:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_throttled_within_interval(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(
             _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
         )
@@ -1889,7 +1797,6 @@ class TestStetAppUpdateCheckThrottle:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_manual_check_bypasses_throttle(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(
             _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
         )
@@ -1903,7 +1810,6 @@ class TestStetAppUpdateCheckThrottle:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_recheck_timer_wired(self, mock_tray_cls, qtbot, monkeypatch):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         assert app._update_recheck_timer.isActive()
         assert (
@@ -1917,7 +1823,6 @@ class TestStetAppUpdateCheckSignals:
     def test_auto_check_pops_update_once_via_signals(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(
             _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
         )
@@ -1946,7 +1851,6 @@ class TestStetAppUpdateCheckSignals:
     def test_manual_check_never_pops_via_signals(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         monkeypatch.setattr(
             _app_module.StetApp, "_check_app_update", _REAL_CHECK_APP_UPDATE
         )
@@ -1967,7 +1871,6 @@ class TestStetAppToastClick:
     def test_message_clicked_connected_to_settings(
         self, mock_tray_cls, qtbot, monkeypatch
     ):
-        monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
         app = StetApp()
         assert app._tray_msg_clicked is True  # guard flag set after connect
         app.tray.messageClicked.connect.assert_called_once()

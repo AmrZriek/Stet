@@ -6,14 +6,9 @@ placeholders (`[REFN]`), and record exact source offsets for offset-based
 splicing by the reassembler.
 """
 
-from dataclasses import dataclass
 
-import pytest
 
 from stet.llm.document_protector import (
-    AtomEntry,
-    AtomTable,
-    PlaceholderStyle,
     extract_atoms_from_text,
     restore_atoms,
     validate_atom_survival,

@@ -19,7 +19,7 @@
      │ Protects sensitive tokens:
      │ - Multi-line code blocks (```...```) & Inline code (`...`)
      │ - URLs, File Paths, Emails, User Protected Terms
-     │ -> Replaced with __STET_PROTECTED_N__ placeholders
+     │ -> Replaced with [REFn] placeholders
      ▼
 [4. Sentence Chunking & Budget Planning (ContextPlanner)]
      │ Evaluates slot tokens vs budget equation: I(x) + G(I(x)) + S <= n_ctx_slot
@@ -28,6 +28,7 @@
 [5. LLM Inference (llama-server Backend)]
      │ - Model: Gemma 4 E2B Q4_K_XL (or user GGUF)
      │ - MTP Speculative Draft: mtp-gemma-4-E2B-it.gguf (--spec-type draft-mtp)
+     │ - Context: 12,800 tokens default; expand + reload only if input > 0.4 of window
      │ - Streaming tokens over SSE -> PromptCompiler nonces
      ▼
 [6. Validation & Reassembly (Validators & Reassembler)]

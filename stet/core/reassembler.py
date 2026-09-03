@@ -57,8 +57,27 @@ class OffsetReassembler:
             )
             assembled_chunks.append(extracted)
 
-        # Join assembled chunks
-        assembled_masked = " ".join(chunk.strip() for chunk in assembled_chunks if chunk.strip())
+        # Join assembled chunks, preserving original inter-window whitespace separators (newlines, indentation)
+        if not assembled_chunks:
+            return protected_doc.restore("")
+
+        result_parts = [assembled_chunks[0]]
+        for i in range(1, len(assembled_chunks)):
+            prev_end = plan.windows[i - 1].owning_span[1]
+            curr_start = plan.windows[i].owning_span[0]
+            sep = original_masked[prev_end:curr_start] if curr_start >= prev_end else ""
+            if sep:
+                result_parts.append(sep)
+            else:
+                # Owning spans are contiguous (separator whitespace lives at the
+                # end of the previous sentence span). Don't inject a space if
+                # either side already has whitespace — avoids doubling.
+                prev_ends_ws = bool(result_parts[-1][-1:].isspace()) if result_parts[-1] else True
+                next_starts_ws = bool(assembled_chunks[i][:1].isspace()) if assembled_chunks[i] else True
+                if not prev_ends_ws and not next_starts_ws:
+                    result_parts.append(" ")
+            result_parts.append(assembled_chunks[i])
+        assembled_masked = "".join(result_parts)
         return protected_doc.restore(assembled_masked)
 
     @classmethod

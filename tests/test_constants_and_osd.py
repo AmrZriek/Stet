@@ -60,3 +60,12 @@ def test_osd_instantiation_warning(qtbot):
     osd = SilentCorrectionOSD("Error!", state="warning")
     assert osd._state == "warning"
     osd.close()
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="Native OSD window is unavailable in macOS CI")
+def test_osd_instantiation_info(qtbot):
+    """SilentCorrectionOSD can be created in 'info' state with sky-blue dot."""
+    osd = SilentCorrectionOSD("Highlight some text first, then press F9", state="info")
+    assert osd._state == "info"
+    assert osd._STATE_COLORS.get("info") == "#38bdf8"
+    osd.close()

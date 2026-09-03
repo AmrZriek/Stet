@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import struct
+import sys
 from enum import Enum
 from typing import Any, Callable, Dict, List, Tuple
 
@@ -139,10 +140,13 @@ class IpcClient:
 
     def __init__(
         self,
-        secret: bytes,
+        secret: bytes | None = None,
         pipe_name: str = DEFAULT_PIPE_NAME,
         min_core_version: str = DEFAULT_MIN_CORE_VERSION,
     ):
+        if secret is None:
+            env_secret = os.environ.get("STET_CORE_SECRET")
+            secret = env_secret.encode("utf-8") if env_secret else secrets.token_bytes(32)
         if len(secret) < 16:
             raise ValueError("IPC secret must be at least 16 bytes")
         self.secret = secret
@@ -153,7 +157,77 @@ class IpcClient:
         self._pending_requests: Dict[int, Tuple[Callable[[Dict[str, Any]], None], Callable[[Exception], None]]] = {}
         self._event_handlers: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
         self._rx_buffer = bytearray()
+        self._transport = None
 
+    def connect(self, timeout_ms: int = 500) -> bool:
+        """Attempt connection and handshake with the native core daemon."""
+        if sys.platform == "win32":
+            try:
+                # Attempt to open the named pipe
+                handle = open(self.pipe_name, "r+b", buffering=0)
+                self._transport = handle
+                self.state = ConnectionState.CONNECTING
+                hello_frame = self.build_hello_frame()
+                handle.write(hello_frame)
+                handle.flush()
+                self.state = ConnectionState.READY
+                return True
+            except Exception:
+                self._transport = None
+                self.state = ConnectionState.UNCONNECTED
+                return False
+        return False
+
+    def is_connected(self) -> bool:
+        """True if the client has an active authenticated connection."""
+        return self.state in (ConnectionState.READY, ConnectionState.AUTHENTICATED) and self._transport is not None
+
+    def capture_selection(self, timeout_ms: int = 1500) -> Dict[str, Any] | None:
+        """Request text capture from the active window via the native daemon."""
+        if not self.is_connected():
+            return None
+        try:
+            req_id, frame = self.build_command_frame("command.capture_selection", {"timeout_ms": timeout_ms})
+            self._transport.write(frame)
+            self._transport.flush()
+            # Read response frame
+            chunk = self._transport.read(4096)
+            if chunk:
+                frames = self.handle_incoming_bytes(chunk)
+                for f in frames:
+                    if f.get("id") == req_id and "result" in f:
+                        return f["result"]
+        except Exception:
+            pass
+        return None
+
+    def paste_text(self, text: str, verify_target: bool = True) -> Dict[str, Any] | None:
+        """Request verified target paste via the native daemon."""
+        if not self.is_connected():
+            return None
+        try:
+            req_id, frame = self.build_command_frame("command.paste_text", {"text": text, "verify_target": verify_target})
+            self._transport.write(frame)
+            self._transport.flush()
+            chunk = self._transport.read(4096)
+            if chunk:
+                frames = self.handle_incoming_bytes(chunk)
+                for f in frames:
+                    if f.get("id") == req_id and "result" in f:
+                        return f["result"]
+        except Exception:
+            pass
+        return None
+
+    def close(self) -> None:
+        """Close the active connection and reset state."""
+        if self._transport is not None:
+            try:
+                self._transport.close()
+            except Exception:
+                pass
+            self._transport = None
+        self.state = ConnectionState.UNCONNECTED
     def build_hello_frame(self) -> bytes:
         """Create the authenticated handshake.hello frame."""
         client_pid = os.getpid()

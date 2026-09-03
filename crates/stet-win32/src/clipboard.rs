@@ -90,8 +90,13 @@ pub fn empty_clipboard() -> bool {
 
 /// Store text as CF_UNICODETEXT (caller passes a UTF-16 buffer).
 /// SAFETY: text must be valid for `len` UTF-16 code units. Caller owns the GMEM buffer.
+/// Requires OpenClipboard + EmptyClipboard to have succeeded on this thread.
 pub unsafe fn set_clipboard_unicode(text: *const u16, len: usize) -> bool {
-    let hmem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, (len + 1) * 2);
+    let bytes = match len.checked_add(1).and_then(|n| n.checked_mul(2)) {
+        Some(n) => n,
+        None => return false,
+    };
+    let hmem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
     if hmem.is_null() {
         return false;
     }
@@ -104,7 +109,13 @@ pub unsafe fn set_clipboard_unicode(text: *const u16, len: usize) -> bool {
     (ptr as *mut u16).add(len).write(0);
     GlobalUnlock(hmem);
     let rc = SetClipboardData(CF_UNICODETEXT, hmem);
-    rc.is_null()
+    if rc.is_null() {
+        // Ownership stays with caller on failure — free to avoid leak.
+        GlobalFree(hmem);
+        return false;
+    }
+    // Success: OS owns hmem now.
+    true
 }
 
 /// Count the formats currently on the clipboard.

@@ -35,7 +35,7 @@ class GuardSet:
 class BudgetPolicy:
     """Closed token budget arithmetic policy for slot-scoped context allocation."""
 
-    context_size: int = 4096
+    context_size: int = 12800
     safety_margin: int = 256
     growth_multiplier: float = 1.25
     min_generation_tokens: int = 64

@@ -423,6 +423,28 @@ class TestReadyPage:
         page = ReadyPage()
         assert page.nextId() == PAGE_PROGRESS
 
+    def test_ready_page_default_options(self, qapp):
+        """ReadyPage exposes download and shortcut options with sensible defaults."""
+        from windows_installer_payload import ReadyPage
+        page = ReadyPage()
+        assert page.create_desktop_shortcut is True
+        assert page.create_startmenu_shortcut is True
+        assert page.download_backend is True
+        assert page.download_model is True
+        assert page.launch_stet is True
+
+    def test_ready_page_options_toggle(self, qapp):
+        from windows_installer_payload import ReadyPage
+        page = ReadyPage()
+        page._desktop_cb.setChecked(False)
+        page._startmenu_cb.setChecked(False)
+        page._download_model_cb.setChecked(False)
+        page._launch_cb.setChecked(False)
+        assert page.create_desktop_shortcut is False
+        assert page.create_startmenu_shortcut is False
+        assert page.download_model is False
+        assert page.launch_stet is False
+
 
 class TestProgressPage:
     def test_not_complete_initially(self, qapp, installer_zip):
@@ -445,6 +467,25 @@ class TestProgressPage:
         # Directly test the state transition
         page._install_done = True
         assert page.isComplete()
+
+    def test_progress_page_has_dual_progress_bars(self, qapp, installer_zip):
+        """ProgressPage contains both overall stage bar and action progress bar."""
+        from windows_installer_payload import ProgressPage
+        page = ProgressPage(installer_zip)
+        assert hasattr(page, "_overall_bar")
+        assert hasattr(page, "_progress_bar")
+        assert hasattr(page, "_status_label")
+        assert hasattr(page, "_action_label")
+        assert hasattr(page, "_detail_label")
+
+    def test_progress_page_stage_updates(self, qapp, installer_zip):
+        """ProgressPage updates overall bar and labels on stage_changed."""
+        from windows_installer_payload import ProgressPage
+        page = ProgressPage(installer_zip)
+        page._on_stage_changed(2, 4, "Downloading offline AI engine...")
+        assert page._overall_bar.value() == 2
+        assert page._overall_bar.maximum() == 4
+        assert "Downloading" in page._status_label.text()
 
 
 class TestCompletionPage:

@@ -177,13 +177,13 @@ class PromptCompiler:
                     extracted = extracted[:-1]
                 return extracted, True
             else:
-                # Begin found but end omitted (e.g. streaming or stopped at end)
+                # Begin found but end omitted (e.g. truncated generation)
                 extracted = model_output[content_start:]
                 if extracted.startswith("\r\n"):
                     extracted = extracted[2:]
                 elif extracted.startswith("\n"):
                     extracted = extracted[1:]
-                return extracted, True
+                return extracted.strip(), False
 
         # Fallback: clean output if markers were omitted by a simple model
         cleaned = model_output.strip()

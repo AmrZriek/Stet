@@ -50,6 +50,20 @@ QWidget#welcomeFooter {
     background: #090a0b;
     border-top: 1px solid #28292c;
 }
+QWidget#welcomeHeroCard {
+    background: #18191c;
+    border: 1px solid #28292c;
+    border-radius: 4px;
+}
+QWidget#shortcutNavFooter {
+    background: #18191c;
+    border-top: 1px solid #28292c;
+}
+QLabel#shortcutNavLabel {
+    color: #88898c;
+    font-family: 'IBM Plex Mono', 'Consolas', monospace;
+    font-size: 11px;
+}
 
 /* ── SettingsDialog ─────────────────────────────────────────────────── */
 SettingsDialog {
@@ -104,6 +118,10 @@ QPushButton:hover {
 }
 QPushButton:pressed {
     background: #121315;
+}
+QPushButton:focus {
+    border: 1px solid #d4a373;
+    outline: none;
 }
 QPushButton:disabled {
     background: transparent;

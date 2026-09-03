@@ -187,6 +187,13 @@ def main():
             _boot_log(
                 "[BOOT] Could not create shared memory segment — another instance likely running. Exiting."
             )
+            import tempfile
+
+            _SHOW_WELCOME_FLAG = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
+            try:
+                _SHOW_WELCOME_FLAG.write_text("show", encoding="utf-8")
+            except OSError:
+                pass
             sys.exit(0)
 
     _boot_log("[BOOT] Lock acquired — this is the only instance.")

@@ -1,6 +1,5 @@
 """Comprehensive Unit & Integration Test Suite for Phase 3 Correction Engine."""
 
-import pytest
 
 from stet.core.context_planner import ContextPlan, ContextPlanner, PlanRegime
 from stet.core.document_protector import DocumentProtector
@@ -202,3 +201,24 @@ class TestCorrectionEngineIntegration:
         assert res.finish_reason == "length"
         assert res.changed is False
         assert res.text == "Long text that gets cut off."
+    def test_ensure_context_for_tokens_rule_and_threshold(self):
+        from stet.llm.model_manager import ModelManager
+        from unittest.mock import MagicMock
+        cfg = MagicMock()
+        cfg.get.side_effect = lambda k, d=None: 12800 if "context_size" in k else d
+        mgr = ModelManager(cfg)
+        mgr.actual_ctx_size = 12800
+        # Under 40% (<= 5120 tokens): no reload
+        assert mgr.ensure_context_for_tokens(1000) is True
+        assert mgr.ensure_context_for_tokens(5120) is True
+        assert getattr(mgr, "_dynamic_context_size", None) is None
+
+        # Over 40% (> 5120 tokens): triggers expansion and reload
+        mgr.is_loaded = MagicMock(return_value=True)
+        mgr.unload_model = MagicMock()
+        mgr.load_model = MagicMock(return_value=True)
+        res = mgr.ensure_context_for_tokens(6000)
+        assert res is True
+        assert mgr._dynamic_context_size > 12800
+        mgr.unload_model.assert_called_once()
+        mgr.load_model.assert_called_once()

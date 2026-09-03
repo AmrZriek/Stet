@@ -1,14 +1,12 @@
 # -*- coding: utf-8 -*-
 """Tests for the ContextPlanner closed budget arithmetic."""
 
-import pytest
 
 from stet.llm.context_planner import (
     ContextPlanner,
     BudgetResult,
     ReservePolicy,
     compute_output_reservation,
-    solve_closed_budget,
 )
 
 

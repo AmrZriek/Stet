@@ -131,7 +131,7 @@ pub const PIPE_ALL_ACCESS: DWORD = 0x000F_001F;
 pub const PIPE_ACCESS_READ: DWORD = 0x0000_0101;
 pub const GENERIC_ALL: DWORD = 0x10000000;
 const TOKEN_QUERY: DWORD = 0x0008;
-pub const SE_OBJECT_TYPE: u32 = 0;
+pub const SE_OBJECT_TYPE: u32 = 1; // SE_FILE_OBJECT for named pipes
 pub const DACL_SECURITY_INFORMATION: u32 = 0x00000004;
 
 // ── wrappers ────────────────────────────────────────────────────────────────
@@ -142,18 +142,17 @@ pub unsafe fn create_well_known_sid(wk: u32, sid_buf: *mut BYTE, cb_sid: *mut DW
     CreateWellKnownSid(wk, core::ptr::null_mut(), sid_buf, cb_sid) != 0
 }
 
-/// Get the current process' user SID from an OPEN process token.
-/// SAFETY: token_handle must be a valid OPEN process token.
-pub unsafe fn token_user_sid(token_handle: HANDLE) -> Result<PSID, DWORD> {
+/// Get the current process' user SID from an OPEN process token into a caller-provided 8-byte aligned buffer.
+/// SAFETY: token_handle must be a valid OPEN process token; `buf` must remain alive as long as returned PSID is used.
+pub unsafe fn token_user_sid<'buf>(token_handle: HANDLE, buf: &'buf mut [u64; 128]) -> Result<PSID, DWORD> {
     // GetTokenInformation writes a TOKEN_USER whose first field (SID_AND_ATTRIBUTES.Sid)
     // is a pointer -> needs 8-byte alignment. A [u64; N] is 8-aligned; a [u8; N] is not.
-    let mut buf: [u64; 128] = [0u64; 128];
     let mut ret: DWORD = 0;
     let ok = GetTokenInformation(
         token_handle,
         TokenUser,
         buf.as_mut_ptr() as *mut core::ffi::c_void,
-        (std::mem::size_of_val(&buf)) as DWORD,
+        (std::mem::size_of_val(buf)) as DWORD,
         &mut ret,
     );
     if ok == 0 {

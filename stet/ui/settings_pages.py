@@ -374,7 +374,7 @@ def _apply_tooltips(dialog, prefix: str = ""):
         "topp_spin": "Only considers words whose probabilities sum to this value. Default: 0.95. Most users should leave this.",
         "minp_spin": "Filters out words less likely than this threshold. Default: 0.0. Most users should leave this.",
         "typical_p_spin": "Typical P sampling. Default: 1.0. Most users should leave this.",
-        "tfs_z_spin": "Tail Free Sampling — reduces unlikely word choices. Default: 1.0. Most users should leave this.",
+        "tfs_z_spin": "REMOVED in bundled llama.cpp (b10639): TFS-Z sampler no longer exists upstream. Kept for back-compat; value is not sent.",
         "mirostat_spin": "Dynamic sampling targeting surprise level. Default: 0 (disabled). Advanced sampling.",
         "mirostat_tau_spin": "Mirostat target entropy (tau). Default: 5.0. Only relevant when Mirostat is enabled.",
         "mirostat_eta_spin": "Mirostat learning rate (eta). Default: 0.1. Only relevant when Mirostat is enabled.",
@@ -582,6 +582,13 @@ class ParametersPage(QWidget):
         self.dialog.tfs_z_spin.setSingleStep(0.1)
         self.dialog.tfs_z_spin.setDecimals(2)
         self.dialog.tfs_z_spin.setFixedWidth(100)
+        # TFS-Z sampler removed upstream — bundled llama-server b10639
+        # parses no tfs_z key, so the knob would silently do nothing.
+        self.dialog.tfs_z_spin.setEnabled(False)
+        self.dialog.tfs_z_spin.setToolTip(
+            "Unsupported by the bundled llama.cpp (b10639): TFS-Z sampler "
+            "removed upstream. Value is kept but not sent."
+        )
 
         self.dialog.seed_spin = no_scroll(QSpinBox())
         self.dialog.seed_spin.setRange(-1, 2147483647)
@@ -711,6 +718,8 @@ class ParametersPage(QWidget):
         form.addWidget(hw_grid_w)
         
         _apply_tooltips(self.dialog, "")
+        # TFS-Z removed upstream — keep disabled even after tooltip pass.
+        self.dialog.tfs_z_spin.setEnabled(False)
         
         # Advanced: RoPE + MTP (collapsed by default)
         sep_adv = QFrame()
@@ -1504,6 +1513,12 @@ class ChatParametersPage(QWidget):
         self.dialog.chat_tfs_z_spin.setSingleStep(0.1)
         self.dialog.chat_tfs_z_spin.setDecimals(2)
         self.dialog.chat_tfs_z_spin.setFixedWidth(100)
+        # TFS-Z sampler removed upstream — see model-page note above.
+        self.dialog.chat_tfs_z_spin.setEnabled(False)
+        self.dialog.chat_tfs_z_spin.setToolTip(
+            "Unsupported by the bundled llama.cpp (b10639): TFS-Z sampler "
+            "removed upstream. Value is kept but not sent."
+        )
 
         self.dialog.chat_seed_spin = no_scroll(QSpinBox())
         self.dialog.chat_seed_spin.setRange(-1, 2147483647)
@@ -1620,6 +1635,8 @@ class ChatParametersPage(QWidget):
         form.addWidget(hw_grid_w)
         
         _apply_tooltips(self.dialog, "chat_")
+        # TFS-Z removed upstream — keep disabled even after tooltip pass.
+        self.dialog.chat_tfs_z_spin.setEnabled(False)
 
         # Advanced: RoPE + MTP (collapsed by default)
         sep_adv = QFrame()

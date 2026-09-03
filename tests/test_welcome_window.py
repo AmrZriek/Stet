@@ -178,6 +178,36 @@ def test_stet_app_show_welcome(temp_config_setup, qtbot, monkeypatch):
     app._on_welcome_closed()
     assert app._welcome_window is None
 
+def test_stet_app_welcome_flag_and_front_activation(temp_config_setup, qtbot, monkeypatch):
+    from stet.core.app import StetApp
+    from stet.llm.model_manager import ModelManager
+    from PyQt6.QtCore import Qt
+    import tempfile
+    from pathlib import Path
+
+    monkeypatch.setattr(ModelManager, "load_model", lambda *a, **k: None)
+    app = StetApp()
+    flag_file = Path(tempfile.gettempdir()) / "stet_show_welcome.flag"
+    try:
+        flag_file.write_text("show", encoding="utf-8")
+        assert flag_file.exists()
+        app._check_welcome_flag()
+        assert not flag_file.exists()
+        assert app._welcome_window is not None
+        qtbot.addWidget(app._welcome_window)
+
+        # Test restoring from minimized state
+        app._welcome_window.setWindowState(Qt.WindowState.WindowMinimized)
+        app._show_welcome_front()
+        assert not (app._welcome_window.windowState() & Qt.WindowState.WindowMinimized)
+    finally:
+        if flag_file.exists():
+            try:
+                flag_file.unlink()
+            except OSError:
+                pass
+        app._on_welcome_closed()
+
 
 def test_stet_app_welcome_correction_flow(temp_config_setup, qtbot, monkeypatch):
     from stet.core.app import StetApp

@@ -1,8 +1,8 @@
 # Stet v2.0 Rewrite — Comprehensive Progress & Engineering State
 
 > **Canonical State & Execution Ledger**  
-> **Last Updated:** 2026-09-02  
-> **Status:** Phase 0 (Safety Layer), Phase 1 (Unified Contracts & Core Protocol), and Phase 3 (Correction Engine Re-Architecture) fully implemented and 100% verified across both repositories.
+> **Last Updated:** 2026-09-03
+> **Status:** Phase 0 (Safety Layer), Phase 1 (Unified Contracts & Core Protocol), and Phase 3 (Correction Engine Re-Architecture) fully implemented and 100% verified across both repositories. Independent review round (2026-09-03): 4 review fixes applied, tracked docs restored, full suite 1428 passed / 4 skipped.
 
 ---
 
@@ -10,7 +10,7 @@
 
 | Scope | Location / Checkpoint | Test Count & Pass Rate | Execution Command |
 | :--- | :--- | :--- | :--- |
-| **Python Main Checkout** | `D:/Projects/Software/Stet` (`main`) | **1293 passed, 0 failed, 3 skipped** (191s) | `uv run --with-requirements requirements.txt --with-requirements requirements-dev.txt pytest -q` |
+| **Python Main Checkout** | `D:/Projects/Software/Stet` (`main`) | **1428 passed, 0 failed, 4 skipped** (232s) | `venv/Scripts/pytest -q` |
 | **Python Worktree Sandbox** | `D:/Projects/Software/Stet-wt-phase0` (`phase-0-safety`) | **1403 passed, 0 failed, 9 skipped** (176s) | `uv run --with-requirements requirements.txt --with-requirements requirements-dev.txt pytest -q` |
 | **Rust Native Workspace** | `D:/Projects/Software/Stet-wt-phase0/crates` | **189 passed, 0 failed** (12 suites) | `$env:CARGO_INCREMENTAL='0'; cargo test -j 1` |
 | **Win32 Interactive Probes** | `crates/stet-win32` | **8 passed, 0 failed** | `cargo test --features lab -j 1 -- --ignored --test-threads=1 lab_` |
@@ -129,3 +129,18 @@ Track B (Engine & UX):                                                          
 - **Worktree Sandbox (`D:/Projects/Software/Stet-wt-phase0`)**: Native Rust crates (`crates/stet-core`, `crates/stet-win32`, `crates/stet-uia-broker`) + Phase 2h FFI skeleton + Phase 1 & Phase 3 modules + full test suite.
 - **Master Plan Spec**: `docs/REWRITE_PLAN.md`
 - **Handoff & Resume Guide**: `D:/Projects/Software/Stet-wt-phase0/phase2h/HANDOFF.md`
+---
+
+## 5. Independent Review Round (2026-09-03)
+
+Second-agent stress/robustness changes were independently reviewed (previously unaudited surface: tray/undo rework, staged installer, IPC client additions, ctx policy, TFS-Z disable). All prior-review claims re-verified by execution: Python touched-area suites 120 passed, Rust 189 passed, lab probes 8 passed.
+
+| # | Finding | Fix |
+| :--- | :--- | :--- |
+| R-1 | Installer created Desktop/Start Menu shortcuts + ARP registry twice (worker stage 4 and `_run_post_install_actions` early branch) — double file stat over ~3.3 GB install dir | Early branch is now launch-only (`stet/windows_installer_payload.py:1204`) |
+| R-2 | Dead remnants of removed prose gate: unused `looks_like_prose` import, always-`False` `non_prose_bypassed`, unreachable `UNCHANGED_NON_PROSE` producer | Removed; enum member + `main_window.py:1520` mapping kept as defensive fallback |
+| R-3 | Empty-selection hotkey fired both on-screen OSD and tray notification for the same event | OSD only (`stet/core/app.py:1617`) |
+| R-4 | Unused local `import time` in `IpcClient.connect` | Removed |
+| R-5 (reverted) | MTP draft-on-CPU removal looked like a regression — Decision 36.3 proves it is a deliberate `0xc0000409` crash fix | Kept documented GPU-only gate; no code change |
+
+Out of scope / noted: `IpcClient.capture_selection/paste_text` use single blocking `.read(4096)` with no deadline — unreachable today (only `connect()` is called from `app.py:447`); needs framing + timeout before the native daemon goes live. `_dynamic_context_size` grows sticky per session (never shrinks) — accepted to avoid reload thrash. Tracked docs under `docs/` were restored from HEAD after an accidental staged deletion; they stay tracked.

@@ -287,3 +287,35 @@ def test_window_lifecycle_stress(qtbot, monkeypatch):
         win.close()
         QApplication.processEvents()
         assert win._is_closed is True
+
+
+def test_keyboard_navigation_footer_and_jump(qtbot, monkeypatch):
+    """Footer bar displays keyboard cues and _jump_to_next_change cycles diff changes."""
+    win = _make_test_window(qtbot, monkeypatch, "Initial text")
+    assert hasattr(win, "_shortcut_nav_label")
+    text = win._shortcut_nav_label.text()
+    assert "[Enter]" in text
+    assert "[Esc]" in text
+    assert "[Tab]" in text
+    assert "[E]" in text
+
+    # Test jump with no diff changes
+    assert win._jump_to_next_change() is False
+    # Simulate diff changes and text in editor
+    win.corr_edit.setPlainText("Initial text here")
+    win._diff_changes = [
+        {"char_j1": 0, "char_j2": 4, "orig_slice": "Init"},
+        {"char_j1": 5, "char_j2": 9, "orig_slice": "text"},
+    ]
+    assert win._jump_to_next_change() is True
+    assert win.corr_edit.textCursor().hasSelection()
+    assert win._current_change_nav_idx == 0
+
+    # Jump to second change
+    assert win._jump_to_next_change() is True
+    assert win._current_change_nav_idx == 1
+
+    # Wrap around to first change
+    assert win._jump_to_next_change() is True
+    assert win._current_change_nav_idx == 0
+    win.close()

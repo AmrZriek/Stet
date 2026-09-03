@@ -5,7 +5,6 @@ reaches MAX_TEXT_LENGTH, whitespace preservation, and that the capture records
 selection-range count and document-range match metadata.
 """
 
-import pytest
 
 from stet.core.clipboard import (
     MAX_TEXT_LENGTH,

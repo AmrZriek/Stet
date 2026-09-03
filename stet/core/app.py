@@ -12,7 +12,7 @@ import time
 import traceback
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QAction, QCursor
 from PyQt6.QtWidgets import (
     QApplication,
@@ -463,6 +463,7 @@ class StetApp(QObject):
         # "no text selected" notification in a feedback loop. This lock ensures
         # only one hotkey flow runs at a time.
         self._hotkey_busy = threading.Lock()
+        self._window_opening = False
         self._last_silent_history_id: str | None = None
         # 0d: RAM-only undo token (never writes history.jsonl). Stored for the
         # safe undo path; consumed once and expires with the review lifecycle.
@@ -569,7 +570,7 @@ class StetApp(QObject):
 
         self._welcome_poll_timer = QTimer(self)
         self._welcome_poll_timer.timeout.connect(self._check_welcome_flag)
-        self._welcome_poll_timer.start(2000)
+        self._welcome_poll_timer.start(150)
 
     def __del__(self):
         try:
@@ -703,11 +704,11 @@ class StetApp(QObject):
 
         # Phase 5a Tray-First Core Actions
         act_correct = QAction("Correct selected text (F9)", self)
-        act_correct.triggered.connect(lambda: self._handle_hotkey_fired({"mode": "panel", "strength": "full_correction"}))
+        act_correct.triggered.connect(lambda: self._trigger_tray_action("full_correction"))
         menu.addAction(act_correct)
 
         act_rewrite = QAction("Rewrite selected text (Shift+F9)", self)
-        act_rewrite.triggered.connect(lambda: self._handle_hotkey_fired({"mode": "panel", "strength": "rewrite_polish"}))
+        act_rewrite.triggered.connect(lambda: self._trigger_tray_action("rewrite_polish"))
         menu.addAction(act_rewrite)
 
         self._saved_actions_menu = menu.addMenu("Saved actions")
@@ -763,6 +764,7 @@ class StetApp(QObject):
             self._act_startup.setCheckable(True)
             self._act_startup.triggered.connect(self._toggle_startup)
             menu.addAction(self._act_startup)
+            menu.aboutToShow.connect(self._on_tray_menu_about_to_show)
             menu.aboutToShow.connect(self._update_startup_action)
 
         menu.addSeparator()
@@ -912,36 +914,67 @@ class StetApp(QObject):
             prompt = t.get("prompt", "")
             act = QAction(name, self)
             act.triggered.connect(
-                lambda checked=False, p=prompt: self._handle_hotkey_fired(
-                    {"mode": "panel", "strength": "custom", "custom_prompt": p}
-                )
+                lambda checked=False, p=prompt: self._trigger_tray_action("custom", custom_prompt=p)
             )
             self._saved_actions_menu.addAction(act)
 
+    def _on_tray_menu_about_to_show(self):
+        """Record the active foreground window before the tray menu steals focus."""
+        if WINDOWS:
+            try:
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                if hwnd:
+                    from stet.core.clipboard import _get_window_class, _get_window_process_name
+                    cls_name = _get_window_class(hwnd)
+                    proc_name = _get_window_process_name(hwnd)
+                    if cls_name not in ("Shell_TrayWnd", "NotifyIconOverflowWindow") and proc_name != "explorer.exe":
+                        self._last_active_app_hwnd = hwnd
+            except Exception:
+                pass
+
+    def _trigger_tray_action(self, strength: str, custom_prompt: str = ""):
+        """Trigger text correction from the tray menu, restoring target focus first."""
+        if WINDOWS and getattr(self, "_last_active_app_hwnd", None):
+            try:
+                ctypes.windll.user32.SetForegroundWindow(self._last_active_app_hwnd)
+                time.sleep(0.10)
+            except Exception:
+                pass
+        self._handle_hotkey_fired({"mode": "panel", "strength": strength, "custom_prompt": custom_prompt})
+
     def _undo_last_replacement(self):
         """RAM-only target-verified undo for the most recent correction."""
-        if hasattr(self, "_last_replacement_original") and self._last_replacement_original:
-            orig_text = self._last_replacement_original
+        undo_token = getattr(self, "_last_undo_token", None)
+        if undo_token is not None:
+            if time.monotonic() > getattr(undo_token, "expires_at", float("inf")):
+                self._last_undo_token = None
+                self._silent_osd_signal.emit("Undo token expired (5m window)", "warning")
+                return
+
+            orig_text = undo_token.original
+            target = getattr(self, "_last_replacement_target", None)
+
             def _worker():
                 try:
+                    if WINDOWS and target and getattr(target, "window_handle", None):
+                        ctypes.windll.user32.SetForegroundWindow(target.window_handle)
+                        time.sleep(0.10)
+                        if not self._foreground_identity_matches():
+                            self._silent_osd_signal.emit("Target app changed — undo aborted", "warning")
+                            return
                     self._safe_copy(orig_text)
                     time.sleep(0.12)
                     _send_ctrl_chord(VK_V)
+                    self._last_undo_token = None
                     self._silent_osd_signal.emit("Correction undone", "success")
                 except Exception as e:
                     log(f"[Undo] failed: {e}")
                     self._silent_osd_signal.emit("Undo failed — use Ctrl+Z in the app", "warning")
+
             threading.Thread(target=_worker, name="StetUndoRAM", daemon=True).start()
             return
 
-        entries = self._history.entries if hasattr(self._history, "entries") else []
-        if entries:
-            last = next((e for e in reversed(entries) if not e.get("undone")), None)
-            if last:
-                self._undo_correction(last["id"])
-                return
         self._silent_osd_signal.emit("Nothing to undo", "info")
-
     def _tray_load_model(self):
         self._cancel_model_retry()
         threading.Thread(target=self.ac_model.load_model, daemon=True).start()
@@ -1316,34 +1349,45 @@ class StetApp(QObject):
             log("[Hotkey] Fired but already busy — ignoring")
             return
 
-        if mode == "silent":
-            # Immediate visual feedback
-            self._silent_osd_signal.emit("Loading model…", "loading")
-            threading.Thread(
-                target=self._silent_hotkey_worker,
-                args=(strength, custom_prompt),
-                daemon=True,
-            ).start()
-        else:
-            try:
-                # Check window state on MAIN thread to avoid PyQt6 background thread crashes
-                if self._is_window_alive():
-                    log("[Hotkey] window already open — focusing")
+        # Check if window is alive or currently opening — focus existing window
+        try:
+            if self._is_window_alive() or getattr(self, "_window_opening", False):
+                log("[Hotkey] window already open or opening — focusing")
+                if self._window is not None:
                     try:
                         self._window.raise_()
                         self._window.activateWindow()
                     except Exception:
                         pass
-                    self._hotkey_busy.release()
-                    return
-            except Exception as e:
-                log(f"[Hotkey] window check failed: {e}")
-                # Fall through to create a new window
+                self._hotkey_busy.release()
+                return
+        except Exception as e:
+            log(f"[Hotkey] window check failed: {e}")
 
+        if mode == "silent":
+            # Immediate visual feedback
+            self._silent_osd_signal.emit("Loading model…", "loading")
+            try:
+                threading.Thread(
+                    target=self._silent_hotkey_worker,
+                    args=(strength, custom_prompt),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                log(f"[Hotkey] silent spawn failed: {e}")
+                self._hotkey_busy.release()
+        else:
+            # Set opening flag so rapid keystrokes don't spawn duplicate windows
+            self._window_opening = True
             # Run actual work in background thread so Qt stays responsive
             self._pending_panel_strength = strength
             self._pending_panel_custom_prompt = custom_prompt
-            threading.Thread(target=self._hotkey_worker, daemon=True).start()
+            try:
+                threading.Thread(target=self._hotkey_worker, daemon=True).start()
+            except Exception as e:
+                log(f"[Hotkey] panel spawn failed: {e}")
+                self._window_opening = False
+                self._hotkey_busy.release()
 
     # UIA direct-capture budget. Real UIA queries (focused element +
     # TextPattern + GetSelection) return in <50 ms; the bound only matters
@@ -1540,6 +1584,17 @@ class StetApp(QObject):
             self._safe_copy(self._old_clip)
         return ""
 
+    def _get_hotkey_display(self, mode: str = "panel", fallback: str = "F9") -> str:
+        hotkeys = self.cfg.get("hotkeys", [])
+        for hk in hotkeys:
+            if hk.get("mode") == mode:
+                shortcut = hk.get("shortcut", "").strip()
+                if shortcut:
+                    return "+".join(p.capitalize() for p in shortcut.split("+"))
+        legacy_key = "hotkey" if mode == "panel" else "silent_hotkey"
+        legacy = self.cfg.get(legacy_key, fallback)
+        return "+".join(p.capitalize() for p in legacy.split("+"))
+
     def _hotkey_worker(self):
         try:
             strength = getattr(self, "_pending_panel_strength", "full_correction")
@@ -1554,17 +1609,25 @@ class StetApp(QObject):
                     self._large_doc_warning_signal.emit(text)
                 self._trigger.emit(text, strength)
             else:
+                self._window_opening = False
                 now = time.monotonic()
-                if now - self._last_empty_notify_ts > 3.0:
+                if now - self._last_empty_notify_ts > 1.5:
                     self._last_empty_notify_ts = now
-                    self._notify.emit(
-                        "No text selected. Select text first, then press the hotkey.",
+                    panel_hk = self._get_hotkey_display("panel", "F9")
+                    self._silent_osd_signal.emit(
+                        f"Highlight some text in any app first, then press {panel_hk}",
                         "info",
                     )
                 else:
                     log("[Hotkey] empty selection — throttled")
         except Exception as e:
             log(f"[Hotkey] worker error: {e}")
+            # Don't strand _window_opening=True — next hotkeys would focus
+            # a window that will never open.
+            try:
+                self._window_opening = False
+            except Exception:
+                pass
         finally:
             if MACOS:
                 self._restore_macos_clipboard()
@@ -1586,13 +1649,17 @@ class StetApp(QObject):
 
             if not selected.strip():
                 now = time.monotonic()
-                if now - self._last_empty_notify_ts > 3.0:
+                if now - self._last_empty_notify_ts > 1.5:
                     self._last_empty_notify_ts = now
-                    self._notify.emit(
-                        "No text selected. Select text first, then press the hotkey.",
+                    silent_hk = self._get_hotkey_display("silent", "F10")
+                    self._silent_osd_signal.emit(
+                        f"Highlight some text in any app first, then press {silent_hk}",
                         "info",
                     )
-                self._silent_osd_signal.emit("No text selected", "warning")
+                    self._notify.emit(
+                        f"Highlight some text in any app first, then press {silent_hk}.",
+                        "info",
+                    )
                 return
 
             text = selected.strip()
@@ -1837,6 +1904,7 @@ class StetApp(QObject):
                 log(f"[LargeDoc] dialog failed: {e}")
 
     def _show_window(self, text: str, initial_strength: str = "full_correction"):
+        self._window_opening = False
         log(f"[Window] _show_window called, text length={len(text)}")
         try:
             if self._window:
@@ -1894,6 +1962,18 @@ class StetApp(QObject):
                 original=getattr(self._window, "original", "") or "",
                 corrected=text,
             )
+            orig = getattr(self._window, "original", "") or ""
+            if orig:
+                from stet.core.history import UndoToken
+                from stet.core.input import sha256_fingerprint
+                self._last_undo_token = UndoToken(
+                    original=orig,
+                    corrected=text,
+                    target_identity_hash=str(getattr(self._capture_target, "title_hash", "")),
+                    replacement_fingerprint=sha256_fingerprint(text),
+                    expires_at=time.monotonic() + 300,
+                )
+                self._last_replacement_target = self._capture_target
         if MACOS:
             target = self._mac_selection_target
             if target is None:
@@ -2042,11 +2122,17 @@ class StetApp(QObject):
         if not self.cfg.get("has_shown_tray_osd", False):
             self.cfg.set("has_shown_tray_osd", True)
             self.cfg.save()
+            panel_hk = self._get_hotkey_display("panel", "F9")
+            self.tray.showMessage(
+                "Stet is running in your tray!",
+                f"Highlight text anywhere and press {panel_hk} to check your writing.",
+                QSystemTrayIcon.MessageIcon.Information,
+                4500,
+            )
             self._silent_osd_signal.emit(
-                "Stet is running in your system tray. Press F9 or F10 anytime.",
+                f"Stet is running in your tray! Highlight text anywhere and press {panel_hk}.",
                 "success"
             )
-
     def _on_settings_saved(self):
         self._cancel_model_retry()
         self._register_hotkey(force=True)
@@ -2121,17 +2207,33 @@ class StetApp(QObject):
                 flag.unlink()
             except OSError:
                 pass
+            self._show_welcome_front()
+
+    def _show_welcome_front(self):
+        """Bring the welcome window to the front immediately, restoring from minimized if needed."""
+        if self._welcome_window is None:
             self._show_welcome()
+        else:
+            self._welcome_window.setWindowState(
+                (self._welcome_window.windowState() & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
+            self._welcome_window.show()
+            self._welcome_window.raise_()
+            self._welcome_window.activateWindow()
 
     def _show_welcome(self):
         if self._first_run_setup_active:
             return  # Download dialog is open; don't stack welcome on top
         if self._welcome_window is not None:
+            self._welcome_window.setWindowState(
+                (self._welcome_window.windowState() & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
             self._welcome_window.show()
             self._welcome_window.raise_()
             self._welcome_window.activateWindow()
             return
-
         self._welcome_window = WelcomeWindow(self.cfg, self.ac_model)
         self._welcome_window._trigger_first_minimize_osd = self._trigger_first_minimize_osd
         self._welcome_window.settings_requested.connect(self._open_settings)
@@ -2220,7 +2322,7 @@ class StetApp(QObject):
         from stet.ui.utils import _checkbox_css, set_window_icon
 
         dlg = QDialog()
-        dlg.setWindowTitle("Stet — Initial Setup")
+        dlg.setWindowTitle("Stet — Offline Language Engine Setup")
         set_window_icon(dlg)
         dlg.setStyleSheet(f"""
             QDialog {{ background-color: #121315; }}
@@ -2238,7 +2340,7 @@ class StetApp(QObject):
             | Qt.WindowType.CustomizeWindowHint
             | Qt.WindowType.WindowTitleHint
         )
-        dlg.setFixedSize(440, 240)
+        dlg.setFixedSize(480, 260)
 
         layout = QVBoxLayout(dlg)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -2250,12 +2352,12 @@ class StetApp(QObject):
 
         cb_model = None
         if model_missing:
-            cb_model = QCheckBox("Download Google Gemma 4 model + MTP (~3.3 GB)")
+            cb_model = QCheckBox("Download Recommended Offline AI Model (Gemma 4 + MTP, ~3.3 GB)")
             cb_model.setChecked(True)
             layout.addWidget(cb_model)
 
         hint_lbl = QLabel(
-            "Stet needs a model to correct text. Select the model to enable "
+            "Stet needs an offline language model to correct text. Select the model to enable "
             "Download, or click Skip Setup to add a model later from Settings."
         )
         hint_lbl.setWordWrap(True)
@@ -2324,11 +2426,14 @@ class StetApp(QObject):
 
                 if not model_exists:
                     msg = (
-                        "Stet requires a local AI model to correct spelling, grammar, and style.\n\n"
-                        "Google Gemma 4 with MTP is the recommended model — lightweight, fast, and 100% private."
+                        "Stet runs completely offline on your computer. All writing analysis stays 100% private on your device.\n\n"
+                        "To begin, Stet will download the recommended offline language model (Gemma 4 + MTP) and engine."
                     )
                 else:
-                    msg = "Stet needs to download required runtime dependencies to run locally."
+                    msg = (
+                        "Stet runs completely offline on your computer. All writing analysis stays 100% private on your device.\n\n"
+                        "Stet needs to download the offline language engine to run locally."
+                    )
 
                 dlg, cb_model, _btn_dl = self._build_first_run_download_dialog(
                     msg, model_missing=not model_exists
@@ -2364,28 +2469,26 @@ class StetApp(QObject):
                                 "url": LLAMA_BACKEND_URLS["llama"],
                                 "dest": SCRIPT_DIR / "llama_zip.zip",
                                 "hash": LLAMA_BACKEND_HASHES["llama"],
-                                "label": "llama.cpp server binary",
-                                "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
+                                "label": "Offline AI Engine (llama.cpp server)",
                             })
                             downloads.append({
                                 "url": LLAMA_BACKEND_URLS["cuda"],
                                 "dest": SCRIPT_DIR / "cuda_zip.zip",
                                 "hash": LLAMA_BACKEND_HASHES["cuda"],
-                                "label": "CUDA runtime dependencies",
-                                "extract_dir": SCRIPT_DIR / LLAMA_BACKEND_DIR
+                                "label": "Graphics Acceleration Runtime (CUDA)",
                             })
                     if cb_model and cb_model.isChecked():
                         downloads.append({
                             "url": RECOMMENDED_MODEL_URL,
                             "dest": (MODELS_DIR if MACOS else SCRIPT_DIR) / RECOMMENDED_MODEL_FILE,
                             "hash": RECOMMENDED_MODEL_HASH,
-                            "label": "AI language model"
+                            "label": "Offline Language Model (Google Gemma 4)"
                         })
                         downloads.append({
                             "url": RECOMMENDED_MTP_URL,
                             "dest": (MODELS_DIR if MACOS else SCRIPT_DIR) / RECOMMENDED_MTP_FILE,
                             "hash": RECOMMENDED_MTP_HASH,
-                            "label": "MTP speculative draft model"
+                            "label": "Fast Acceleration Model (Speculative Draft)"
                         })
                         
                     if downloads:

@@ -344,6 +344,63 @@ class WelcomeWindow(QWidget):
         tw_lay.addWidget(welcome_title)
         tw_lay.addWidget(welcome_subtitle)
         scroll_lay.addWidget(title_widget)
+        # Prominent "How Stet Works" Hero Card (Tray & Hotkey Education)
+        panel_hk = self.cfg.get("hotkey", "F9").upper()
+        silent_hk = self.cfg.get("silent_hotkey", "F10").upper()
+
+        hero_card = QWidget()
+        hero_card.setObjectName("welcomeHeroCard")
+        hero_lay = QVBoxLayout(hero_card)
+        hero_lay.setContentsMargins(18, 14, 18, 14)
+        hero_lay.setSpacing(10)
+
+        hero_hdr = QHBoxLayout()
+        hero_hdr.setSpacing(8)
+        hero_title = QLabel("HOW STET WORKS")
+        hero_title.setStyleSheet("font-weight: bold; color: #d4a373; font-size: 11px; letter-spacing: 1px;")
+        hero_hdr.addWidget(hero_title)
+        hero_hdr.addStretch()
+
+        tray_badge = QLabel("● Lives in System Tray")
+        tray_badge.setStyleSheet(
+            "background-color: #1e2024; color: #4ade80; border: 1px solid #28292c; "
+            "padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600;"
+        )
+        hero_hdr.addWidget(tray_badge)
+        hero_lay.addLayout(hero_hdr)
+
+        steps_widget = QWidget()
+        steps_lay = QVBoxLayout(steps_widget)
+        steps_lay.setContentsMargins(0, 0, 0, 0)
+        steps_lay.setSpacing(8)
+
+        step1 = QLabel(
+            "<b>1. Highlight text in any app</b><br>"
+            "<span style='color:#94a3b8; font-size:11px;'>Select text inside Word, Chrome, Outlook, Notepad, Slack, or any other software.</span>"
+        )
+        step1.setWordWrap(True)
+        step1.setTextFormat(Qt.TextFormat.RichText)
+        steps_lay.addWidget(step1)
+
+        step2 = QLabel(
+            f"<b>2. Press <span style='color:#d4a373;'>{panel_hk}</span> to review, or <span style='color:#d4a373;'>{silent_hk}</span> to fix instantly</b><br>"
+            f"<span style='color:#94a3b8; font-size:11px;'><b>{panel_hk}</b> opens the review panel to inspect diffs. <b>{silent_hk}</b> automatically corrects and replaces spelling in place.</span>"
+        )
+        step2.setWordWrap(True)
+        step2.setTextFormat(Qt.TextFormat.RichText)
+        steps_lay.addWidget(step2)
+
+        step3 = QLabel(
+            "<b>3. Stet stays ready in your system tray</b><br>"
+            "<span style='color:#94a3b8; font-size:11px;'>Closing this window keeps Stet active in your system tray (bottom-right corner near the clock). "
+            "Click the tray icon or launch Stet from the Start Menu anytime to return here.</span>"
+        )
+        step3.setWordWrap(True)
+        step3.setTextFormat(Qt.TextFormat.RichText)
+        steps_lay.addWidget(step3)
+
+        hero_lay.addWidget(steps_widget)
+        scroll_lay.addWidget(hero_card)
 
         # Try It Out
         try_it_hdr = QLabel("TRY IT OUT")

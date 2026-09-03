@@ -19,6 +19,7 @@ class StreamWorker(QThread):
         self._stop = False
         self._timeout_aborted = False
         self._watchdog: threading.Timer | None = None
+        self._watchdog_lock = threading.Lock()
 
     def stop(self):
         self._stop = True
@@ -39,13 +40,27 @@ class StreamWorker(QThread):
                 pass
 
     def _cancel_watchdog(self):
-        if self._watchdog is not None:
-            try:
-                self._watchdog.cancel()
-            except Exception:
-                pass
-            self._watchdog = None
+        with self._watchdog_lock:
+            if self._watchdog is not None:
+                try:
+                    self._watchdog.cancel()
+                except Exception:
+                    pass
+                self._watchdog = None
 
+    def _kick_watchdog(self, timeout: float = 30.0):
+        """Reset watchdog timer on streaming activity to prevent mid-stream hangs."""
+        with self._watchdog_lock:
+            if self._watchdog is not None:
+                try:
+                    self._watchdog.cancel()
+                except Exception:
+                    pass
+                self._watchdog = None
+            if not self._stop and not self._timeout_aborted:
+                self._watchdog = threading.Timer(timeout, self.abort_timeout)
+                self._watchdog.daemon = True
+                self._watchdog.start()
     def run(self):
         if self._stop:
             return
@@ -79,7 +94,7 @@ class StreamWorker(QThread):
                         t = delta.get("content", "")
                         rt = delta.get("reasoning_content", "")
                         if t or rt:
-                            self._cancel_watchdog()
+                            self._kick_watchdog(30.0)
                         if rt:
                             reasoning_full += rt
                             if self.payload.get("think", False) and not self._stop and not self._timeout_aborted:

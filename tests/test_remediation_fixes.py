@@ -1,12 +1,9 @@
 """Unit and regression tests for thinking models, tool-call unwrapping, and lifecycle synchronization."""
 
 import json
-import threading
-import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from PyQt6.QtCore import QTimer
 
 from stet.core.app import StetApp
 from stet.core.text_utils import (

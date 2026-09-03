@@ -7,7 +7,6 @@ belong), WITHOUT touching the static-marker streaming path. The function
 delegates to the unified PromptCompiler.
 """
 
-from stet.llm.prompt_compiler import generate_nonce
 from stet.llm.prompt_composer import (
     compile_panel_prompt,
     compile_saved_action_prompt,

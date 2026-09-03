@@ -17,7 +17,7 @@ from stet.core.text_utils import _INLINE_HAZARD_RE, build_user_protection_re
 _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 _PLACEHOLDER_RE = re.compile(r"\[REF(\d+)\]")
-
+_PLACEHOLDER_MATCH_RE = re.compile(r"\[REF\d+\]")
 
 @dataclass(frozen=True, slots=True)
 class ProtectedAtom:
@@ -51,20 +51,23 @@ class ProtectedDocument:
         if not self.atoms:
             return text, True
 
-        all_preserved = True
-        restored = text
-
         # Check which atoms appear in text
-        present_placeholders = set(_PLACEHOLDER_RE.findall(restored))
+        present_placeholders = set(_PLACEHOLDER_RE.findall(text))
+        all_preserved = True
 
         for atom in self.atoms:
             str_id = str(atom.id)
-            if str_id not in present_placeholders and atom.placeholder not in restored:
+            if str_id not in present_placeholders and atom.placeholder not in text:
                 all_preserved = False
 
-            # Replace both exact [REFN] and any slightly mangled variations
-            restored = restored.replace(atom.placeholder, atom.original_text)
+        # Single-pass substitution replaces all [REFn] placeholders simultaneously.
+        # This prevents cascading expansions where an atom's original_text contains another [REFk].
+        def _replace_match(match: re.Match) -> str:
+            ph = match.group(0)
+            atom = self.atom_map.get(ph)
+            return atom.original_text if atom is not None else ph
 
+        restored = _PLACEHOLDER_MATCH_RE.sub(_replace_match, text)
         return restored, all_preserved
 
 
@@ -88,6 +91,11 @@ class DocumentProtector:
             )
 
         spans: List[Tuple[int, int, str, str]] = []  # (start, end, original_text, kind)
+
+        # 0. Literal [REFn] already in user text — track as atoms so generated
+        # placeholders can never collide with user-typed markers on restore.
+        for match in _PLACEHOLDER_MATCH_RE.finditer(text):
+            spans.append((match.start(), match.end(), match.group(0), "literal_ref"))
 
         # 1. Code blocks (highest precedence)
         if protect_code_blocks:
