@@ -25,6 +25,7 @@ extern "system" {
     fn EmptyClipboard() -> BOOL;
     fn GetClipboardSequenceNumber() -> DWORD;
     fn SetClipboardData(uFormat: u32, hMem: HANDLE) -> HANDLE;
+    fn GetClipboardData(uFormat: u32) -> HANDLE;
     fn CountClipboardFormats() -> u32;
 }
 
@@ -126,4 +127,49 @@ pub fn count_clipboard_formats() -> u32 {
 /// The suppression flags set per §0f / §2d.
 pub fn suppression_flag_can_upload_cloud() -> u32 {
     CLIPBRD_EJECT_ALLOW
+}
+
+/// Upper bound (UTF-16 units) scanned for the CF_UNICODETEXT NUL terminator.
+/// A well-formed clipboard string is NUL-terminated; the cap keeps a corrupt
+/// (unterminated) block from turning the scan into an unbounded read.
+pub const MAX_CLIPBOARD_TEXT_UNITS: usize = 8 * 1024 * 1024;
+
+/// Read the current CF_UNICODETEXT clipboard content as UTF-16 units (no NUL).
+/// Returns None when the clipboard is not openable, holds no Unicode text,
+/// or the text cannot be locked. Always closes the clipboard if it was opened
+/// and never leaks the global lock on any path.
+pub fn get_clipboard_unicode() -> Option<Vec<u16>> {
+    unsafe {
+        if OpenClipboard(core::ptr::null_mut()) == 0 {
+            return None;
+        }
+        let result = get_clipboard_unicode_locked();
+        CloseClipboard();
+        result
+    }
+}
+
+/// Inner reader: clipboard is already open on entry. Locks the shared
+/// CF_UNICODETEXT block, copies it out, then unlocks before returning.
+/// SAFETY: caller must hold the clipboard open on this thread.
+unsafe fn get_clipboard_unicode_locked() -> Option<Vec<u16>> {
+    let hmem = GetClipboardData(CF_UNICODETEXT);
+    if hmem.is_null() {
+        return None;
+    }
+    let ptr = GlobalLock(hmem) as *const u16;
+    if ptr.is_null() {
+        return None;
+    }
+    let mut len: usize = 0;
+    while len < MAX_CLIPBOARD_TEXT_UNITS && *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let mut out = Vec::with_capacity(len);
+    if len > 0 {
+        core::ptr::copy_nonoverlapping(ptr, out.as_mut_ptr(), len);
+        out.set_len(len);
+    }
+    GlobalUnlock(hmem);
+    Some(out)
 }

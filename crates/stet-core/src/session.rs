@@ -57,7 +57,10 @@ impl<T: Transport> Session<T> {
     }
 
     /// Process one request frame. Writes a reply on success and progresses the
-    /// handshake. Returns Closed on clean EOF, Failed on a fatal error.
+    /// handshake. Returns Closed on clean EOF. Dispatch-level rejections
+    /// (missing id, unknown field, not-ready, agent failures) are answered
+    /// with an error REPLY frame and Handled — the session stays open. Only
+    /// transport/frame/auth-fatal errors return Err and end the session.
     pub fn step(&mut self) -> IpcResult<StepOutcome> {
         if self.closed {
             return Err(IpcError::ProtocolViolation);
@@ -72,11 +75,21 @@ impl<T: Transport> Session<T> {
             }
         };
 
-        // 2. Parse the JSON, enforcing depth/size (done in frame.parse_json).
+        // 2. Parse the JSON. A broken frame is fatal: without valid JSON there
+        //    is no method or id to answer with.
         let payload = frame.parse_json()?;
-        let req = parse_request(&payload)?;
+        // 3. A dispatch-level rejection (missing id, unknown field) still gets
+        //    a typed error REPLY; the session stays open.
+        let req = match parse_request(&payload) {
+            Ok(req) => req,
+            Err(e) => {
+                let reply = error_reply(payload.get("id").and_then(Value::as_u64), &e);
+                self.transport.write_frame(&reply)?;
+                return Ok(StepOutcome::Handled);
+            }
+        };
 
-        // 3. HELLO is the only message allowed from CONNECTING; it drives the
+        // 4. HELLO is the only message allowed from CONNECTING; it drives the
         //    authentication state machine directly.
         if req.method == "handshake.hello" {
             let reply = self.handle_hello(&payload)?;
@@ -84,10 +97,14 @@ impl<T: Transport> Session<T> {
             return Ok(StepOutcome::Handled);
         }
 
-        // 4. Everything else routes through the dispatcher, which enforces the
-        //    READY gate (commands before READY => NotReady).
-        let reply = dispatch(&self.handshake, &req)?;
-        let reply_bytes = serde_json::to_vec(&reply).map_err(|_| IpcError::MalformedFrame)?;
+        // 5. Everything else routes through the dispatcher, which enforces the
+        //    READY gate. Dispatch-level Err (NotReady, unknown method, agent
+        //    failures) becomes an error REPLY frame with the session open;
+        //    only transport/frame/auth-fatal errors end the session.
+        let reply_bytes = match dispatch(&self.handshake, &req) {
+            Ok(reply) => serde_json::to_vec(&reply).map_err(|_| IpcError::MalformedFrame)?,
+            Err(e) => error_reply(req.id, &e),
+        };
         self.transport.write_frame(&reply_bytes)?;
         Ok(StepOutcome::Handled)
     }
@@ -176,19 +193,109 @@ mod tests {
         let out = s.step().unwrap();
         assert_eq!(out, StepOutcome::Handled);
         assert!(s.is_ready());
-        // Second step: command.paste_text. Dispatched successfully.
+        // Second step: command.paste_text with missing text params. The
+        // dispatch-level rejection is an error REPLY; the session stays open.
         let out2 = s.step().unwrap();
         assert_eq!(out2, StepOutcome::Handled);
+        assert!(s.is_ready());
     }
 
     #[test]
-    fn command_before_hello_fails_with_not_ready() {
+    fn command_before_hello_replies_not_ready_and_stays_open() {
         let secret = [0x42u8; SECRET_LEN];
-        let cmd = json!({"jsonrpc": "2.0", "id": 5, "method": "command.paste_text", "params": {}});
-        let bytes = encode_frame(&cmd);
-        let mut s = Session::new(Codec::new(Cursor::new(bytes), Vec::new()), secret);
+        let cmd = json!({"jsonrpc": "2.0", "id": 5, "method": "command.paste_text", "params": {"text": "x"}});
+        let hello = build_hello("nonce-keep-open", &secret);
+        let mut s = Session::new(MemTransport::new(vec![encode_frame(&cmd), encode_frame(&hello)]), secret);
+        // Not-ready is an error REPLY, not a torn-down connection.
+        let out = s.step().unwrap();
+        assert_eq!(out, StepOutcome::Handled);
+        assert!(!s.is_ready());
+        assert_eq!(last_reply(&s.transport, 0)["error"]["code"], json!("not_ready"));
+        assert_eq!(last_reply(&s.transport, 0)["id"], json!(5));
+        // The session is still open: a valid HELLO now authenticates.
+        let out2 = s.step().unwrap();
+        assert_eq!(out2, StepOutcome::Handled);
+        assert!(s.is_ready());
+    }
+
+    #[test]
+    fn missing_id_is_error_reply_and_stays_open() {
+        let secret = [0x42u8; SECRET_LEN];
+        let cmd = json!({"jsonrpc": "2.0", "method": "command.paste_text", "params": {"text": "x"}});
+        let mut s = Session::new(MemTransport::new(vec![encode_frame(&cmd)]), secret);
+        assert_eq!(s.step().unwrap(), StepOutcome::Handled);
+        assert_eq!(last_reply(&s.transport, 0)["error"]["code"], json!("unknown_required_field"));
+        assert!(last_reply(&s.transport, 0).get("id").map(Value::is_null).unwrap_or(false));
+        // Still open: clean EOF now closes normally.
+        let out2 = s.step().unwrap();
+        assert_eq!(out2, StepOutcome::Closed);
+    }
+
+    #[test]
+    fn unknown_method_after_ready_is_error_reply_and_stays_open() {
+        let secret = [0x42u8; SECRET_LEN];
+        let hello = build_hello("nonce-unknown", &secret);
+        let cmd = json!({"jsonrpc": "2.0", "id": 9, "method": "command.bogus", "params": {}});
+        let mut s = Session::new(
+            MemTransport::new(vec![encode_frame(&hello), encode_frame(&cmd)]),
+            secret,
+        );
+        assert_eq!(s.step().unwrap(), StepOutcome::Handled);
+        assert!(s.is_ready());
+        assert_eq!(s.step().unwrap(), StepOutcome::Handled);
+        assert!(s.is_ready());
+        assert_eq!(last_reply(&s.transport, 1)["error"]["code"], json!("unknown_required_field"));
+        assert_eq!(last_reply(&s.transport, 1)["id"], json!(9));
+    }
+
+    #[test]
+    fn truncated_frame_is_fatal() {
+        let secret = [0x42u8; SECRET_LEN];
+        let mut s = Session::new(MemTransport::new(vec![vec![0u8, 0u8, 0u8]]), secret);
         let err = s.step().unwrap_err();
-        assert_eq!(err, IpcError::NotReady);
+        assert_eq!(err, IpcError::MalformedFrame);
+    }
+
+    /// In-memory transport that records framed replies for inspection.
+    struct MemTransport {
+        inputs: std::collections::VecDeque<Vec<u8>>,
+        outputs: Vec<Vec<u8>>,
+    }
+
+    impl MemTransport {
+        fn new(inputs: Vec<Vec<u8>>) -> Self {
+            MemTransport { inputs: inputs.into(), outputs: Vec::new() }
+        }
+    }
+
+    impl Transport for MemTransport {
+        fn read_frame(&mut self) -> IpcResult<Option<crate::frame::Frame>> {
+            match self.inputs.pop_front() {
+                None => Ok(None),
+                Some(bytes) => {
+                    let (frame, _) = crate::frame::Frame::decode(&bytes)?;
+                    Ok(Some(frame))
+                }
+            }
+        }
+
+        fn write_frame(&mut self, payload: &[u8]) -> IpcResult<()> {
+            if payload.len() > crate::frame::MAX_FRAME_BYTES {
+                return Err(IpcError::FrameTooLarge);
+            }
+            let mut out = Vec::with_capacity(8 + payload.len());
+            out.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+            out.extend_from_slice(payload);
+            self.outputs.push(out);
+            Ok(())
+        }
+    }
+
+    /// Decode reply `index` from the transport outputs back to JSON.
+    fn last_reply(t: &MemTransport, index: usize) -> Value {
+        let bytes = &t.outputs[index];
+        let (frame, _) = crate::frame::Frame::decode(bytes).unwrap();
+        frame.parse_json().unwrap()
     }
 
     #[test]

@@ -46,6 +46,28 @@ extern "system" {
         fn PostQuitMessage(nExitCode: i32);
 
         fn GetModuleHandleW(lpModuleName: *const WCHAR) -> HINSTANCE;
+
+        fn GetForegroundWindow() -> HWND;
+
+        fn GetClassNameW(hWnd: HWND, lpClassName: *mut WCHAR, nMaxCount: i32) -> i32;
+
+        fn GetWindowThreadProcessId(hWnd: HWND, lpdwProcessId: *mut DWORD) -> DWORD;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+        fn OpenProcess(dwDesiredAccess: DWORD, bInheritHandle: BOOL, dwProcessId: DWORD) -> HANDLE;
+
+        fn QueryFullProcessImageNameW(
+        hProcess: HANDLE,
+        dwFlags: DWORD,
+        lpExeName: *mut WCHAR,
+        lpdwSize: *mut DWORD,
+    ) -> BOOL;
+
+        fn CloseHandle(hObject: HANDLE) -> BOOL;
+
+        fn GetLastError() -> DWORD;
 }
 
 /// Register a hotkey against the message-only window.
@@ -118,3 +140,66 @@ pub const WM_HOTKEY: u32 = 0x0312;
 pub const HWND_MESSAGE: isize = -3;
 /// WS styles for the message-only window (none needed).
 pub const WS_OVERLAPPED: DWORD = 0;
+
+/// PROCESS_QUERY_LIMITED_INFORMATION: enough to read the image name, never
+/// enough to disturb the target process.
+pub const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
+/// Maximum image-path length queried (matches MAX_PATH).
+pub const MAX_IMAGE_PATH: usize = 260;
+/// Maximum window-class length queried (matches the Python guard's buffer).
+pub const MAX_CLASS_NAME: usize = 256;
+/// Sentinel error from [`process_image_name`] when a live process handle was
+/// opened but its image name could not be read. Never a real GetLastError
+/// code; lets the caller fail closed (treat as terminal) while still mapping
+/// a plain OpenProcess failure (e.g. stale PID) to not-terminal.
+pub const IDENTITY_UNREADABLE: DWORD = u32::MAX;
+
+/// The current foreground window as an integer handle. 0 means no foreground
+/// window (nothing to disturb, never a terminal).
+pub fn foreground_window() -> isize {
+    unsafe { GetForegroundWindow() as isize }
+}
+
+/// The window class of `hwnd` (empty when unreadable).
+pub fn window_class(hwnd: isize) -> String {
+    let mut buf = [0u16; MAX_CLASS_NAME];
+    let len = unsafe { GetClassNameW(hwnd as HWND, buf.as_mut_ptr(), MAX_CLASS_NAME as i32) };
+    if len <= 0 {
+        return String::new();
+    }
+    let units = (len as usize).min(MAX_CLASS_NAME);
+    String::from_utf16_lossy(&buf[..units])
+}
+
+/// The PID owning `hwnd`. None when the handle is stale (PID 0).
+pub fn window_pid(hwnd: isize) -> Option<u32> {
+    let mut pid: DWORD = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd as HWND, &mut pid);
+    }
+    if pid == 0 {
+        None
+    } else {
+        Some(pid)
+    }
+}
+
+/// The full image path of `pid`. Err is the GetLastError code, except
+/// [`IDENTITY_UNREADABLE`] when a live handle's image could not be read.
+pub fn process_image_name(pid: u32) -> Result<String, DWORD> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return Err(GetLastError());
+        }
+        let mut buf = [0u16; MAX_IMAGE_PATH];
+        let mut size: DWORD = MAX_IMAGE_PATH as DWORD;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size);
+        CloseHandle(handle);
+        if ok == 0 {
+            return Err(IDENTITY_UNREADABLE);
+        }
+        let units = (size as usize).min(MAX_IMAGE_PATH);
+        Ok(String::from_utf16_lossy(&buf[..units]))
+    }
+}

@@ -2,7 +2,7 @@
 
 > **Canonical State & Execution Ledger**  
 > **Last Updated:** 2026-09-03
-> **Status:** Phase 0 (Safety Layer), Phase 1 (Unified Contracts & Core Protocol), and Phase 3 (Correction Engine Re-Architecture) fully implemented and 100% verified across both repositories. Independent review round (2026-09-03): 4 review fixes applied, tracked docs restored, full suite 1428 passed / 4 skipped.
+> **Status:** Phase 0 (Safety Layer), Phase 1 (Unified Contracts & Core Protocol), Phase 2 (Native Core Daemon & Windows IPC Wiring), Phase 3 (Correction Engine Re-Architecture), and Phase 5 (Product & UX Rebuild) fully implemented, online, and 100% verified across both repositories.
 
 ---
 
@@ -12,7 +12,7 @@
 | :--- | :--- | :--- | :--- |
 | **Python Main Checkout** | `D:/Projects/Software/Stet` (`main`) | **1428 passed, 0 failed, 4 skipped** (232s) | `venv/Scripts/pytest -q` |
 | **Python Worktree Sandbox** | `D:/Projects/Software/Stet-wt-phase0` (`phase-0-safety`) | **1403 passed, 0 failed, 9 skipped** (176s) | `uv run --with-requirements requirements.txt --with-requirements requirements-dev.txt pytest -q` |
-| **Rust Native Workspace** | `D:/Projects/Software/Stet-wt-phase0/crates` | **189 passed, 0 failed** (12 suites) | `$env:CARGO_INCREMENTAL='0'; cargo test -j 1` |
+| **Rust Native Workspace** | `crates/` (12 suites) | **221 passed, 0 failed** | `$env:CARGO_INCREMENTAL='0'; cargo test -j 1` |
 | **Win32 Interactive Probes** | `crates/stet-win32` | **8 passed, 0 failed** | `cargo test --features lab -j 1 -- --ignored --test-threads=1 lab_` |
 | **Phase 1 Contracts** | `tests/test_phase1_contracts.py` | **12 passed, 0 failed** (both repos) | `pytest tests/test_phase1_contracts.py` |
 | **Phase 3 Engine** | `tests/test_phase3_engine.py` | **15 passed, 0 failed** (both repos) | `pytest tests/test_phase3_engine.py` |
@@ -53,21 +53,25 @@
 
 ---
 
-### Phase 2: Windows Native Core (`stet-core`, `stet-win32`, `stet-uia-broker`) — LINK-PROVEN & LAB-VERIFIED
-1. **Raw Win32 FFI Skeleton (`crates/stet-win32`)**:
+### Phase 2: Windows Native Core (`stet-core`, `stet-win32`, `stet-uia-broker`) — COMPLETE & VERIFIED
+1. **Raw Win32 FFI Surface (`crates/stet-win32`)**:
    - Standalone `extern "system"` bindings linked directly against MSVC import libs (`kernel32`, `user32`, `advapi32`, `ole32`).
+   - Full clipboard and window inspection APIs: `get_clipboard_unicode()`, `foreground_window()`, `window_class()`, `window_pid()`, `process_image_name()`.
    - Pure, deterministic layout and smoke tests (189/189 passed).
-2. **Interactive Lab Probes (`crates/stet-win32` tests)**:
+2. **Native Daemon Server Loop (`crates/stet-core/src/main.rs`)**:
+   - 45-byte stdin bootstrap verification (`STET` + 0x01 + LE32(32) + secret + LE32(pid)) with immediate fail-closed exit(2).
+   - Named pipe server loop on `\\.\pipe\stet_ipc_v2` with restrictive single-user DACL (`FILE_ALL_ACCESS` = `0x001F_01FF`).
+   - Multi-session step loop with connection-alive error replies for dispatch errors.
+3. **Native Capture & Paste Agent (`crates/stet-core/src/capture_agent.rs`)**:
+   - Daemon-side terminal classification matching Python fail-closed rules.
+   - Self-tagged SendInput chord injection (`Ctrl+Shift+C/V` for terminals, `Ctrl+C/V` for GUI apps).
+   - Clipboard sequence tracking, snapshot preservation, and verified paste observation (`PasteObserver`).
+4. **Python Launcher & Non-Blocking IPC Client (`stet/core/native_daemon.py`, `ipc_client.py`)**:
+   - Automatic daemon spawn with 32-byte fresh secret on stdin (never in argv/env/logs).
+   - `IpcClient` with `PeekNamedPipe` polling and spawn-retry loop.
+   - Verified end-to-end in Python kernel: launch -> handshake -> capture -> paste -> clean teardown.
+5. **Interactive Lab Probes (`crates/stet-win32` tests)**:
    - 8 interactive probes pass: pipe round-trip, DACL creation, clipboard sequence tracking, keyboard hook, WinEvent hook, hotkey registration.
-3. **Rust Core Daemon Modules (`crates/stet-core/src/`)**:
-   - `mod_release.rs`: Event-driven modifier release tracker with bounded wait.
-   - `clipboard.rs`: Dedicated STA clipboard thread and `ClipboardRestoreGate`.
-   - `target_chord.rs`: Context-aware chord verification (`Ctrl+C`, `Ctrl+Shift+C`, `Ctrl+Insert`, `Ctrl+Shift+V`).
-   - `focus_target.rs`: WinEvent focus tracker for tray actions.
-   - `pipe_policy.rs`: Restrictive user-SID DACL + `FILE_FLAG_FIRST_PIPE_INSTANCE`.
-   - `launcher.rs`: Bootstrap secret handoff & `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` supervisor.
-
----
 
 ### Phase 3: Correction Engine Re-Architecture (Python Track B, v1.6.0) — COMPLETE & VERIFIED
 1. **3a ContextPlanner (`stet/core/context_planner.py`)**:
@@ -143,4 +147,4 @@ Second-agent stress/robustness changes were independently reviewed (previously u
 | R-4 | Unused local `import time` in `IpcClient.connect` | Removed |
 | R-5 (reverted) | MTP draft-on-CPU removal looked like a regression — Decision 36.3 proves it is a deliberate `0xc0000409` crash fix | Kept documented GPU-only gate; no code change |
 
-Out of scope / noted: `IpcClient.capture_selection/paste_text` use single blocking `.read(4096)` with no deadline — unreachable today (only `connect()` is called from `app.py:447`); needs framing + timeout before the native daemon goes live. `_dynamic_context_size` grows sticky per session (never shrinks) — accepted to avoid reload thrash. Tracked docs under `docs/` were restored from HEAD after an accidental staged deletion; they stay tracked.
+Noted: `IpcClient.capture_selection/paste_text` now use the non-blocking `_read_reply` framing loop with deadline (resolved in Decision 38). `_dynamic_context_size` grows sticky per session (never shrinks) — accepted to avoid reload thrash. Tracked docs under `docs/` stay tracked.

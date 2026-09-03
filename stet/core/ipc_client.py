@@ -162,25 +162,130 @@ class IpcClient:
     def connect(self, timeout_ms: int = 500) -> bool:
         """Attempt connection and handshake with the native core daemon."""
         if sys.platform == "win32":
+            import time
+
+            deadline = time.monotonic() + (timeout_ms / 1000.0)
+            handle = None
+            # The daemon may take 10-50ms to spawn and create the pipe.
+            # Retry open until deadline on FileNotFoundError.
+            while time.monotonic() < deadline:
+                try:
+                    handle = open(self.pipe_name, "r+b", buffering=0)
+                    break
+                except FileNotFoundError:
+                    time.sleep(0.015)
+                except Exception:
+                    break
+            if handle is None:
+                self._transport = None
+                self.state = ConnectionState.UNCONNECTED
+                return False
             try:
-                # Attempt to open the named pipe
-                handle = open(self.pipe_name, "r+b", buffering=0)
                 self._transport = handle
                 self.state = ConnectionState.CONNECTING
                 hello_frame = self.build_hello_frame()
                 handle.write(hello_frame)
                 handle.flush()
-                self.state = ConnectionState.READY
+                remaining_ms = max(100, int((deadline - time.monotonic()) * 1000))
+                reply = self._read_reply(None, remaining_ms)
+                result = reply.get("result") if isinstance(reply, dict) else None
+                if not isinstance(result, dict) or result.get("status") != "authenticated":
+                    self.close()
+                    return False
+                self.state = ConnectionState.AUTHENTICATED
                 return True
-            except Exception:
-                self._transport = None
-                self.state = ConnectionState.UNCONNECTED
+            except Exception as exc:
+                self.close()
                 return False
         return False
 
     def is_connected(self) -> bool:
         """True if the client has an active authenticated connection."""
         return self.state in (ConnectionState.READY, ConnectionState.AUTHENTICATED) and self._transport is not None
+
+
+    def _match_reply_frame(self, frames: List[Dict[str, Any]], req_id: int | None) -> Dict[str, Any] | None:
+        """Pick the reply frame for req_id (None = hello reply) from decoded frames."""
+        if req_id is None:
+            for f in frames:
+                if "method" not in f and ("result" in f or "error" in f):
+                    return f
+            return frames[0] if frames else None
+        for f in frames:
+            if f.get("id") == req_id:
+                return f
+        return None
+
+    def _read_reply(self, req_id: int | None, timeout_ms: int) -> Dict[str, Any] | None:
+        """Wait up to timeout_ms for the reply frame matching req_id."""
+        transport = self._transport
+        if transport is None:
+            return None
+        import time
+
+        deadline = time.monotonic() + (timeout_ms / 1000.0)
+        try:
+            frames = self.handle_incoming_bytes(b"")
+        except Exception:
+            return None
+        matched = self._match_reply_frame(frames, req_id)
+        if matched is not None:
+            return matched
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                import msvcrt
+
+                os_handle = msvcrt.get_osfhandle(transport.fileno())
+                kernel32 = ctypes.windll.kernel32
+                avail_buf = ctypes.c_ulong(0)
+            except Exception:
+                os_handle = None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                if os_handle is not None:
+                    # Named pipes on Windows cannot use WaitForSingleObject for incoming
+                    # data arrival; PeekNamedPipe queries the driver queue without blocking.
+                    ok = kernel32.PeekNamedPipe(os_handle, None, 0, None, ctypes.byref(avail_buf), None)
+                    if ok == 0:
+                        return None  # Pipe disconnected or broken
+                    if avail_buf.value == 0:
+                        time.sleep(0.005)
+                        continue
+                try:
+                    to_read = max(1, min(4096, avail_buf.value if os_handle is not None else 4096))
+                    chunk = transport.read(to_read)
+                except Exception:
+                    return None
+                if not chunk:
+                    return None
+                try:
+                    frames = self.handle_incoming_bytes(chunk)
+                except Exception:
+                    return None
+                matched = self._match_reply_frame(frames, req_id)
+                if matched is not None:
+                    return matched
+        else:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                try:
+                    chunk = transport.read(4096)
+                except Exception:
+                    return None
+                if not chunk:
+                    return None
+                try:
+                    frames = self.handle_incoming_bytes(chunk)
+                except Exception:
+                    return None
+                matched = self._match_reply_frame(frames, req_id)
+                if matched is not None:
+                    return matched
 
     def capture_selection(self, timeout_ms: int = 1500) -> Dict[str, Any] | None:
         """Request text capture from the active window via the native daemon."""
@@ -190,13 +295,9 @@ class IpcClient:
             req_id, frame = self.build_command_frame("command.capture_selection", {"timeout_ms": timeout_ms})
             self._transport.write(frame)
             self._transport.flush()
-            # Read response frame
-            chunk = self._transport.read(4096)
-            if chunk:
-                frames = self.handle_incoming_bytes(chunk)
-                for f in frames:
-                    if f.get("id") == req_id and "result" in f:
-                        return f["result"]
+            reply = self._read_reply(req_id, timeout_ms)
+            if reply is not None and "result" in reply:
+                return reply["result"]
         except Exception:
             pass
         return None
@@ -209,12 +310,9 @@ class IpcClient:
             req_id, frame = self.build_command_frame("command.paste_text", {"text": text, "verify_target": verify_target})
             self._transport.write(frame)
             self._transport.flush()
-            chunk = self._transport.read(4096)
-            if chunk:
-                frames = self.handle_incoming_bytes(chunk)
-                for f in frames:
-                    if f.get("id") == req_id and "result" in f:
-                        return f["result"]
+            reply = self._read_reply(req_id, 5000)
+            if reply is not None and "result" in reply:
+                return reply["result"]
         except Exception:
             pass
         return None

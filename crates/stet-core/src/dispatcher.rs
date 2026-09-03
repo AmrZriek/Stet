@@ -4,6 +4,7 @@
 //! `IpcResult`. Dispatchers contain no `unwrap`/`expect`/panic path; a
 //! last-resort panic boundary is covered by §4.4 (rate-limited integrity).
 
+use crate::capture_agent::{CaptureAgent, RealAgent, DEFAULT_CAPTURE_TIMEOUT_MS};
 use crate::frame::{IpcError, IpcResult};
 use crate::handshake::Handshake;
 use serde_json::{json, Value};
@@ -35,14 +36,43 @@ pub fn parse_request(payload: &Value) -> IpcResult<Request> {
 }
 
 /// Handle a request against the handshake state. Rejects commands before
-/// the connection is READY (Schema §3.1).
+/// the connection is READY (Schema §3.1). Production entry: runs the real
+/// capture/paste agent.
 pub fn dispatch(hs: &Handshake, req: &Request) -> IpcResult<Value> {
+    dispatch_with(hs, req, &RealAgent::new())
+}
+
+/// Handle a request with an injectable [`CaptureAgent`]. Tests pass fakes;
+/// production passes the real agent. Agent failures surface as typed
+/// `IpcError`s — success is never faked.
+pub fn dispatch_with(hs: &Handshake, req: &Request, agent: &impl CaptureAgent) -> IpcResult<Value> {
     if req.method.starts_with("command.") && !hs.is_ready() {
         return Err(IpcError::NotReady);
     }
     match req.method.as_str() {
-        // Placeholder handlers; real engine wiring lands in Phase 2/3.
-        "command.paste_text" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),
+        "command.capture_selection" => {
+            let timeout_ms = req
+                .params
+                .get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_CAPTURE_TIMEOUT_MS);
+            let text = agent.capture_selection(timeout_ms)?;
+            Ok(json!({"id": req.id, "result": {"text": text}}))
+        }
+        "command.paste_text" => {
+            let text = req
+                .params
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or(IpcError::UnknownRequiredField)?;
+            let verify = req
+                .params
+                .get("verify_target")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            let count = agent.paste_text(text, verify)?;
+            Ok(json!({"id": req.id, "result": {"status": "pasted", "chars": count}}))
+        }
         "command.undo_text" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),
         "handshake.hello" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),
         _ => Err(IpcError::UnknownRequiredField),
@@ -88,14 +118,11 @@ mod tests {
 
     #[test]
     fn unknown_method_is_rejected() {
-        // Simulate a READY connection.
-        let hs = Handshake::new();
-        // No way to reach READY without a secret here; use a ready stub.
+        let hs = ready_handshake();
+        let agent = FakeAgent::ok();
         let req = Request { id: Some(1), method: "command.bogus".into(), params: json!({}) };
-        // Just assert parse/route-level rejection for unknown method.
-        let res = dispatch(&hs, &req);
-        // Since not ready, we get NotReady for command.* first.
-        assert_eq!(res, Err(IpcError::NotReady));
+        let res = dispatch_with(&hs, &req, &agent);
+        assert_eq!(res, Err(IpcError::UnknownRequiredField));
     }
 
     #[test]
@@ -107,7 +134,125 @@ mod tests {
 
     #[test]
     fn ready_connection_routes_known_command() {
-        // Reach READY via a valid handshake.
+        let hs = ready_handshake();
+        let agent = FakeAgent::ok();
+        let req = Request { id: Some(42), method: "command.paste_text".into(), params: json!({"text": "hi"}) };
+        let res = dispatch_with(&hs, &req, &agent).unwrap();
+        assert_eq!(res, json!({"id": 42, "result": {"status": "pasted", "chars": 2}}));
+    }
+
+    #[test]
+    fn capture_selection_returns_text_shape() {
+        let hs = ready_handshake();
+        let agent = FakeAgent::ok();
+        let req = Request {
+            id: Some(7),
+            method: "command.capture_selection".into(),
+            params: json!({"timeout_ms": 500}),
+        };
+        let res = dispatch_with(&hs, &req, &agent).unwrap();
+        assert_eq!(res, json!({"id": 7, "result": {"text": "selected"}}));
+        assert_eq!(agent.seen_timeout.get(), 500);
+    }
+
+    #[test]
+    fn capture_selection_defaults_timeout() {
+        let hs = ready_handshake();
+        let agent = FakeAgent::ok();
+        let req = Request { id: Some(7), method: "command.capture_selection".into(), params: json!({}) };
+        let res = dispatch_with(&hs, &req, &agent).unwrap();
+        assert_eq!(res, json!({"id": 7, "result": {"text": "selected"}}));
+        assert_eq!(agent.seen_timeout.get(), crate::capture_agent::DEFAULT_CAPTURE_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn paste_text_defaults_verify_target_to_true() {
+        let hs = ready_handshake();
+        let agent = FakeAgent::ok();
+        let req = Request {
+            id: Some(3),
+            method: "command.paste_text".into(),
+            params: json!({"text": "abc"}),
+        };
+        let res = dispatch_with(&hs, &req, &agent).unwrap();
+        assert_eq!(res, json!({"id": 3, "result": {"status": "pasted", "chars": 3}}));
+        assert!(agent.seen_verify.get());
+    }
+
+    #[test]
+    fn paste_text_missing_text_is_typed_error() {
+        let hs = ready_handshake();
+        let agent = FakeAgent::ok();
+        let req = Request { id: Some(3), method: "command.paste_text".into(), params: json!({}) };
+        let res = dispatch_with(&hs, &req, &agent);
+        assert_eq!(res, Err(IpcError::UnknownRequiredField));
+    }
+
+    #[test]
+    fn agent_failure_is_typed_never_fake_ok() {
+        let hs = ready_handshake();
+        let agent = FakeAgent::failing(IpcError::Timeout, IpcError::AbortedWrongTarget);
+        let cap = Request { id: Some(1), method: "command.capture_selection".into(), params: json!({}) };
+        assert_eq!(dispatch_with(&hs, &cap, &agent), Err(IpcError::Timeout));
+        let paste = Request {
+            id: Some(2),
+            method: "command.paste_text".into(),
+            params: json!({"text": "x"}),
+        };
+        assert_eq!(dispatch_with(&hs, &paste, &agent), Err(IpcError::AbortedWrongTarget));
+    }
+
+    use std::cell::Cell;
+
+    struct FakeAgent {
+        capture_text: String,
+        capture_err: Option<IpcError>,
+        paste_err: Option<IpcError>,
+        seen_timeout: Cell<u64>,
+        seen_verify: Cell<bool>,
+    }
+
+    impl FakeAgent {
+        fn ok() -> Self {
+            FakeAgent {
+                capture_text: "selected".into(),
+                capture_err: None,
+                paste_err: None,
+                seen_timeout: Cell::new(0),
+                seen_verify: Cell::new(false),
+            }
+        }
+
+        fn failing(capture_err: IpcError, paste_err: IpcError) -> Self {
+            FakeAgent {
+                capture_text: String::new(),
+                capture_err: Some(capture_err),
+                paste_err: Some(paste_err),
+                seen_timeout: Cell::new(0),
+                seen_verify: Cell::new(false),
+            }
+        }
+    }
+
+    impl crate::capture_agent::CaptureAgent for FakeAgent {
+        fn capture_selection(&self, timeout_ms: u64) -> Result<String, IpcError> {
+            self.seen_timeout.set(timeout_ms);
+            match self.capture_err {
+                Some(e) => Err(e),
+                None => Ok(self.capture_text.clone()),
+            }
+        }
+
+        fn paste_text(&self, text: &str, verify_target: bool) -> Result<usize, IpcError> {
+            self.seen_verify.set(verify_target);
+            match self.paste_err {
+                Some(e) => Err(e),
+                None => Ok(text.chars().count()),
+            }
+        }
+    }
+
+    fn ready_handshake() -> Handshake {
         let secret = [0x42u8; crate::handshake::SECRET_LEN];
         let mut hs = Handshake::new();
         let hello = HelloParams {
@@ -124,9 +269,7 @@ mod tests {
             }),
         };
         let _ = hs.authenticate(&hello, &secret);
-        hs.become_ready().unwrap();
-        let req = Request { id: Some(42), method: "command.paste_text".into(), params: json!({}) };
-        let res = dispatch(&hs, &req);
-        assert!(res.is_ok());
+        let _ = hs.become_ready();
+        hs
     }
 }

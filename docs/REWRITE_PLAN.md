@@ -2,7 +2,7 @@
 
 > Canonical Document: `docs/REWRITE_PLAN.md`  
 > Last Updated: 2026-09-03
-> Status: **PHASES 0, 1, 3, 5 COMPLETE & VERIFIED** | **PHASE 2 & 6 FINAL INTEGRATION**
+> Status: **PHASES 0, 1, 2, 3, 5 COMPLETE & VERIFIED** | **PHASE 6 FINAL INTEGRATION**
 
 ---
 
@@ -113,7 +113,7 @@ The Stet v2.0 Rewrite re-architects Stet from a synchronous monolithic Python sc
 | :--- | :--- | :--- | :--- |
 | **Python Main Checkout** | `D:/Projects/Software/Stet` | **1,428 passed, 0 failed, 4 skipped** | `pytest -q` |
 | **Python Worktree Sandbox** | `D:/Projects/Software/Stet-wt-phase0` | **1,403 passed, 0 failed, 9 skipped** | `pytest -q` |
-| **Rust Native Workspace** | `crates/` (12 suites) | **189 passed, 0 failed** | `cargo test -j 1` |
+| **Rust Native Workspace** | `crates/` (12 suites) | **221 passed, 0 failed** | `cargo test -j 1` |
 | **Win32 Lab Probes** | `crates/stet-win32` | **8 passed, 0 failed** | `cargo test --features lab -j 1` |
 | **FFI Skeleton Harness** | `phase2h/ffi-skel` | **33 passed, 0 failed** | `cargo test -j 1` |
 | **Phase 1 Contracts** | `tests/test_phase1_contracts.py` | **12 passed, 0 failed** | `pytest tests/test_phase1_contracts.py` |

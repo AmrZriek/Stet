@@ -1,3 +1,4 @@
+pub mod capture_agent;
 pub mod engine;
 pub mod engine_impl;
 pub mod busy;

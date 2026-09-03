@@ -320,6 +320,10 @@ DEFAULT_CONFIG: dict = {
     "system_prompt": "",
     # Correction delivery: always "patch" (stream mode removed from settings UI)
     "correction_method": "patch",
+    # Native Rust core daemon (named-pipe IPC). When True the app spawns
+    # stet-core and routes capture/paste through it, falling back to
+    # in-process Win32 on any failure.
+    "use_native_daemon": True,
     # Correction history (local-only record for undo and review)
     "history_enabled": False,
     "history_limit": 200,

@@ -464,13 +464,25 @@ class StetApp(QObject):
         self._chat_status_lbl = QLabel("● Chat: Offline")
         self._old_clip = ""
         self._ipc_client = None
-        if self.cfg.get("use_native_daemon", False):
+        self._daemon_proc = None
+        if self.cfg.get("use_native_daemon", True):
             try:
                 from stet.core.ipc_client import IpcClient
-                client = IpcClient()
-                if client.connect():
+                from stet.core.native_daemon import launch_daemon
+                launched = launch_daemon()
+                client = IpcClient(secret=launched[1]) if launched is not None else None
+                if client is not None and client.connect():
                     self._ipc_client = client
+                    self._daemon_proc = launched[0]
                     log("[IPC] Connected to native Stet core daemon v2.0")
+                else:
+                    if launched is not None:
+                        try:
+                            launched[0].terminate()
+                        except Exception:
+                            pass
+                    log("[IPC] Native daemon connection failed (falling back to direct Win32)")
+                    self._ipc_client = None
             except Exception as e:
                 log(f"[IPC] Native daemon connection failed (falling back to direct Win32): {e}")
                 self._ipc_client = None
@@ -3025,6 +3037,19 @@ class StetApp(QObject):
                     qapp.removeNativeEventFilter(self._hotkey_filter)
                 except Exception:
                     pass
+        if getattr(self, "_ipc_client", None) is not None:
+            try:
+                self._ipc_client.close()
+            except Exception:
+                pass
+            self._ipc_client = None
+        if getattr(self, "_daemon_proc", None) is not None:
+            try:
+                self._daemon_proc.terminate()
+                self._daemon_proc.wait(timeout=1.0)
+            except Exception:
+                pass
+            self._daemon_proc = None
         self.ac_model.unload_model()
         self.chat_model.unload_model()
         if qapp:

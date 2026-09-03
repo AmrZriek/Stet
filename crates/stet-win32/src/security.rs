@@ -127,7 +127,11 @@ pub const SECURITY_NT_AUTHORITY: SID_IDENTIFIER_AUTHORITY = SID_IDENTIFIER_AUTHO
 pub const WinWorldSid: u32 = 1;
 pub const WinLocalSystemSid: u32 = 9;
 pub const WinCreatorOwnerSid: u32 = 3;
-pub const PIPE_ALL_ACCESS: DWORD = 0x000F_001F;
+/// Full access mask for named pipes granting standard rights, synchronize,
+/// read/write data, and read/write attributes (0x001F_01FF). Standard Win32
+/// file open (`open(pipe, "r+b")`) checks for attribute rights and synchronize;
+/// missing bits cause ERROR_ACCESS_DENIED (13 / Permission denied).
+pub const PIPE_ALL_ACCESS: DWORD = 0x001F_01FF;
 pub const PIPE_ACCESS_READ: DWORD = 0x0000_0101;
 pub const GENERIC_ALL: DWORD = 0x10000000;
 const TOKEN_QUERY: DWORD = 0x0008;
