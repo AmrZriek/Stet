@@ -292,6 +292,12 @@ def _is_terminal_or_ide(hwnd) -> bool:
     IDEs, code editors, and runtimes (VS Code, JetBrains, Sublime, Notepad,
     Antigravity, Python, Node, etc.) are NOT blocked — Ctrl+C is a safe copy
     operation in those apps.
+
+    FAIL-CLOSED: any window whose identity cannot be established (elevated
+    process denying OpenProcess, unreadable image name, inspection error)
+    is treated as a terminal. Plain Ctrl+C only fires on positively
+    identified non-terminals. A null hwnd (no foreground window) is safe
+    and returns False — there is no process to harm.
     """
     if not hwnd:
         return False
@@ -322,6 +328,9 @@ def _is_terminal_or_ide(hwnd) -> bool:
     # because Ctrl+C is a safe text-copy operation in those apps.
     pid = ctypes.c_ulong()
     ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if pid.value == 0:
+        # Invalid or stale hwnd — no foreground window, nothing to harm.
+        return False
     h_process = ctypes.windll.kernel32.OpenProcess(
         0x1000, False, pid
     )  # PROCESS_QUERY_LIMITED_INFORMATION
@@ -362,14 +371,29 @@ def _is_terminal_or_ide(hwnd) -> bool:
                 log(
                     f"[Capture] Not a terminal — class={class_str!r} proc={proc_name!r}"
                 )
+                return False
             else:
-                log(f"[Capture] QueryFullProcessImageNameW failed for hwnd={hwnd}")
+                # The process is alive (we hold an open handle) but its
+                # identity is unreadable. Fail closed: it may be an
+                # elevated terminal, and plain Ctrl+C would SIGINT it.
+                log(f"[Capture] QueryFullProcessImageNameW failed for hwnd={hwnd} — treating as terminal (fail-closed)")
+                return True
         except Exception as e:
-            log(f"[Capture] Exception checking process name: {e}")
+            # Same fail-closed rule: unknown identity, no plain Ctrl+C.
+            log(f"[Capture] Exception checking process name: {e} — treating as terminal (fail-closed)")
+            return True
         finally:
             ctypes.windll.kernel32.CloseHandle(h_process)
     else:
-        log(f"[Capture] OpenProcess failed for pid={pid.value}")
+        # OpenProcess failed. ERROR_ACCESS_DENIED (5) means a live process
+        # we may not inspect — typically an elevated terminal or admin
+        # shell — so fail closed. Any other error (stale hwnd, exited
+        # process) means there is no window to harm.
+        err = ctypes.windll.kernel32.GetLastError()
+        if err == 5:  # ERROR_ACCESS_DENIED
+            log(f"[Capture] OpenProcess denied for pid={pid.value} (elevated?) — treating as terminal (fail-closed)")
+            return True
+        log(f"[Capture] OpenProcess failed for pid={pid.value} (err={err})")
 
     return False
 
@@ -1416,6 +1440,8 @@ class StetApp(QObject):
         # discard if ownership changed during capture (wrong-window protection).
         target_identity = capture_compound_identity()
         self._capture_target = target_identity
+        self._terminal_capture_refused = False
+
         if MACOS:
             result = self._mac_input.capture_selection()
             self._mac_selection_target = result.target
@@ -1542,6 +1568,7 @@ class StetApp(QObject):
                 return clip
 
             log("[Capture] no selection detected (terminal)")
+            self._terminal_capture_refused = True
             if self._old_clip:
                 self._safe_copy(self._old_clip)
             return ""
@@ -1595,6 +1622,16 @@ class StetApp(QObject):
         legacy = self.cfg.get(legacy_key, fallback)
         return "+".join(p.capitalize() for p in legacy.split("+"))
 
+    def _empty_selection_hint(self, hotkey_display: str) -> str:
+        """OSD text for empty capture. Terminal refusals get a specific
+        warning: capture is disabled there to protect the running process."""
+        if getattr(self, "_terminal_capture_refused", False):
+            return (
+                "Terminal window detected — capture is disabled here "
+                "to protect the running process (Ctrl+C would interrupt it)."
+            )
+        return f"Highlight some text in any app first, then press {hotkey_display}"
+
     def _hotkey_worker(self):
         try:
             strength = getattr(self, "_pending_panel_strength", "full_correction")
@@ -1615,7 +1652,7 @@ class StetApp(QObject):
                     self._last_empty_notify_ts = now
                     panel_hk = self._get_hotkey_display("panel", "F9")
                     self._silent_osd_signal.emit(
-                        f"Highlight some text in any app first, then press {panel_hk}",
+                        self._empty_selection_hint(panel_hk),
                         "info",
                     )
                 else:
@@ -1652,14 +1689,9 @@ class StetApp(QObject):
                 if now - self._last_empty_notify_ts > 1.5:
                     self._last_empty_notify_ts = now
                     silent_hk = self._get_hotkey_display("silent", "F10")
-                    self._silent_osd_signal.emit(
-                        f"Highlight some text in any app first, then press {silent_hk}",
-                        "info",
-                    )
-                    self._notify.emit(
-                        f"Highlight some text in any app first, then press {silent_hk}.",
-                        "info",
-                    )
+                    hint = self._empty_selection_hint(silent_hk)
+                    self._silent_osd_signal.emit(hint, "info")
+                    self._notify.emit(hint + ".", "info")
                 return
 
             text = selected.strip()
