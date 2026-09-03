@@ -317,6 +317,36 @@ class IpcClient:
             pass
         return None
 
+    def register_hotkeys(self, hotkeys: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+        """Register hotkey combinations with the native daemon."""
+        if not self.is_connected():
+            return None
+        try:
+            req_id, frame = self.build_command_frame("command.register_hotkeys", {"hotkeys": hotkeys})
+            self._transport.write(frame)
+            self._transport.flush()
+            reply = self._read_reply(req_id, 2000)
+            if reply is not None and "result" in reply:
+                return reply["result"]
+        except Exception:
+            pass
+        return None
+
+    def unregister_hotkeys(self) -> Dict[str, Any] | None:
+        """Unregister all hotkeys from the native daemon."""
+        if not self.is_connected():
+            return None
+        try:
+            req_id, frame = self.build_command_frame("command.unregister_hotkeys", {})
+            self._transport.write(frame)
+            self._transport.flush()
+            reply = self._read_reply(req_id, 2000)
+            if reply is not None and "result" in reply:
+                return reply["result"]
+        except Exception:
+            pass
+        return None
+
     def close(self) -> None:
         """Close the active connection and reset state."""
         if self._transport is not None:

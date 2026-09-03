@@ -45,14 +45,15 @@ def _read_install_dir() -> str | None:
 
 
 def _kill_stet_processes() -> None:
-    try:
-        subprocess.run(
-            ["taskkill", "/IM", "Stet.exe", "/F"],
-            capture_output=True, timeout=10,
-        )
-    except Exception:
-        pass
-
+    for proc in ("Stet.exe", "stet-core.exe"):
+        try:
+            subprocess.run(
+                ["taskkill", "/IM", proc, "/F"],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception:
+            pass
 
 def _delete_tree(path: Path) -> None:
     import shutil

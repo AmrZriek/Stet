@@ -172,6 +172,10 @@ pub trait CaptureEnv {
     fn foreground_eligible(&mut self) -> bool;
     /// Sleep (drives the poll timing; fakes record instead of sleeping).
     fn sleep_ms(&mut self, ms: u64);
+    /// Attempt direct text capture via UI Automation (bypassing clipboard & chords).
+    fn capture_uia(&mut self) -> Option<String> {
+        None
+    }
 }
 
 /// Daemon command surface used by the dispatcher.
@@ -190,6 +194,12 @@ pub trait CaptureAgent {
 pub fn capture_with_env(env: &mut impl CaptureEnv, timeout_ms: u64) -> Result<String, IpcError> {
     if timeout_ms == 0 {
         return Ok(String::new());
+    }
+    // 1. Direct UIA capture first — completely bypasses clipboard and synthetic keys.
+    if let Some(uia_text) = env.capture_uia() {
+        if !uia_text.is_empty() {
+            return Ok(uia_text);
+        }
     }
     let terminal = env.is_terminal();
     let old = env.clipboard_text();
@@ -492,6 +502,23 @@ mod win_impl {
         fn sleep_ms(&mut self, ms: u64) {
             std::thread::sleep(std::time::Duration::from_millis(ms));
         }
+
+        fn capture_uia(&mut self) -> Option<String> {
+            let hwnd = ffi_skel::window::foreground_window();
+            let pid = ffi_skel::window::window_pid(hwnd).unwrap_or(0);
+            let req = stet_uia_broker::protocol::BrokerRequest {
+                pid,
+                window_handle: hwnd as u64,
+                request_id: 1,
+                deadline_ms: 250,
+            };
+            let resp = stet_uia_broker::handle_broker_request(&req);
+            if resp.outcome.is_success() {
+                resp.text
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -622,6 +649,7 @@ mod tests {
         paste_chords: RefCell<Vec<bool>>,
         writes: RefCell<Vec<String>>,
         sleeps: RefCell<Vec<u64>>,
+        uia_text: RefCell<Option<String>>,
     }
 
     impl FakeEnv {
@@ -635,6 +663,7 @@ mod tests {
                 paste_chords: RefCell::new(Vec::new()),
                 writes: RefCell::new(Vec::new()),
                 sleeps: RefCell::new(Vec::new()),
+                uia_text: RefCell::new(None),
             }
         }
 
@@ -676,6 +705,9 @@ mod tests {
         fn sleep_ms(&mut self, ms: u64) {
             self.sleeps.borrow_mut().push(ms);
         }
+        fn capture_uia(&mut self) -> Option<String> {
+            self.uia_text.borrow_mut().take()
+        }
     }
 
     // The fake bumps the sequence on every read, so pinning restores requires
@@ -715,6 +747,18 @@ mod tests {
         fn sleep_ms(&mut self, ms: u64) {
             self.inner.sleep_ms(ms);
         }
+        fn capture_uia(&mut self) -> Option<String> {
+            self.inner.capture_uia()
+        }
+    }
+    #[test]
+    fn uia_capture_succeeds_without_sending_chords() {
+        let mut env = FakeEnv::new(vec!["old text"], false);
+        *env.uia_text.borrow_mut() = Some("uia direct captured text".to_string());
+        let text = capture_with_env(&mut env, 1500).unwrap();
+        assert_eq!(text, "uia direct captured text");
+        assert!(env.copy_chords.borrow().is_empty());
+        assert!(env.writes.borrow().is_empty());
     }
 
     #[test]
@@ -727,7 +771,6 @@ mod tests {
         // Original restored after success.
         assert!(env.inner.writes.borrow().contains(&String::new()));
     }
-
     #[test]
     fn capture_terminal_never_sends_plain_ctrl_c() {
         // old="old", polls: "old" (unchanged) then "new".

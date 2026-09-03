@@ -15,5 +15,6 @@ base64 = "0.22"
 
 [target.'cfg(windows)'.dependencies]
 ffi-skel = { path = "../stet-win32" }
+stet-uia-broker = { path = "../stet-uia-broker" }
 
 [dev-dependencies]

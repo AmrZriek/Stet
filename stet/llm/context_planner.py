@@ -67,16 +67,17 @@ class ContextPlanner:
         best_index = None
         best_content = ""
         best_tokens = 0
+        # solve_closed_budget is loop-invariant: compute once per slot budget
+        feasible_budget = solve_closed_budget(n_ctx_slot, self._reserve, self._safety)
         for idx, candidate in enumerate(candidates):
             i = self._compiled_token_count(candidate)
-            feasible_budget = solve_closed_budget(n_ctx_slot, self._reserve, self._safety)
             if i <= feasible_budget:
                 best_index = idx
                 best_content = candidate
                 best_tokens = i
         if best_index is None:
             if candidates:
-                shrunk = self._binary_shrink(candidates[0], n_ctx_slot)
+                shrunk = self._binary_shrink(candidates[0], feasible_budget)
                 if shrunk is not None:
                     return BudgetResult(0, self._reserved(shrunk, n_ctx_slot), shrunk, True)
             return BudgetResult(None, 0, "", False)
@@ -86,13 +87,12 @@ class ContextPlanner:
     def _reserved(self, content, n_ctx_slot):
         return compute_output_reservation(self._tokenizer(content), self._reserve)
 
-    def _binary_shrink(self, content, n_ctx_slot):
+    def _binary_shrink(self, content, feasible_budget):
         lo, hi = 0, len(content)
         best = None
         while lo <= hi:
             mid = (lo + hi) // 2
             prefix = content[:mid]
-            feasible_budget = solve_closed_budget(n_ctx_slot, self._reserve, self._safety)
             if self._compiled_token_count(prefix) <= feasible_budget:
                 best = prefix
                 lo = mid + 1

@@ -249,28 +249,26 @@ def _wait_for_modifiers_released(timeout_sec: float = 0.20) -> bool:
     Shift held down during a Shift+F9 hotkey causes synthetic Ctrl+C to conflict
     with hardware key state or deselect text.
     """
+def _wait_for_mods(conflict_mods: tuple[int, ...], timeout_sec: float = 0.20) -> bool:
+    """Wait up to timeout_sec for specified physical modifiers to be released."""
     if not WINDOWS:
         return True
     deadline = time.perf_counter() + timeout_sec
-    conflict_mods = (VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN)
     while time.perf_counter() < deadline:
         if not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods):
             return True
         time.sleep(0.01)
     return not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods)
+
+
+def _wait_for_modifiers_released(timeout_sec: float = 0.20) -> bool:
+    """Wait up to timeout_sec for physical modifier keys to be released."""
+    return _wait_for_mods((VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN), timeout_sec)
 
 
 def _wait_for_alt_win_released(timeout_sec: float = 0.20) -> bool:
     """Wait up to timeout_sec for physical Alt/Win modifiers to be released."""
-    if not WINDOWS:
-        return True
-    deadline = time.perf_counter() + timeout_sec
-    conflict_mods = (VK_MENU, VK_LWIN, VK_RWIN)
-    while time.perf_counter() < deadline:
-        if not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods):
-            return True
-        time.sleep(0.01)
-    return not any(_user32.GetAsyncKeyState(mod) & 0x8000 for mod in conflict_mods)
+    return _wait_for_mods((VK_MENU, VK_LWIN, VK_RWIN), timeout_sec)
 
 
 def _send_ctrl_chord(vk: int, wait_mods: bool = True) -> None:

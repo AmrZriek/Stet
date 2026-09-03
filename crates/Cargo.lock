@@ -258,6 +258,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "stet-uia-broker",
  "thiserror",
  "uuid",
 ]
@@ -266,6 +267,7 @@ dependencies = [
 name = "stet-uia-broker"
 version = "1.5.0"
 dependencies = [
+ "ffi-skel",
  "serde",
  "serde_json",
  "thiserror",

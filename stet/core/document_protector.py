@@ -16,8 +16,9 @@ from stet.core.text_utils import _INLINE_HAZARD_RE, build_user_protection_re
 
 _CODE_FENCE_RE = re.compile(r"```[\s\S]*?```", re.MULTILINE)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+# Canonical placeholder pattern with capture group for atom index.
 _PLACEHOLDER_RE = re.compile(r"\[REF(\d+)\]")
-_PLACEHOLDER_MATCH_RE = re.compile(r"\[REF\d+\]")
+_PLACEHOLDER_MATCH_RE = _PLACEHOLDER_RE
 
 @dataclass(frozen=True, slots=True)
 class ProtectedAtom:

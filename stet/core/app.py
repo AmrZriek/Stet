@@ -474,6 +474,7 @@ class StetApp(QObject):
                 if client is not None and client.connect():
                     self._ipc_client = client
                     self._daemon_proc = launched[0]
+                    client.on_event("event.hotkey_fired", lambda params: self._hotkey_signal.emit(params))
                     log("[IPC] Connected to native Stet core daemon v2.0")
                 else:
                     if launched is not None:
@@ -1171,6 +1172,19 @@ class StetApp(QObject):
             shortcut = hk_cfg.get("shortcut", "").lower().strip()
             if shortcut:
                 desired[shortcut] = hk_cfg
+
+        if self._ipc_client and self._ipc_client.is_connected():
+            try:
+                hk_specs = []
+                for shortcut, hk_cfg in desired.items():
+                    hk_specs.append({
+                        "shortcut": shortcut,
+                        "mode": hk_cfg.get("mode", "panel"),
+                        "strength": hk_cfg.get("strength", "full_correction"),
+                    })
+                self._ipc_client.register_hotkeys(hk_specs)
+            except Exception as e:
+                log(f"[Hotkey] Daemon hotkey sync error: {e}")
 
         registered: set[str] = set(self._hotkey_registered.keys())
         to_unregister, to_register, unchanged = compute_hotkey_diff(registered, set(desired.keys()))

@@ -1285,8 +1285,17 @@ class PlatformBuilder:
         if PLATFORM == "macOS":
             numbers = {"app": 1, "extras": 2, "launchers": 3, "package": 4, "checksums": 5}
             return f"Step {numbers[name]} / 5"
-        numbers = {"app": 1, "updater": 2, "extras": 3, "launchers": 4, "package": 5, "checksums": self._total_steps()}
-        return f"Step {numbers[name]} / {self._total_steps()}"
+        numbers = {
+            "app": 1,
+            "updater": 2,
+            "daemon": 3,
+            "extras": 4,
+            "launchers": 5,
+            "package": 6,
+            "checksums": self._total_steps(),
+        }
+        step_num = numbers.get(name, 0)
+        return f"Step {step_num} / {self._total_steps()}" if step_num else name
 
     def clean(self):
         if self.release_dir.exists():
@@ -1381,6 +1390,38 @@ class PlatformBuilder:
         shutil.copy2(exe_path, self.portable_dir / exe_name)
         print(f"  Copied uninstaller: {exe_name}")
 
+    # ── Step 2.6: Compile native Rust daemon (Windows only) ──────────────
+
+    def build_native_daemon(self):
+        if PLATFORM != "Windows":
+            return
+        cargo_toml = ROOT / "crates" / "Cargo.toml"
+        if not cargo_toml.exists():
+            print("  Skipping native daemon (crates/Cargo.toml not found)")
+            return
+        banner(f"{self._step('daemon')} — Compile native Rust binaries (stet-core, stet-uia-broker)")
+        for binary_name in ("stet-core", "stet-uia-broker"):
+            exe_name = f"{binary_name}.exe"
+            try:
+                run(["cargo", "build", "--release", "--bin", binary_name], cwd=str(ROOT / "crates"))
+            except Exception as e:
+                print(f"  WARNING: cargo build --release --bin {binary_name} failed: {e}")
+                dev_exe = ROOT / "crates" / "target" / "debug" / exe_name
+                if dev_exe.exists():
+                    print(f"  Using debug {exe_name} fallback")
+                    shutil.copy2(dev_exe, self.portable_dir / exe_name)
+                continue
+            release_exe = ROOT / "crates" / "target" / "release" / exe_name
+            if release_exe.exists():
+                shutil.copy2(release_exe, self.portable_dir / exe_name)
+                print(f"  Copied native binary: {exe_name}")
+            else:
+                dev_exe = ROOT / "crates" / "target" / "debug" / exe_name
+                if dev_exe.exists():
+                    print(f"  Release binary not found; using debug {exe_name} fallback")
+                    shutil.copy2(dev_exe, self.portable_dir / exe_name)
+                else:
+                    print(f"  WARNING: {release_exe} not found after cargo build")
     # ── Step 3: Copy extras ──────────────────────────────────────────────
 
     def build_extras(self):
@@ -1794,6 +1835,8 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
             return 5
         steps = 5  # app + updater + extras + launchers + zip
         if PLATFORM == "Windows":
+            if (ROOT / "crates" / "Cargo.toml").exists():
+                steps += 1  # native daemon
             if UNINSTALLER_SCRIPT.exists():
                 steps += 1  # uninstaller
             skip_installer = getattr(self, "skip_installer", False)
@@ -1839,6 +1882,7 @@ Filename: "{{app}}\\Stet.exe"; Description: "Launch Stet"; Flags: postinstall no
         self.build_app()
         self.build_updater()
         self.build_uninstaller()
+        self.build_native_daemon()
         self.build_extras()
         self.build_launchers()
         self.package()

@@ -258,6 +258,15 @@ def artifact_hygiene(tmp_path_factory):
     and data files (history.jsonl, server_log.txt) produced by older tests.
     """
     scratch = ROOT / "tests" / ".artifacts"
+    # Keep matrix reports and pinned baseline across runs so diffing works.
+    preserved = {}
+    if scratch.exists():
+        for item in scratch.glob("live_matrix*"):
+            try:
+                preserved[item.name] = item.read_bytes()
+            except Exception:
+                pass
+
     for legacy in (
         ROOT / "artifacts",
         ROOT / "out",
@@ -277,6 +286,11 @@ def artifact_hygiene(tmp_path_factory):
                 pass
 
     scratch.mkdir(parents=True, exist_ok=True)
+    for name, content in preserved.items():
+        try:
+            (scratch / name).write_bytes(content)
+        except Exception:
+            pass
     yield scratch
 
     # Clean up stray root files created during run

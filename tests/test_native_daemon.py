@@ -337,6 +337,39 @@ class TestCapturePasteReplyLoop:
         client._read_reply = lambda req_id, ms: None
         assert client.paste_text("hello") is None
 
+    def test_register_hotkeys_uses_read_reply(self):
+        client = IpcClient(secret=bytes(range(32)))
+        stub = StubTransport([])
+        _attach(client, stub)
+        seen = {}
+
+        def fake_read_reply(req_id, timeout_ms):
+            seen["req_id"] = req_id
+            return {"id": req_id, "result": {"status": "registered", "count": 2}}
+
+        client._read_reply = fake_read_reply
+        res = client.register_hotkeys([{"vk": 0x78, "modifiers": 0, "label": "F9"}])
+        assert res == {"status": "registered", "count": 2}
+        frames, _ = FrameCodec.decode(bytearray(bytes(stub.written)))
+        assert frames[0]["id"] == seen["req_id"]
+        assert frames[0]["method"] == "command.register_hotkeys"
+
+    def test_unregister_hotkeys_uses_read_reply(self):
+        client = IpcClient(secret=bytes(range(32)))
+        stub = StubTransport([])
+        _attach(client, stub)
+        seen = {}
+
+        def fake_read_reply(req_id, timeout_ms):
+            seen["req_id"] = req_id
+            return {"id": req_id, "result": {"status": "unregistered"}}
+
+        client._read_reply = fake_read_reply
+        res = client.unregister_hotkeys()
+        assert res == {"status": "unregistered"}
+        frames, _ = FrameCodec.decode(bytearray(bytes(stub.written)))
+        assert frames[0]["id"] == seen["req_id"]
+        assert frames[0]["method"] == "command.unregister_hotkeys"
     def test_disconnected_returns_none_without_read(self):
         client = IpcClient(secret=bytes(range(32)))
         called = []

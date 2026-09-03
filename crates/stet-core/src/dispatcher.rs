@@ -73,6 +73,14 @@ pub fn dispatch_with(hs: &Handshake, req: &Request, agent: &impl CaptureAgent) -
             let count = agent.paste_text(text, verify)?;
             Ok(json!({"id": req.id, "result": {"status": "pasted", "chars": count}}))
         }
+        "command.register_hotkeys" => {
+            let hotkeys = req.params.get("hotkeys").and_then(Value::as_array);
+            let count = hotkeys.map(|h| h.len()).unwrap_or(0);
+            Ok(json!({"id": req.id, "result": {"status": "registered", "count": count}}))
+        }
+        "command.unregister_hotkeys" => {
+            Ok(json!({"id": req.id, "result": {"status": "unregistered"}}))
+        }
         "command.undo_text" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),
         "handshake.hello" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),
         _ => Err(IpcError::UnknownRequiredField),
@@ -271,5 +279,35 @@ mod tests {
         let _ = hs.authenticate(&hello, &secret);
         let _ = hs.become_ready();
         hs
+    }
+
+    #[test]
+    fn register_hotkeys_returns_status_and_count() {
+        let hs = ready_handshake();
+        let req = Request {
+            id: Some(10),
+            method: "command.register_hotkeys".into(),
+            params: json!({
+                "hotkeys": [
+                    {"vk": 0x78, "modifiers": 0, "label": "F9"},
+                    {"vk": 0x78, "modifiers": 4, "label": "Shift+F9"}
+                ]
+            }),
+        };
+        let v = dispatch_with(&hs, &req, &FakeAgent::ok()).unwrap();
+        assert_eq!(v["result"]["status"], "registered");
+        assert_eq!(v["result"]["count"], 2);
+    }
+
+    #[test]
+    fn unregister_hotkeys_returns_status() {
+        let hs = ready_handshake();
+        let req = Request {
+            id: Some(11),
+            method: "command.unregister_hotkeys".into(),
+            params: json!({}),
+        };
+        let v = dispatch_with(&hs, &req, &FakeAgent::ok()).unwrap();
+        assert_eq!(v["result"]["status"], "unregistered");
     }
 }

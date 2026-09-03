@@ -1,4 +1,5 @@
 import difflib
+import functools
 import json
 import re
 from dataclasses import dataclass
@@ -269,14 +270,59 @@ def strip_meta_commentary(text: str, original: str = "") -> str:
     return cleaned.strip()
 
 
+# Pre-compiled prose / meta-commentary detection patterns (hoisted to avoid
+# repeated compilation inside hot per-chunk validation loops).
+_SENTINEL_CLEAN_RE = re.compile(r"__STET_PROTECTED_\d+__")
+_REF_CLEAN_RE = re.compile(r"\[REF\d+\]")
+_PROSE_CODE_PATTERNS_RE = re.compile(
+    r"^\s*(def\s+\w+\s*\(|class\s+\w+\s*[:\(]|function\s+\w*\s*\(|(?:const|let|var)\s+\w+\s*=|import\s+[\w{]|\$\s+[a-z_])",
+    re.M,
+)
+_PROSE_LOG_TIMESTAMP_RE = re.compile(
+    r"\d{2}:\d{2}:\d{2}|0x[0-9a-fA-F]+|^\s*\[(DEBUG|INFO|WARN|ERROR)",
+    re.M,
+)
+_MID_CAPS_RE = re.compile(r"[a-z][A-Z]")
+
+_CONVERSATIONAL_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"^\s*(?:Here|Sure|Okay|Alright|So|Well|Now)[,!\s]+",
+        r"^\s*(?:I\s+(?:think|believe|feel|would say)|In my (?:opinion|view))",
+        r"^\s*(?:The\s+(?:corrected|refined)\s+(?:text|version))",
+        r"^\s*(?:I\s+(?:have|ve)\s+(?:corrected|fixed|updated))",
+        r"\n\n(?:Let me know|I hope|Feel free|If you need)",
+        r"\*\*\s*(?:Note|Important|Warning)",
+        r"^\s*[:\-]+\s*",
+    ]
+]
+_META_QUESTION_RES = [
+    re.compile(p, re.IGNORECASE)
+    for p in [
+        r"\b(?:help|assist|fix|correct|change|rewrite|modify)\s+you\b",
+        r"\b(?:anything\s+else|something\s+else)\b",
+        r"\bdoes\s+this\s+look\b",
+        r"\b(?:what\s+do\s+you\s+think|let\s+me\s+know)\b",
+        r"\bis\s+this\s+what\b",
+        r"\bwould\s+you\s+like\b",
+        r"\bshould\s+i\s+(?:change|correct|rewrite|fix|adjust)\b",
+        r"\bis\s+this\s+(?:correct|better|what)\b",
+    ]
+]
+_PRONOUN_RES = [re.compile(rf"\b{p}\b") for p in ("i", "you", "me", "my", "your")]
+_SENT_SPLIT_CHARS_RE = re.split
+_SENT_DELIM_RE = re.compile(r"[.!\n]+")
+_SENT_EXPLANATION_DELIM_RE = re.compile(r"[.!?]+")
+
+
 def looks_like_prose(text: str) -> bool:
     if not text or not text.strip():
         return False
     # Strip sentinels and placeholders before measuring prose characteristics
-    cleaned = re.sub(r"__STET_PROTECTED_\d+__", " ", text)
-    cleaned = re.sub(r"\[REF\d+\]", " ", cleaned)
+    cleaned = _SENTINEL_CLEAN_RE.sub(" ", text)
+    cleaned = _REF_CLEAN_RE.sub(" ", cleaned)
     lines = cleaned.splitlines() or [cleaned]
-    non_empty_lines = [l for l in lines if l.strip()]
+    non_empty_lines = [line for line in lines if line.strip()]
     if not non_empty_lines:
         return False
 
@@ -286,21 +332,17 @@ def looks_like_prose(text: str) -> bool:
     if not words:
         return False
 
-    mid_caps_count = sum(1 for w in words if re.search(r"[a-z][A-Z]", w))
+    mid_caps_count = sum(1 for w in words if _MID_CAPS_RE.search(w))
     avg_caps_mid = mid_caps_count / len(words)
 
     if sym > 0.04 or indented >= 2 or (mid_caps_count >= 2 and avg_caps_mid > 0.15):
         return False
 
     # Standalone code definition / import statements
-    if re.search(
-        r"^\s*(def\s+\w+\s*\(|class\s+\w+\s*[:\(]|function\s+\w*\s*\(|(?:const|let|var)\s+\w+\s*=|import\s+[\w{]|\$\s+[a-z_])",
-        cleaned,
-        re.M,
-    ):
+    if _PROSE_CODE_PATTERNS_RE.search(cleaned):
         return False
 
-    if re.search(r"\d{2}:\d{2}:\d{2}|0x[0-9a-fA-F]+|^\s*\[(DEBUG|INFO|WARN|ERROR)", cleaned, re.M):
+    if _PROSE_LOG_TIMESTAMP_RE.search(cleaned):
         return False
 
     return True
@@ -311,44 +353,17 @@ def contains_meta_commentary(text: str) -> bool:
     if not text:
         return False
 
-    # Patterns that indicate the model is being conversational
-    conversational_patterns = [
-        r"^\s*(?:Here|Sure|Okay|Alright|So|Well|Now)[,!\s]+",
-        r"^\s*(?:I\s+(?:think|believe|feel|would say)|In my (?:opinion|view))",
-        r"^\s*(?:The\s+(?:corrected|refined)\s+(?:text|version))",
-        r"^\s*(?:I\s+(?:have|ve)\s+(?:corrected|fixed|updated))",
-        r"\n\n(?:Let me know|I hope|Feel free|If you need)",
-        r"\*\*\s*(?:Note|Important|Warning)",
-        r"^\s*[:\-]+\s*",  # Lines starting with just punctuation
-    ]
-
-    for pattern in conversational_patterns:
-        if re.search(pattern, text, re.IGNORECASE):
+    for pat in _CONVERSATIONAL_RES:
+        if pat.search(text):
             return True
 
     # Check for question marks (models asking for clarification)
     if "?" in text:
-        # Legitimate questions shouldn't match common assistant conversational patterns.
-        meta_questions = [
-            r"\b(?:help|assist|fix|correct|change|rewrite|modify)\s+you\b",
-            r"\b(?:anything\s+else|something\s+else)\b",
-            r"\bdoes\s+this\s+look\b",
-            r"\b(?:what\s+do\s+you\s+think|let\s+me\s+know)\b",
-            r"\bis\s+this\s+what\b",
-            r"\bwould\s+you\s+like\b",
-            r"\bshould\s+i\s+(?:change|correct|rewrite|fix|adjust)\b",
-            r"\bis\s+this\s+(?:correct|better|what)\b",
-        ]
-        for sentence in re.split(r"[.!\n]+", text):
+        for sentence in _SENT_DELIM_RE.split(text):
             if "?" in sentence:
                 lower_s = sentence.lower()
-                has_pronoun = any(
-                    re.search(r"\b" + p + r"\b", lower_s)
-                    for p in ("i", "you", "me", "my", "your")
-                )
-                has_meta_pattern = any(
-                    re.search(pat, lower_s) for pat in meta_questions
-                )
+                has_pronoun = any(p.search(lower_s) for p in _PRONOUN_RES)
+                has_meta_pattern = any(pat.search(lower_s) for pat in _META_QUESTION_RES)
                 if has_meta_pattern or (
                     has_pronoun
                     and any(
@@ -371,7 +386,7 @@ def contains_meta_commentary(text: str) -> bool:
                     return True
 
     # Check for multiple sentences that look like explanations
-    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
+    sentences = [s.strip() for s in _SENT_EXPLANATION_DELIM_RE.split(text) if s.strip()]
     if len(sentences) > 3:
         # If there are many short sentences, might be commentary
         short_sentences = sum(1 for s in sentences if len(s.split()) < 5)
@@ -508,8 +523,10 @@ def _dict_prepass(text: str) -> tuple[str, int]:
 
 
 
+# Canonical Levenshtein implementation. Both _edit_dist and _levenshtein_dist
+# are preserved for exact backwards compatibility across test and caller imports.
 def _edit_dist(a: str, b: str) -> int:
-    """Simple Levenshtein distance (used as fallback)."""
+    """Simple Levenshtein distance."""
     if a == b:
         return 0
     la, lb = len(a), len(b)
@@ -525,6 +542,9 @@ def _edit_dist(a: str, b: str) -> int:
             curr[j] = min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
         prev = curr
     return prev[lb]
+
+
+_levenshtein_dist = _edit_dist
 
 
 def apply_hunk_guard(orig: str, corr: str, mode_index: int, threshold: float | None = None) -> str:
@@ -669,6 +689,11 @@ _INLINE_SENTINEL_RE = re.compile(r"__STET_PROTECTED_\d+__")
 _INLINE_SENTINEL_CAPTURE_RE = re.compile(r"__STET_PROTECTED_(\d+)__")
 
 
+@functools.lru_cache(maxsize=128)
+def _ref_token_pat(idx: str) -> re.Pattern:
+    return re.compile(rf"(?<![A-Za-z0-9])REF{idx}(?!\d)", re.IGNORECASE)
+
+
 def recover_sentinels(corrected: str, expected: list[str]) -> str:
     r"""Recover __STET_PROTECTED_N__ sentinels that the LLM mangled.
 
@@ -688,11 +713,11 @@ def recover_sentinels(corrected: str, expected: list[str]) -> str:
     # Sort expected sentinels by integer index descending to prevent REF1 from matching inside REF10
     sorted_expected = sorted(
         expected,
-        key=lambda s: int(m.group()) if (m := re.search(r"\d+", s)) else 0,
+        key=lambda s: int(m.group(1)) if (m := _INLINE_SENTINEL_CAPTURE_RE.search(s)) else 0,
         reverse=True,
     )
     for sentinel in sorted_expected:
-        m = re.match(r"__STET_PROTECTED_(\d+)__$", sentinel)
+        m = _INLINE_SENTINEL_CAPTURE_RE.match(sentinel)
         if not m:
             continue
         idx = m.group(1)
@@ -724,7 +749,7 @@ def recover_sentinels(corrected: str, expected: list[str]) -> str:
 
         # Strict boundary regex for unbracketed REF tokens to avoid REF1 inside REF10
         if sentinel not in result:
-            pat = re.compile(rf"(?<![A-Za-z0-9])REF{idx}(?!\d)", re.IGNORECASE)
+            pat = _ref_token_pat(idx)
             if pat.search(result):
                 result = pat.sub(sentinel, result, count=1)
 
@@ -756,23 +781,6 @@ def _post_splice_sanity(
     if ratio < min_ratio or ratio > max_ratio:
         return False
     return True
-
-
-def _levenshtein_dist(s1: str, s2: str) -> int:
-    if len(s1) < len(s2):
-        return _levenshtein_dist(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-    return previous_row[-1]
 
 
 def _normalize_typo_divergence(orig: str, corr: str) -> tuple[str, str]:
@@ -1131,6 +1139,14 @@ def _split_oversized_fragment(sent: str, sep: str, max_words: int) -> list[tuple
     return sub_chunks
 
 
+# List-marker and sentence-split patterns for _chunk_text_by_sentences
+_LIST_MARKER_RE = re.compile(
+    r"^(?:[a-zA-Z]|[0-9]{1,3}|[ivxlcdmIVXLCDM]{1,4})\.$"
+)
+_SENTENCE_BOUNDARY_SPLIT_RE = re.compile(r"((?<=[.!?])\s+|\n+)")
+_DECIMAL_PRE_RE = re.compile(r"\b\d+\.$")
+
+
 def _chunk_text_by_sentences(text: str, max_words: int) -> list[tuple[str, str]]:
     """Split text at sentence/paragraph boundaries into chunks of ≤ max_words.
 
@@ -1149,21 +1165,11 @@ def _chunk_text_by_sentences(text: str, max_words: int) -> list[tuple[str, str]]
     """
     if not text:
         return []
-    
+
     # Normalize carriage returns to standard newlines to avoid splitting on \r
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
-    # ── List-marker pattern ──────────────────────────────────────────
-    # Matches a fragment that is ONLY a list marker: a single letter,
-    # digit, or short roman numeral followed by a period.  When the
-    # simple sentence-boundary regex splits on "a. ", the marker letter
-    # ends up as a standalone fragment — we re-merge it with the next
-    # fragment so list items stay intact.
-    _LIST_MARKER_RE = re.compile(
-        r"^(?:[a-zA-Z]|[0-9]{1,3}|[ivxlcdmIVXLCDM]{1,4})\.$"
-    )
-
-    parts = re.split(r"((?<=[.!?])\s+|\n+)", text)
+    parts = _SENTENCE_BOUNDARY_SPLIT_RE.split(text)
 
     # re.split with a capturing group alternates: [text, sep, text, sep, ..., text]
     # Pair them up into (sentence_text, separator_after) tuples
@@ -1173,28 +1179,20 @@ def _chunk_text_by_sentences(text: str, max_words: int) -> list[tuple[str, str]]
         sep = parts[i + 1] if i + 1 < len(parts) else ""
         raw_sentences.append((sent, sep))
 
-    # Merge orphaned fragments back into their sentence.  The naive boundary
-    # regex over-splits on abbreviations ("Dr. Smith"), middle initials
-    # ("John F. Kennedy"), and decimals ("version 2. 0"), so a fragment is
-    # re-attached when it is a bare list marker, ends with a known
-    # abbreviation or single-letter initial, or precedes a digit-led
-    # decimal continuation when the preceding fragment ends with a digit+dot.
-    # Merges chain (e.g. "Dr. Smith and e.g. the report") and never cross
-    # blank-line paragraph boundaries.  Because only adjacent fragments are
-    # merged, the reassembly invariant holds: ''.join(chunk + sep) always
-    # reproduces the input.
+    # Merge orphaned fragments back into their sentence.
     sentences: list[tuple[str, str]] = []
     i = 0
     while i < len(raw_sentences):
         sent, sep = raw_sentences[i]
         while i + 1 < len(raw_sentences) and "\n\n" not in sep:
             next_sent, next_sep = raw_sentences[i + 1]
+            sent_stripped = sent.strip()
             next_stripped = next_sent.strip()
             merge = (
-                _LIST_MARKER_RE.match(sent.strip())
+                _LIST_MARKER_RE.match(sent_stripped)
                 or _ends_with_abbreviation(sent)
                 or (
-                    bool(re.search(r"\b\d+\.$", sent.strip()))
+                    bool(_DECIMAL_PRE_RE.search(sent_stripped))
                     and next_stripped[:1].isdigit()
                 )
             )
