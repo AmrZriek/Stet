@@ -67,9 +67,10 @@ class TestTrayDiagnosticActions:
         mock_tray_cls.isSystemTrayAvailable.return_value = True
         mock_tray_cls.return_value = mock_tray
         app = StetApp()
-        action_texts = []
+        action_texts = [a.text() for a in app._tray_menu.actions()]
         for a in app._tray_menu.actions():
-            action_texts.append(a.text())
+            if a.menu():
+                action_texts.extend(sub.text() for sub in a.menu().actions())
         assert "Open Log Folder" in action_texts
 
     @patch("stet.core.app.QSystemTrayIcon")
@@ -80,9 +81,10 @@ class TestTrayDiagnosticActions:
         mock_tray_cls.isSystemTrayAvailable.return_value = True
         mock_tray_cls.return_value = mock_tray
         app = StetApp()
-        action_texts = []
+        action_texts = [a.text() for a in app._tray_menu.actions()]
         for a in app._tray_menu.actions():
-            action_texts.append(a.text())
+            if a.menu():
+                action_texts.extend(sub.text() for sub in a.menu().actions())
         assert "Copy Debug Info" in action_texts
 
     @patch("stet.core.app.QSystemTrayIcon")

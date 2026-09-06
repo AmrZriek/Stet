@@ -472,6 +472,12 @@ mod win_impl {
                         units.as_ptr(),
                         units.len(),
                     );
+                // Privacy (§0f/§2d): suppress Win+V history and cloud sync on
+                // every daemon clipboard write. Best-effort, like the Python
+                // path — a suppression failure never fails the text write.
+                if ok {
+                    ffi_skel::clipboard::set_privacy_suppression();
+                }
                 ffi_skel::clipboard::close_clipboard();
                 ok
             }

@@ -19,10 +19,14 @@ def test_handle_hotkey_fired_uses_is_window_alive():
     assert "self._window.isVisible()" not in src, (
         "_handle_hotkey_fired must NOT call self._window.isVisible() directly (causes crash on deleted C++)"
     )
-    # Should use the safe helper
-    assert "_is_window_alive" in src, (
+    # Should use the safe helper (directly, or via _focus_existing_window)
+    assert "_is_window_alive" in src or "_focus_existing_window" in src, (
         "_handle_hotkey_fired should use _is_window_alive() for safe window check"
     )
+    if "_focus_existing_window" in src:
+        helper_src = inspect.getsource(StetApp._focus_existing_window)
+        assert "_is_window_alive" in helper_src
+        assert "self._window.isVisible()" not in helper_src
 
 
 def test_is_window_alive_method_exists():

@@ -292,6 +292,74 @@ def estimate_model_vram_mb(model_path: str, ctx_size: int = 4096) -> int | None:
     except Exception:
         return None
 
+VRAM_RESERVE_MB = 768
+"""Headroom kept free for CUDA context, activations, and KV growth spikes."""
+
+
+def suggest_gpu_layers(
+    requested_layers: int,
+    *,
+    file_size_bytes: int | None = None,
+    n_layers: int | None = None,
+    free_vram_mb: int | None = None,
+    est_vram_mb: int | None = None,
+    reserve_mb: int = VRAM_RESERVE_MB,
+) -> tuple[int, str]:
+    """Clamp ``requested_layers`` so weights fit in ``free_vram_mb``.
+
+    Returns ``(layers, reason)`` where reason is one of: ``cpu-requested``,
+    ``vram-unknown``, ``full-fit``, ``clamped-fit``, ``cpu-fallback``,
+    ``est-ratio-fallback``. Never raises; unparseable inputs keep requested.
+    """
+    try:
+        requested = int(requested_layers)
+    except (TypeError, ValueError):
+        return int(requested_layers or 0), "vram-unknown"
+    if requested <= 0:
+        return 0, "cpu-requested"
+    if free_vram_mb is None:
+        return requested, "vram-unknown"
+    try:
+        free = int(free_vram_mb)
+    except (TypeError, ValueError):
+        return requested, "vram-unknown"
+    usable = free - int(reserve_mb)
+    if usable <= 0:
+        return 0, "cpu-fallback"
+    if n_layers and file_size_bytes:
+        try:
+            total = int(n_layers)
+            size_mb = float(file_size_bytes) / (1024 * 1024)
+        except (TypeError, ValueError):
+            total, size_mb = 0, 0.0
+        if total > 0 and size_mb > 0:
+            per_layer_mb = size_mb / total
+            if per_layer_mb <= 0:
+                return requested, "vram-unknown"
+            max_layers = int(usable // per_layer_mb)
+            cap = min(requested, total)
+            if max_layers >= cap:
+                return cap, "full-fit"
+            if max_layers <= 0:
+                return 0, "cpu-fallback"
+            return max_layers, "clamped-fit"
+    if est_vram_mb:
+        try:
+            est = int(est_vram_mb)
+        except (TypeError, ValueError):
+            return requested, "vram-unknown"
+        if est <= free:
+            return requested, "full-fit"
+        if est <= 0:
+            return requested, "vram-unknown"
+        scaled = int(requested * usable / est)
+        if scaled >= requested:
+            return requested, "full-fit"
+        if scaled <= 0:
+            return 0, "cpu-fallback"
+        return scaled, "est-ratio-fallback"
+    return requested, "vram-unknown"
+
 
 def _is_valid_gguf(path) -> bool:
     """Verify that a path is a valid GGUF file.

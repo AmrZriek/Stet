@@ -151,6 +151,21 @@ class TestMissingKeys:
         assert info.n_ctx_train is None
         assert info.reasoning_capable is False
 
+
+class TestLayerCount:
+    def test_block_count_round_trip(self, tmp_path):
+        from gguf import GGUFWriter
+        path = tmp_path / "layers.gguf"
+        writer = GGUFWriter(str(path), "llama")
+        writer.add_block_count(32)
+        writer.write_header_to_file()
+        writer.write_kv_data_to_file()
+        writer.close()
+        assert read_gguf_info(path).n_layers == 32
+
+    def test_missing_block_count_yields_none(self, tmp_path):
+        path = _write_gguf(tmp_path / "nolayers.gguf")
+        assert read_gguf_info(path).n_layers is None
     def test_malformed_param_count_yields_none(self, tmp_path):
         from gguf import GGUFWriter
         path = tmp_path / "bad_param.gguf"

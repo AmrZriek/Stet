@@ -55,6 +55,113 @@ def find_daemon_binary() -> Path | None:
         return installed
     return None
 
+def _terminate_stale_daemons() -> None:
+    """Ensure no orphaned stet-core daemon holds the named pipe or hotkeys."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        h_snap = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+        if h_snap == -1:
+            return
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        pe = PROCESSENTRY32W()
+        pe.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        my_pid = os.getpid()
+        if kernel32.Process32FirstW(h_snap, ctypes.byref(pe)):
+            while True:
+                name = pe.szExeFile.lower()
+                if (name == "stet-core.exe" or name.startswith("stet-core")) and pe.th32ProcessID != my_pid:
+                    h_proc = kernel32.OpenProcess(0x0001, False, pe.th32ProcessID)  # PROCESS_TERMINATE
+                    if h_proc:
+                        kernel32.TerminateProcess(h_proc, 1)
+                        kernel32.CloseHandle(h_proc)
+                if not kernel32.Process32NextW(h_snap, ctypes.byref(pe)):
+                    break
+        kernel32.CloseHandle(h_snap)
+    except Exception:
+        pass
+
+def _attach_job_object(proc: subprocess.Popen) -> object | None:
+    """Attach daemon subprocess to a Job Object so it terminates if Python crashes."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        job = ctypes.windll.kernel32.CreateJobObjectW(None, None)
+        if not job:
+            return None
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", ctypes.c_uint32),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", ctypes.c_uint32),
+                ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+                ("PriorityClass", ctypes.c_uint32),
+                ("SchedulingClass", ctypes.c_uint32),
+            ]
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_ = [
+                ("ReadOperationCount", ctypes.c_uint64),
+                ("WriteOperationCount", ctypes.c_uint64),
+                ("OtherOperationCount", ctypes.c_uint64),
+                ("ReadTransferCount", ctypes.c_uint64),
+                ("WriteTransferCount", ctypes.c_uint64),
+                ("OtherTransferCount", ctypes.c_uint64),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        JobObjectExtendedLimitInformation = 9
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+
+        ctypes.windll.kernel32.SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+
+        proc_handle = ctypes.c_void_p(int(proc._handle))
+        ctypes.windll.kernel32.AssignProcessToJobObject(job, proc_handle)
+        return job
+    except Exception:
+        return None
+
 
 def launch_daemon() -> tuple[subprocess.Popen, bytes] | None:
     """Spawn the daemon, pass it a fresh secret over stdin, verify it is alive.
@@ -63,6 +170,7 @@ def launch_daemon() -> tuple[subprocess.Popen, bytes] | None:
     caller falls back to in-process Win32 behavior.
     """
     try:
+        _terminate_stale_daemons()
         binary = find_daemon_binary()
         if binary is None:
             return None
@@ -73,9 +181,21 @@ def launch_daemon() -> tuple[subprocess.Popen, bytes] | None:
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
         }
+        try:
+            from stet.constants import SCRIPT_DIR as _SCRIPT_DIR
+            _err_log = open(_SCRIPT_DIR / "daemon_stderr.log", "ab", buffering=0)
+            popen_kwargs["stderr"] = _err_log
+        except Exception:
+            _err_log = None
         if sys.platform == "win32":
             popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
         proc = subprocess.Popen([str(binary)], **popen_kwargs)
+        # Keep the sink alive for the daemon's lifetime; Popen does not own it.
+        job = _attach_job_object(proc)
+        if job is not None:
+            proc._job_object = job  # type: ignore[attr-defined]
+        if _err_log is not None:
+            proc._stderr_sink = _err_log  # type: ignore[attr-defined]
         try:
             if proc.stdin is None:
                 raise OSError("Daemon stdin unavailable")
@@ -86,8 +206,18 @@ def launch_daemon() -> tuple[subprocess.Popen, bytes] | None:
                 proc.terminate()
             except Exception:
                 pass
+            try:
+                if _err_log is not None:
+                    _err_log.close()
+            except Exception:
+                pass
             return None
         if proc.poll() is not None:
+            try:
+                if _err_log is not None:
+                    _err_log.close()
+            except Exception:
+                pass
             return None
         return proc, secret
     except Exception:

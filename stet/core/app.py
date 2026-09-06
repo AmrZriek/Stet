@@ -284,6 +284,38 @@ class WinHotkeyFilter(QAbstractNativeEventFilter):
         return False, 0
 
 
+def _window_class_name(hwnd) -> str:
+    """Win32 window class name for hwnd ("" when unreadable)."""
+    try:
+        buf = ctypes.create_unicode_buffer(256)
+        ctypes.windll.user32.GetClassNameW(hwnd, buf, 256)
+        return buf.value or ""
+    except Exception:
+        return ""
+
+
+def _window_process_name(hwnd) -> str:
+    """Owning process exe name for hwnd ("" when unreadable)."""
+    try:
+        pid = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)
+        if not handle:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(260)
+            size = ctypes.c_ulong(260)
+            if ctypes.windll.kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return Path(buf.value).name or ""
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+    return ""
+
+
 def _is_terminal_or_ide(hwnd) -> bool:
     """Check if the foreground window is a terminal/console where Ctrl+C would
     send SIGINT and kill a running process.
@@ -400,6 +432,7 @@ def _is_terminal_or_ide(hwnd) -> bool:
 
 class StetApp(QObject):
     _trigger = pyqtSignal(str, str)
+    _capture_ready = pyqtSignal(str, str)
     _notify = pyqtSignal(str, str)
     _hotkey_signal = pyqtSignal(dict)
     _undo_signal = pyqtSignal(str)
@@ -454,6 +487,7 @@ class StetApp(QObject):
             idle_timeout_key="chat_idle_timeout_seconds",
         )
         self._window: CorrectionWindow | None = None
+        self._prewarmed_window: CorrectionWindow | None = None
         self._welcome_window: WelcomeWindow | None = None
         self._taskbar_widget = None
         self._app_is_quitting = False
@@ -471,10 +505,10 @@ class StetApp(QObject):
                 from stet.core.native_daemon import launch_daemon
                 launched = launch_daemon()
                 client = IpcClient(secret=launched[1]) if launched is not None else None
-                if client is not None and client.connect():
+                if client is not None and client.connect(timeout_ms=3000):
                     self._ipc_client = client
                     self._daemon_proc = launched[0]
-                    client.on_event("event.hotkey_fired", lambda params: self._hotkey_signal.emit(params))
+                    client.on_event("event.hotkey_fired", lambda params: self._hotkey_signal.emit({**(params or {}), "_src": "daemon"}))
                     log("[IPC] Connected to native Stet core daemon v2.0")
                 else:
                     if launched is not None:
@@ -490,6 +524,16 @@ class StetApp(QObject):
         # Compound target identity captured at hotkey trigger (0b) — used for
         # tiered matching at paste time to prevent wrong-window pastes.
         self._capture_target = None
+        # Step 1 observability: daemon-vs-fallback hit rates per subsystem.
+        # Cutover rule: Rust owns a path only when daemon hits dominate the
+        # fallback over real usage. Counters are in-memory; the log line is
+        # the record (also copied into Debug Info).
+        self._path_stats = {
+            "capture": {"daemon": 0, "uia": 0, "clipboard": 0, "empty": 0},
+            "paste": {"daemon": 0, "win32": 0},
+            "hotkey": {"daemon": 0, "ctypes": 0},
+            "hotkey_owner": "unknown",
+        }
         self._mac_input = MacOSInputBackend() if MACOS else None
         self._mac_input_monitoring_requested = False
         self._mac_selection_target = None
@@ -506,10 +550,17 @@ class StetApp(QObject):
         # safe undo path; consumed once and expires with the review lifecycle.
         self._last_undo_token = None
         from stet.core.history import CorrectionHistory
+        _hist_enabled = bool(self.cfg.get("history_enabled", True))
+        _hist_consent = bool(self.cfg.get("history_consent_granted", True))
+        if _hist_enabled and not _hist_consent:
+            # Heal legacy opt-ins: user previously checked "Keep history" but
+            # consent was never persisted, so history.add() always no-op'd.
+            _hist_consent = True
+            self.cfg.set("history_consent_granted", True)
         self._history = CorrectionHistory(
             limit=int(self.cfg.get("history_limit", 200)),
-            enabled=bool(self.cfg.get("history_enabled", False)),
-            consent_granted=bool(self.cfg.get("history_consent_granted", False)),
+            enabled=_hist_enabled,
+            consent_granted=_hist_consent,
         )
         self._pending_panel_strength = "full_correction"
         self._last_empty_notify_ts = 0.0
@@ -527,12 +578,28 @@ class StetApp(QObject):
         # can hold the OS hotkey table for a while; keep retrying for ~60s so
         # the collision self-heals once the stale holder exits.
         self._max_hotkey_retries = 12
-
+        # Single-owner watchdog: exactly one of Rust host / ctypes owns the
+        # combos. Heals daemon death (take over via ctypes) and daemon
+        # (re)connect (hand back to Rust). 5s is cheap; transitions log.
+        self._hotkey_reconciling = False
+        self._hotkey_owner_timer = QTimer(self)
+        self._hotkey_owner_timer.timeout.connect(self._reconcile_hotkey_owner)
+        self._hotkey_owner_timer.start(5000)
+        self._last_active_app_hwnd = None
+        self._target_lost = False
+        if WINDOWS:
+            # Foreground tracker: the tray menu steals focus BEFORE
+            # about-to-show fires, so snapshot-on-demand is always too late
+            # for tray flows. A 2 Hz poll keeps the last foreign app hwnd
+            # fresh; self/taskbar sightings never overwrite it.
+            self._active_app_timer = QTimer(self)
+            self._active_app_timer.timeout.connect(self._snapshot_active_app_hwnd)
+            self._active_app_timer.start(500)
         self._download_processes: list = []
         self._download_timer = QTimer(self)
         self._download_timer.timeout.connect(self._check_download_processes)
-
         self._trigger.connect(self._show_window)
+        self._capture_ready.connect(self._on_capture_ready)
         self._notify.connect(self._show_notify)
         self._hotkey_signal.connect(self._handle_hotkey_fired)
         self._undo_signal.connect(self._undo_correction)
@@ -596,6 +663,9 @@ class StetApp(QObject):
         # Check if first run download is needed (backend or model missing)
         QTimer.singleShot(100, self._check_first_run_downloads)
 
+
+        # Pre-warm Qt UI styles, fonts, and window caches during idle boot
+        QTimer.singleShot(0, self._prewarm_ui)
         # Check for Stet updates 5 s after boot (non-blocking), then every 24 h.
         self._update_checker: AppUpdateChecker | None = None
         self._last_update_check_ts: float | None = None
@@ -710,6 +780,7 @@ class StetApp(QObject):
             "padding:8px 0;color:#88898c;font-size:13px;font-family:'IBM Plex Mono', 'Consolas', monospace;}"
             "QMenu::item{padding:8px 32px 8px 32px;border-radius:0px;color:#88898c;}"
             "QMenu::item:selected{background:#090a0b;color:#ededee;}"
+            "QMenu::separator{height:1px;background:#28292c;margin:6px 0px;}"
             "QMenu::indicator{left:10px;width:12px;height:12px;}"
             "QMenu::icon{left:10px;width:12px;height:12px;}"
             "QMenu::right-arrow{image:none;width:0px;height:0px;}"
@@ -738,20 +809,16 @@ class StetApp(QObject):
         header_act.setDefaultWidget(header_widget)
         menu.addAction(header_act)
         menu.addSeparator()
-
-        # Phase 5a Tray-First Core Actions
-        act_correct = QAction("Correct selected text (F9)", self)
-        act_correct.triggered.connect(lambda: self._trigger_tray_action("full_correction"))
-        menu.addAction(act_correct)
-
-        act_rewrite = QAction("Rewrite selected text (Shift+F9)", self)
-        act_rewrite.triggered.connect(lambda: self._trigger_tray_action("rewrite_polish"))
-        menu.addAction(act_rewrite)
-
-        self._saved_actions_menu = menu.addMenu("Saved actions")
+        # ── Correct actions ─────────────────────────────────────────────
+        # Single "Correct Text" menu: built-in F9 / Shift+F9 plus user templates.
+        self._saved_actions_menu = menu.addMenu("Correct Text")
         self._saved_actions_menu.setStyleSheet(menu.styleSheet())
         self._rebuild_saved_actions_menu()
         self._saved_actions_menu.aboutToShow.connect(self._rebuild_saved_actions_menu)
+
+        act_copy_last = QAction("Copy last correction", self)
+        act_copy_last.triggered.connect(self._copy_last_correction)
+        menu.addAction(act_copy_last)
 
         act_undo_last = QAction("Undo last replacement", self)
         act_undo_last.triggered.connect(self._undo_last_replacement)
@@ -759,6 +826,7 @@ class StetApp(QObject):
 
         menu.addSeparator()
 
+        # ── Open / review ───────────────────────────────────────────────
         act_home = QAction("Open Stet", self)
         font = act_home.font()
         font.setBold(True)
@@ -766,7 +834,10 @@ class StetApp(QObject):
         act_home.triggered.connect(self._show_welcome)
         menu.addAction(act_home)
 
-        menu.addSeparator()
+        act_history = QAction("Correction History...", self)
+        act_history.triggered.connect(self._show_history)
+        menu.addAction(act_history)
+
         self._llm_menu = menu.addMenu("Model: Offline")
         self._llm_menu_action = self._llm_menu.menuAction()
         self._llm_menu_action.setIcon(make_left_arrow_icon())
@@ -775,26 +846,26 @@ class StetApp(QObject):
 
         menu.addSeparator()
 
+        # ── Settings / diagnostics ──────────────────────────────────────
         act_settings = QAction("Settings...", self)
         act_settings.triggered.connect(self._open_settings)
         menu.addAction(act_settings)
 
-        act_logs = QAction("Open Log Folder", self)
-        act_logs.triggered.connect(self._open_log_folder)
-        menu.addAction(act_logs)
-
-        act_debug = QAction("Copy Debug Info", self)
-        act_debug.triggered.connect(self._copy_debug_info)
-        menu.addAction(act_debug)
-
-        act_history = QAction("Correction History...", self)
-        act_history.triggered.connect(self._show_history)
-        menu.addAction(act_history)
+        self._help_menu = menu.addMenu("Help && Diagnostics")
+        self._help_menu.setStyleSheet(menu.styleSheet())
 
         self._update_action = QAction("Check for Updates", self)
         self._update_action.setIcon(make_download_icon())
         self._update_action.triggered.connect(self._run_settings_update_action)
-        menu.addAction(self._update_action)
+        self._help_menu.addAction(self._update_action)
+
+        act_logs = QAction("Open Log Folder", self)
+        act_logs.triggered.connect(self._open_log_folder)
+        self._help_menu.addAction(act_logs)
+
+        act_debug = QAction("Copy Debug Info", self)
+        act_debug.triggered.connect(self._copy_debug_info)
+        self._help_menu.addAction(act_debug)
 
         if WINDOWS or MACOS:
             self._act_startup = QAction("Run at Startup", self)
@@ -875,7 +946,6 @@ class StetApp(QObject):
         from PyQt6.QtCore import QUrl
         from PyQt6.QtGui import QDesktopServices
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(DEBUG_LOG.parent)))
-
     def _copy_debug_info(self):
         import platform as _plat
         lines = [
@@ -885,6 +955,7 @@ class StetApp(QObject):
             f"model_path: {self.cfg.get('model_path', '')}",
             f"model_loaded: {self.ac_model.is_loaded()}",
             f"gpu_layers: {self.cfg.get('gpu_layers', '')}",
+            f"paths: {self._path_stats_line()}",
             "--- last log lines ---",
         ]
         try:
@@ -935,49 +1006,124 @@ class StetApp(QObject):
             act.triggered.connect(lambda checked, p=path: self._select_model(p))
             self._llm_menu.addAction(act)
 
+    def _tray_hotkey_label(self, strength: str, fallback: str) -> str:
+        for hk in self.cfg.get("hotkeys", []) or []:
+            if hk.get("mode") == "panel" and hk.get("strength") == strength:
+                sc = (hk.get("shortcut") or "").strip()
+                if sc:
+                    return "+".join(p.capitalize() for p in sc.split("+"))
+        return fallback
+
     def _rebuild_saved_actions_menu(self):
         if not hasattr(self, "_saved_actions_menu"):
             return
         self._saved_actions_menu.clear()
+        correct_hk = self._tray_hotkey_label("full_correction", "F9")
+        rewrite_hk = self._tray_hotkey_label("rewrite_polish", "Shift+F9")
+        act_correct = QAction(f"Correct selected text ({correct_hk})", self)
+        act_correct.triggered.connect(lambda: self._trigger_tray_action("full_correction"))
+        self._saved_actions_menu.addAction(act_correct)
+        act_rewrite = QAction(f"Rewrite selected text ({rewrite_hk})", self)
+        act_rewrite.triggered.connect(lambda: self._trigger_tray_action("rewrite_polish"))
+        self._saved_actions_menu.addAction(act_rewrite)
+        self._saved_actions_menu.addSeparator()
         templates = self.cfg.get("custom_templates", [])
         if not templates:
             act_none = QAction("No saved templates", self)
             act_none.setEnabled(False)
             self._saved_actions_menu.addAction(act_none)
             return
-
         for t in templates:
             name = t.get("name", "Custom")
             prompt = t.get("prompt", "")
-            act = QAction(name, self)
+            # "&" is a Qt mnemonic prefix ("A&cademic" underlines c) — escape
+            # it so "Academic & Scholarly" renders literally.
+            act = QAction(str(name).replace("&", "&&"), self)
             act.triggered.connect(
                 lambda checked=False, p=prompt: self._trigger_tray_action("custom", custom_prompt=p)
             )
             self._saved_actions_menu.addAction(act)
 
+    def _snapshot_active_app_hwnd(self) -> None:
+        """Record the foreground app window before WE steal focus.
+
+        The tray menu and the instant capturing shell both take the
+        foreground; without this snapshot the capture path would target
+        our own window and find no selection. Never records ourselves.
+        """
+        if not WINDOWS:
+            return
+        try:
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if hwnd and not self._foreground_is_self():
+                cls_name = _window_class_name(hwnd)
+                proc_name = _window_process_name(hwnd)
+                if cls_name not in ("Shell_TrayWnd", "NotifyIconOverflowWindow") and proc_name != "explorer.exe":
+                    self._last_active_app_hwnd = hwnd
+        except Exception:
+            pass
+
+    def _restore_capture_focus(self) -> bool:
+        """Hand the foreground back to the snapshot target before capture.
+
+        Must run AFTER our shell is visible and BEFORE any capture backend
+        (daemon/UIA/clipboard) reads the foreground window. True when the
+        foreground now belongs to a foreign window.
+        """
+        if not WINDOWS:
+            return False
+        try:
+            hwnd = getattr(self, "_last_active_app_hwnd", None)
+            if hwnd:
+                try:
+                    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+                    allow_fn = getattr(user32, "AllowSetForegroundWindow", None)
+                    if allow_fn:
+                        allow_fn(os.getpid())
+                except Exception:
+                    pass
+                try:
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                    time.sleep(0.15)
+                except Exception:
+                    pass
+            return not self._foreground_is_self()
+        except Exception:
+            return False
+
+    def _foreground_is_self(self) -> bool:
+        """True when the foreground window belongs to our own process."""
+        try:
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            if not fg:
+                return False
+            pid = ctypes.c_ulong(0)
+            ctypes.windll.user32.GetWindowThreadProcessId(fg, ctypes.byref(pid))
+            return int(pid.value) == os.getpid()
+        except Exception:
+            return False
+
+    def _focus_existing_window(self) -> bool:
+        """Focus the live/opening shell. True when a window owned the fire."""
+        if self._is_window_alive() or getattr(self, "_window_opening", False):
+            log("[Hotkey] window already open or opening — focusing")
+            if self._window is not None:
+                try:
+                    self._activate_window_to_foreground(self._window)
+                except Exception:
+                    pass
+            return True
+        return False
+
     def _on_tray_menu_about_to_show(self):
         """Record the active foreground window before the tray menu steals focus."""
-        if WINDOWS:
-            try:
-                hwnd = ctypes.windll.user32.GetForegroundWindow()
-                if hwnd:
-                    from stet.core.clipboard import _get_window_class, _get_window_process_name
-                    cls_name = _get_window_class(hwnd)
-                    proc_name = _get_window_process_name(hwnd)
-                    if cls_name not in ("Shell_TrayWnd", "NotifyIconOverflowWindow") and proc_name != "explorer.exe":
-                        self._last_active_app_hwnd = hwnd
-            except Exception:
-                pass
+        self._snapshot_active_app_hwnd()
 
     def _trigger_tray_action(self, strength: str, custom_prompt: str = ""):
         """Trigger text correction from the tray menu, restoring target focus first."""
-        if WINDOWS and getattr(self, "_last_active_app_hwnd", None):
-            try:
-                ctypes.windll.user32.SetForegroundWindow(self._last_active_app_hwnd)
-                time.sleep(0.10)
-            except Exception:
-                pass
-        self._handle_hotkey_fired({"mode": "panel", "strength": strength, "custom_prompt": custom_prompt})
+        if WINDOWS:
+            self._restore_capture_focus()
+        self._handle_hotkey_fired({"mode": "panel", "strength": strength, "custom_prompt": custom_prompt, "_src": "tray"})
 
     def _undo_last_replacement(self):
         """RAM-only target-verified undo for the most recent correction."""
@@ -1012,6 +1158,44 @@ class StetApp(QObject):
             return
 
         self._silent_osd_signal.emit("Nothing to undo", "info")
+
+    def _copy_last_correction(self):
+        """Copy the most recent corrected text to the clipboard."""
+        text = ""
+        try:
+            win = getattr(self, "_window", None)
+            if win is not None:
+                try:
+                    corrected = getattr(win, "corrected", "") or ""
+                    original = getattr(win, "original", "") or ""
+                    if corrected and corrected != original:
+                        text = corrected
+                except RuntimeError:
+                    pass
+        except Exception:
+            pass
+        if not text:
+            try:
+                entries = self._history.list(1)
+                if entries and entries[0].get("corrected"):
+                    text = entries[0]["corrected"]
+            except Exception as e:
+                log(f"[CopyLast] history lookup failed: {e}")
+        if not text:
+            try:
+                token = getattr(self, "_last_undo_token", None)
+                if token is not None and getattr(token, "corrected", ""):
+                    text = token.corrected
+            except Exception:
+                pass
+        if not text:
+            self._silent_osd_signal.emit("No correction yet to copy", "info")
+            return
+        try:
+            QApplication.clipboard().setText(text)
+            self._silent_osd_signal.emit("Last correction copied", "success")
+        except Exception as e:
+            log(f"[CopyLast] clipboard write failed: {e}")
     def _tray_load_model(self):
         self._cancel_model_retry()
         threading.Thread(target=self.ac_model.load_model, daemon=True).start()
@@ -1088,6 +1272,85 @@ class StetApp(QObject):
             self._chat_status_lbl.setText(f"● Chat: {lbl_msg}")
         else:
             self._chat_status_lbl.hide()
+
+    def _register_hotkeys_via_daemon(self, desired: dict) -> bool:
+        """Hand ownership to the Rust host. Returns True when it hosts."""
+        client = getattr(self, "_ipc_client", None)
+        if not client or not client.is_connected():
+            return False
+        try:
+            hk_specs = []
+            for shortcut, hk_cfg in desired.items():
+                hk_specs.append({
+                    "shortcut": shortcut,
+                    "mode": hk_cfg.get("mode", "panel"),
+                    "strength": hk_cfg.get("strength", "full_correction"),
+                    "custom_prompt": hk_cfg.get("custom_prompt", ""),
+                })
+            res = client.register_hotkeys(hk_specs)
+        except Exception as e:
+            log(f"[Hotkey] Daemon hotkey sync error: {e}")
+            return False
+        if not res or not res.get("hosted") or int(res.get("hosted_count", 0) or 0) <= 0:
+            log(f"[Hotkey] Daemon declined hosting (reply={res}) — falling back to ctypes")
+            return False
+        failed = res.get("failed") or []
+        if failed:
+            log(f"[Hotkey] Rust host rejected: {failed}")
+            self.tray.showMessage(
+                "Stet",
+                f"Could not register hotkey(s) {failed}. Try running as administrator or change them in settings.",
+                QSystemTrayIcon.MessageIcon.Warning,
+                4000,
+            )
+        log(f"[Hotkey] Rust host owns {res.get('hosted_count', len(hk_specs))} combos (rejected={failed or []})")
+        return True
+
+    def _release_ctypes_hotkeys(self) -> None:
+        """Drop ctypes-owned combos without touching the daemon (silent)."""
+        try:
+            for hotkey_id in list(getattr(self, "_hotkey_handles", [])):
+                try:
+                    ctypes.windll.user32.UnregisterHotKey(None, hotkey_id)
+                except Exception:
+                    pass
+            self._hotkey_handles = []
+            self._hotkey_registered = {}
+            if hasattr(self, "_hotkey_filter"):
+                self._hotkey_filter.clear_callbacks()
+        except Exception:
+            pass
+
+    def _reconcile_hotkey_owner(self) -> None:
+        """Watchdog: exactly one host owns the combos; heal drift (5s tick)."""
+        try:
+            if MACOS or not WINDOWS:
+                return
+            if getattr(self, "_hotkey_reconciling", False):
+                return
+            want_rust = (self.cfg.get("hotkey_host", "rust") or "rust").lower() == "rust"
+            connected = bool(getattr(self, "_ipc_client", None) and self._ipc_client.is_connected())
+            want = "daemon" if (want_rust and connected) else "ctypes"
+            have = (getattr(self, "_path_stats", {}) or {}).get("hotkey_owner", "unknown")
+            if want == have:
+                return
+            self._hotkey_reconciling = True
+            try:
+                if want == "daemon":
+                    log("[Hotkey] owner drift → daemon (re-registering via Rust host)")
+                    self._register_hotkey(force=True)
+                else:
+                    log(f"[Hotkey] owner drift → ctypes (daemon_connected={connected})")
+                    try:
+                        if connected:
+                            self._ipc_client.unregister_hotkeys()
+                    except Exception:
+                        pass
+                    self._register_hotkey(force=True)
+            finally:
+                self._hotkey_reconciling = False
+        except Exception as e:
+            log(f"[Hotkey] owner reconcile failed: {e}")
 
     def _register_hotkey(self, force: bool = False, is_retry: bool = False):
         """Register global hotkeys through the native platform adapter."""
@@ -1173,18 +1436,30 @@ class StetApp(QObject):
             if shortcut:
                 desired[shortcut] = hk_cfg
 
-        if self._ipc_client and self._ipc_client.is_connected():
+        daemon_connected = bool(self._ipc_client and self._ipc_client.is_connected())
+        want_rust_host = (self.cfg.get("hotkey_host", "rust") or "rust").lower() == "rust"
+        if want_rust_host and daemon_connected:
+            # Rust-first (default): the daemon owns RegisterHotKey. Never hold
+            # the same combos in ctypes simultaneously (1409 against ourselves).
+            daemon_hosted = self._register_hotkeys_via_daemon(desired)
+            if daemon_hosted:
+                self._release_ctypes_hotkeys()
+                try:
+                    self._path_stats["hotkey_owner"] = "daemon"
+                except Exception:
+                    pass
+                if hasattr(self, "_hotkey_retry_timer"):
+                    self._hotkey_retry_timer.stop()
+                self._hotkey_retry_count = 0
+                return
+            log("[Hotkey] Rust host declined/failed — falling back to ctypes")
+        if not want_rust_host and daemon_connected:
+            # Python owns: release any stale daemon-side ownership first so
+            # the same combos are never held twice (1409 against ourselves).
             try:
-                hk_specs = []
-                for shortcut, hk_cfg in desired.items():
-                    hk_specs.append({
-                        "shortcut": shortcut,
-                        "mode": hk_cfg.get("mode", "panel"),
-                        "strength": hk_cfg.get("strength", "full_correction"),
-                    })
-                self._ipc_client.register_hotkeys(hk_specs)
+                self._ipc_client.unregister_hotkeys()
             except Exception as e:
-                log(f"[Hotkey] Daemon hotkey sync error: {e}")
+                log(f"[Hotkey] Daemon release error: {e}")
 
         registered: set[str] = set(self._hotkey_registered.keys())
         to_unregister, to_register, unchanged = compute_hotkey_diff(registered, set(desired.keys()))
@@ -1230,7 +1505,7 @@ class StetApp(QObject):
                 newly_registered.append(shortcut)
                 if hasattr(self, "_hotkey_filter"):
                     self._hotkey_filter.register_callback(
-                        hotkey_id, lambda h=hk_cfg: self._hotkey_signal.emit(h)
+                        hotkey_id, lambda h=hk_cfg: self._hotkey_signal.emit({**h, "_src": "ctypes"})
                     )
                 log(f"[Hotkey] registered: {shortcut} (mode: {hk_cfg.get('mode')})")
             except Exception as e:
@@ -1242,6 +1517,10 @@ class StetApp(QObject):
                     has_already_registered_error = True
 
         if not failed_shortcuts:
+            try:
+                self._path_stats["hotkey_owner"] = "ctypes"
+            except Exception:
+                pass
             if is_retry or self._hotkey_retry_count > 0:
                 log(
                     f"[Hotkey] Successfully registered {len(to_register)} new hotkeys "
@@ -1302,6 +1581,11 @@ class StetApp(QObject):
         self._hotkey_registered.clear()
         if hasattr(self, "_hotkey_filter"):
             self._hotkey_filter.clear_callbacks()
+        try:
+            if getattr(self, "_ipc_client", None) and self._ipc_client.is_connected():
+                self._ipc_client.unregister_hotkeys()
+        except Exception:
+            pass
         log("[Hotkey] Temporarily unregistered all hotkeys")
 
     def _safe_paste(self) -> str:
@@ -1382,6 +1666,13 @@ class StetApp(QObject):
 
     def _handle_hotkey_fired(self, hk_cfg: dict):
         """Called from main Qt thread via queue polling."""
+        # Snapshot BEFORE our shell steals the foreground — the capture
+        # worker restores this right before reading the selection.
+        try:
+            self._snapshot_active_app_hwnd()
+            self._target_lost = False
+        except Exception:
+            pass
         # Auto-detect if no model is loaded yet (e.g. fresh download)
         if not self.ac_model.is_loaded() and not self.ac_model.loading:
             if self.cfg.auto_detect():
@@ -1392,28 +1683,33 @@ class StetApp(QObject):
         mode = hk_cfg.get("mode", "panel")
         strength = hk_cfg.get("strength", "full_correction")
         custom_prompt = hk_cfg.get("custom_prompt", "")
-        log(f"[Hotkey] fired mode={mode} strength={strength}")
+        _src = hk_cfg.get("_src", "unknown")
+        if _src in ("daemon", "ctypes"):
+            self._bump_path("hotkey", _src)
+        log(f"[Hotkey] fired mode={mode} strength={strength} src={_src}")
+
+        # Fast path FIRST: an open/opening shell gets focus even while a
+        # worker still holds the busy lock — late repeat-presses must not
+        # die at the lock while their window is already up. Takes no lock.
+        try:
+            if self._focus_existing_window():
+                return
+        except Exception as e:
+            log(f"[Hotkey] window check failed: {e}")
 
         # Re-entrancy guard
         if not self._hotkey_busy.acquire(blocking=False):
             log("[Hotkey] Fired but already busy — ignoring")
             return
 
-        # Check if window is alive or currently opening — focus existing window
+        # Re-check under the lock: a sibling fire may have opened the shell
+        # between our fast path and the acquire.
         try:
-            if self._is_window_alive() or getattr(self, "_window_opening", False):
-                log("[Hotkey] window already open or opening — focusing")
-                if self._window is not None:
-                    try:
-                        self._window.raise_()
-                        self._window.activateWindow()
-                    except Exception:
-                        pass
+            if self._focus_existing_window():
                 self._hotkey_busy.release()
                 return
         except Exception as e:
             log(f"[Hotkey] window check failed: {e}")
-
         if mode == "silent":
             # Immediate visual feedback
             self._silent_osd_signal.emit("Loading model…", "loading")
@@ -1427,11 +1723,18 @@ class StetApp(QObject):
                 log(f"[Hotkey] silent spawn failed: {e}")
                 self._hotkey_busy.release()
         else:
-            # Set opening flag so rapid keystrokes don't spawn duplicate windows
+            # Instant shell: paint the popup on this main-thread tick, then fill
+            # it when the background capture finishes. Hotkey→paint no longer
+            # waits on clipboard/UIA polls.
             self._window_opening = True
+            self._hotkey_rx_ts = time.monotonic()
             # Run actual work in background thread so Qt stays responsive
             self._pending_panel_strength = strength
             self._pending_panel_custom_prompt = custom_prompt
+            try:
+                self._show_capturing_shell(strength)
+            except Exception as e:
+                log(f"[Hotkey] capturing shell failed: {e}")
             try:
                 threading.Thread(target=self._hotkey_worker, daemon=True).start()
             except Exception as e:
@@ -1454,6 +1757,32 @@ class StetApp(QObject):
     _CLIPBOARD_INITIAL_GRACE = 0.05    # 50 ms grace before first poll
     # 50 ms + 12 * 15 ms = 230 ms worst case (was 680 ms; ~65% reduction)
 
+    def _bump_path(self, group: str, key: str) -> None:
+        try:
+            stats = getattr(self, "_path_stats", None)
+            if not isinstance(stats, dict):
+                return
+            bucket = stats.get(group)
+            if isinstance(bucket, dict) and key in bucket:
+                bucket[key] += 1
+                total = sum(v for v in bucket.values() if isinstance(v, int))
+                if total and total % 25 == 0:
+                    log(f"[Paths] {self._path_stats_line()}")
+        except Exception:
+            pass
+
+    def _path_stats_line(self) -> str:
+        try:
+            s = self._path_stats
+            c, p, h = s["capture"], s["paste"], s["hotkey"]
+            return (
+                f"capture d/uia/clip/empty={c['daemon']}/{c['uia']}/{c['clipboard']}/{c['empty']} "
+                f"paste d/win32={p['daemon']}/{p['win32']} "
+                f"hotkey d/ctypes={h['daemon']}/{h['ctypes']} owner={s.get('hotkey_owner', '?')}"
+            )
+        except Exception:
+            return "path stats unavailable"
+
     def _capture_selection(self) -> str:
         """Copy selected text from the active window via direct UIA or Ctrl+C.
 
@@ -1461,6 +1790,20 @@ class StetApp(QObject):
         Saves the previous clipboard content to self._old_clip and restores it
         only when no selection is found.
         """
+        # 0a: our instant shell is already visible AND focused by the time a
+        # worker reaches here — hand the foreground back to the fire-time
+        # snapshot FIRST, so every backend below (daemon/UIA/clipboard)
+        # targets the real app instead of our own window.
+        if WINDOWS:
+            self._restore_capture_focus()
+            if self._foreground_is_self():
+                # Restore failed (stale/empty snapshot: fresh launch + tray
+                # flow). Every backend below would target our own shell —
+                # abort fast instead of a doomed 1.5 s capture.
+                log("[Capture] foreground is Stet itself — target lost, aborting")
+                self._target_lost = True
+                self._bump_path("capture", "empty")
+                return ""
         # 0b: snapshot the foreground compound identity BEFORE capture, so the
         # paste path can verify the same target still owns the foreground and
         # discard if ownership changed during capture (wrong-window protection).
@@ -1481,12 +1824,22 @@ class StetApp(QObject):
         if self._ipc_client and self._ipc_client.is_connected():
             try:
                 res = self._ipc_client.capture_selection(timeout_ms=1500)
-                if res and res.get("text"):
-                    log(f"[Capture] Native daemon capture succeeded: {res['text'][:80]!r}")
-                    return res["text"]
+                if res is not None:
+                    if "text" in res:
+                        captured = res["text"]
+                        if captured:
+                            log(f"[Capture] Native daemon capture succeeded: {captured[:80]!r}")
+                            self._bump_path("capture", "daemon")
+                        else:
+                            log("[Capture] Native daemon capture returned empty selection")
+                            self._bump_path("capture", "empty")
+                        return captured
+                    elif "error" in res:
+                        err_val = res["error"]
+                        err_code = err_val.get("code", str(err_val)) if isinstance(err_val, dict) else str(err_val)
+                        log(f"[Capture] Native daemon returned error ({err_code}), falling back to Win32 in-process")
             except Exception as e:
                 log(f"[Capture] Native daemon error ({e}), falling back to Win32 in-process")
-
 
         # Try UIA direct text capture first (bypassing the clipboard)
         from stet.core.clipboard import _read_selection_uia
@@ -1531,6 +1884,7 @@ class StetApp(QObject):
 
         if uia_text:
             log(f"[Capture] Direct UIA capture succeeded: {uia_text[:80]!r}")
+            self._bump_path("capture", "uia")
             if getattr(self, "_last_capture_truncated", False):
                 log("[Capture] WARNING: selection truncated at MAX_TEXT_LENGTH")
             self._old_clip = self._safe_paste()
@@ -1547,7 +1901,13 @@ class StetApp(QObject):
         else:
             terminal_safe_copy = False
             self._target_is_terminal = False
-
+        if self._foreground_is_self():
+            # Focus restore failed (target closed?) — Ctrl+C would go to our
+            # own shell. Abort fast instead of polling an empty clipboard.
+            log("[Capture] foreground is Stet itself — target lost, aborting")
+            self._target_lost = True
+            self._bump_path("capture", "empty")
+            return ""
         # Fallback: existing Ctrl+C + clipboard read
         # Settle: the hotkey fires on key-down; 80 ms lets the target window's
         # message queue settle, while _send_ctrl_chord atomically releases any held Shift.
@@ -1581,20 +1941,22 @@ class StetApp(QObject):
                         f"[Capture] got selection on poll {attempt + 1}: "
                         f"{clip[:80]!r}"
                     )
+                    self._bump_path("capture", "clipboard")
                     return clip
 
             # If the selected text happened to match the old clipboard
             # content, the change-detection loop won't catch it. Try the
             # standard non-empty check as a last resort. But only return
             # it if it differs from the old clipboard — a match means
-            # no selection was actually made (Ctrl+C did nothing).
             clip = self._safe_paste()
             if clip and clip != self._old_clip:
                 log(f"[Capture] terminal fallback (new clip): {clip[:80]!r}")
+                self._bump_path("capture", "clipboard")
                 return clip
 
             log("[Capture] no selection detected (terminal)")
             self._terminal_capture_refused = True
+            self._bump_path("capture", "empty")
             if self._old_clip:
                 self._safe_copy(self._old_clip)
             return ""
@@ -1630,9 +1992,11 @@ class StetApp(QObject):
             clip = self._safe_paste()
             if clip:
                 log(f"[Capture] got selection on poll {attempt + 1}: {clip[:80]!r}")
+                self._bump_path("capture", "clipboard")
                 return clip
 
         log(f"[Capture] no selection after {self._CLIPBOARD_MAX_POLLS} polls")
+        self._bump_path("capture", "empty")
         if self._old_clip:
             self._safe_copy(self._old_clip)
         return ""
@@ -1656,39 +2020,30 @@ class StetApp(QObject):
                 "Terminal window detected — capture is disabled here "
                 "to protect the running process (Ctrl+C would interrupt it)."
             )
+        if getattr(self, "_target_lost", False):
+            return (
+                "Stet couldn't reach the app holding your selection — "
+                "click the app, reselect the text, and press the shortcut again"
+            )
         return f"Highlight some text in any app first, then press {hotkey_display}"
 
     def _hotkey_worker(self):
         try:
             strength = getattr(self, "_pending_panel_strength", "full_correction")
             selected = self._capture_selection()
-
-            if selected.strip():
-                text = selected.strip()
-                word_count = len(text.split())
-                warn_words = self.cfg.get("large_doc_warning_words", 1000)
-                if word_count > warn_words:
-                    log(f"[Hotkey] large selection ({word_count} words) — opening UI with warning")
-                    self._large_doc_warning_signal.emit(text)
-                self._trigger.emit(text, strength)
-            else:
-                self._window_opening = False
-                now = time.monotonic()
-                if now - self._last_empty_notify_ts > 1.5:
-                    self._last_empty_notify_ts = now
-                    panel_hk = self._get_hotkey_display("panel", "F9")
-                    self._silent_osd_signal.emit(
-                        self._empty_selection_hint(panel_hk),
-                        "info",
-                    )
-                else:
-                    log("[Hotkey] empty selection — throttled")
+            try:
+                rx = getattr(self, "_hotkey_rx_ts", 0.0) or 0.0
+                log(f"[Hotkey] capture_done in {int((time.monotonic() - rx) * 1000)}ms, chars={len((selected or '').strip())}")
+            except Exception:
+                pass
+            # Main-thread slot fills or dismisses the instant shell.
+            self._capture_ready.emit((selected or "").strip(), strength)
         except Exception as e:
             log(f"[Hotkey] worker error: {e}")
-            # Don't strand _window_opening=True — next hotkeys would focus
-            # a window that will never open.
+            # Don't strand an opening shell — next hotkeys would focus
+            # a window that will never fill.
             try:
-                self._window_opening = False
+                self._capture_ready.emit("", getattr(self, "_pending_panel_strength", "full_correction"))
             except Exception:
                 pass
         finally:
@@ -1800,26 +2155,7 @@ class StetApp(QObject):
                     self._silent_osd_signal.emit("Could not paste safely", "warning")
                     return
             else:
-                seq_before = _clipboard_sequence_number()
-                self._safe_copy(result)
-                time.sleep(0.12)
-                if getattr(self, "_target_is_terminal", False):
-                    _send_ctrl_shift_chord(VK_V)
-                else:
-                    _send_ctrl_chord(VK_V)
-                time.sleep(0.08)
-
-            # Restore original clipboard after paste settles.
-            # We're already in a background thread — just sleep instead of
-            # QTimer.singleShot, which would crash from a non-Qt thread.
-            if not MACOS and self._old_clip and self._old_clip != result:
-                time.sleep(0.5)
-                current = _clipboard_read_text()
-                # Restore if the clipboard still contains the pasted result
-                if current == result:
-                    self._safe_copy(self._old_clip)
-                else:
-                    log("[Silent] Clipboard was modified externally — skipping restore")
+                self._paste_text(result)
             self._last_silent_history_id = self._history.add(
                 mode="silent",
                 strength=strength,
@@ -1961,6 +2297,105 @@ class StetApp(QObject):
             except Exception as e:
                 log(f"[LargeDoc] dialog failed: {e}")
 
+    def _show_capturing_shell(self, strength: str = "full_correction"):
+        """Paint an empty popup on the hotkey tick; worker fills it on capture."""
+        try:
+            if self._is_window_alive():
+                return
+        except Exception:
+            pass
+        self._show_window("", strength)
+        try:
+            win = self._window
+            if win is not None:
+                win._hotkey_rx_ts = getattr(self, "_hotkey_rx_ts", 0.0) or time.monotonic()
+                try:
+                    win._update_status("Capturing selection...", "loading")
+                except Exception:
+                    pass
+                try:
+                    rx = float(getattr(self, "_hotkey_rx_ts", 0.0) or 0.0)
+                    log(f"[Window] capturing shell in {int((time.monotonic() - rx) * 1000)}ms")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _on_capture_ready(self, text: str, strength: str):
+        """Main-thread fill for the instant shell (or dismiss on empty)."""
+        try:
+            if not (text or "").strip():
+                try:
+                    win = getattr(self, "_window", None)
+                    if win is not None and not (getattr(win, "original", "") or ""):
+                        try:
+                            win.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                self._window_opening = False
+                now = time.monotonic()
+                if now - self._last_empty_notify_ts > 1.5:
+                    self._last_empty_notify_ts = now
+                    panel_hk = self._get_hotkey_display("panel", "F9")
+                    self._silent_osd_signal.emit(self._empty_selection_hint(panel_hk), "info")
+                else:
+                    log("[Hotkey] empty selection — throttled")
+                return
+            word_count = len(text.split())
+            warn_words = self.cfg.get("large_doc_warning_words", 1000)
+            if word_count > warn_words:
+                log(f"[Hotkey] large selection ({word_count} words) — opening UI with warning")
+                self._large_doc_warning_signal.emit(text)
+            win = getattr(self, "_window", None)
+            try:
+                alive = bool(win is not None) and self._is_window_alive()
+            except Exception:
+                alive = False
+            if alive and not (getattr(win, "original", "") or ""):
+                try:
+                    win.set_captured_text(text, strength)
+                    self._activate_window_to_foreground(win)
+                    return
+                except Exception as e:
+                    log(f"[Window] fill capturing shell failed: {e}")
+            self._show_window(text, strength)
+        except Exception as e:
+            log(f"[Hotkey] capture-ready error: {e}")
+            try:
+                self._window_opening = False
+            except Exception:
+                pass
+
+    def _prewarm_ui(self):
+        """Pre-warm Qt styles, fonts, and window rendering at boot.
+
+        Eliminates the ~1000-1600ms first-trigger latency so the user's
+        very first hotkey press is instantaneous (~8-40ms), matching all
+        subsequent triggers.
+        """
+        try:
+            t0 = time.perf_counter()
+            from stet.ui.main_window import CorrectionWindow
+            win = CorrectionWindow(
+                "",
+                self.ac_model,
+                self.chat_model,
+                self.cfg,
+                re_register_cb=self._register_hotkey,
+            )
+            win._history = self._history
+            win.move(-10000, -10000)
+            win.show()
+            QApplication.processEvents()
+            win.hide()
+            self._prewarmed_window = win
+            dt = int((time.perf_counter() - t0) * 1000)
+            log(f"[UI] Pre-warmed CorrectionWindow in {dt}ms")
+        except Exception as e:
+            log(f"[UI] Pre-warming failed (non-fatal): {e}")
+
     def _show_window(self, text: str, initial_strength: str = "full_correction"):
         self._window_opening = False
         log(f"[Window] _show_window called, text length={len(text)}")
@@ -1972,16 +2407,29 @@ class StetApp(QObject):
                 old.deleteLater()
 
             custom_prompt = getattr(self, "_pending_panel_custom_prompt", "")
-            self._window = CorrectionWindow(
-                text,
-                self.ac_model,
-                self.chat_model,
-                self.cfg,
-                re_register_cb=self._register_hotkey,
-                initial_strength=initial_strength,
-                mode_prompt_override=custom_prompt or None,
-            )
+            prewarmed = getattr(self, "_prewarmed_window", None)
+            from PyQt6 import sip
+            if prewarmed is not None and not sip.isdeleted(prewarmed):
+                self._prewarmed_window = None
+                self._window = prewarmed
+                if text:
+                    self._window.set_captured_text(text, initial_strength)
+                self._window._position_window()
+            else:
+                self._window = CorrectionWindow(
+                    text,
+                    self.ac_model,
+                    self.chat_model,
+                    self.cfg,
+                    re_register_cb=self._register_hotkey,
+                    initial_strength=initial_strength,
+                    mode_prompt_override=custom_prompt or None,
+                )
             self._window._history = self._history
+            try:
+                self._window.accepted.disconnect()
+            except Exception:
+                pass
             self._window.accepted.connect(self._paste_text)
             # Clear stale reference when the user closes the window,
             # preventing RuntimeError on next hotkey press. Capture the exact
@@ -1989,14 +2437,68 @@ class StetApp(QObject):
             # dying object (the old wrapper is already a deleted shell), so
             # identity is checked against the captured instance.
             win = self._window
+            try:
+                win.destroyed.disconnect()
+            except Exception:
+                pass
             win.destroyed.connect(lambda *_, w=win: self._on_window_destroyed(w))
-            self._window.show()
-            self._window.raise_()
-            self._window.activateWindow()
+            try:
+                win._hotkey_rx_ts = getattr(self, "_hotkey_rx_ts", 0.0) or time.monotonic()
+            except Exception:
+                pass
+            self._activate_window_to_foreground(self._window)
             log("[Window] Window shown successfully")
         except Exception as e:
             log(f"[Window] CRASH in _show_window: {e}\n{traceback.format_exc()}")
 
+
+    def _activate_window_to_foreground(self, win=None):
+        """Robustly bring Stet window to the foreground and activate keyboard focus."""
+        target = win or self._window
+        if target is None:
+            return
+        try:
+            if hasattr(target, "show"):
+                target.show()
+            if hasattr(target, "raise_"):
+                target.raise_()
+            if hasattr(target, "activateWindow"):
+                target.activateWindow()
+            if WINDOWS:
+                try:
+                    hwnd = int(target.winId()) if hasattr(target, "winId") else 0
+                    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+                    kernel32 = getattr(getattr(ctypes, "windll", None), "kernel32", None)
+                    if hwnd and user32 and getattr(user32, "IsWindow", lambda h: False)(hwnd):
+                        fg_hwnd = user32.GetForegroundWindow() if hasattr(user32, "GetForegroundWindow") else 0
+                        if fg_hwnd != hwnd:
+                            fg_thread = user32.GetWindowThreadProcessId(fg_hwnd, None) if fg_hwnd and hasattr(user32, "GetWindowThreadProcessId") else 0
+                            cur_thread = kernel32.GetCurrentThreadId() if kernel32 and hasattr(kernel32, "GetCurrentThreadId") else 0
+                            attached = False
+                            if fg_thread and cur_thread and fg_thread != cur_thread and hasattr(user32, "AttachThreadInput"):
+                                try:
+                                    attached = bool(user32.AttachThreadInput(cur_thread, fg_thread, True))
+                                except Exception:
+                                    attached = False
+                            try:
+                                if hasattr(user32, "keybd_event"):
+                                    user32.keybd_event(0, 0, 0, 0)
+                                if hasattr(user32, "BringWindowToTop"):
+                                    user32.BringWindowToTop(hwnd)
+                                if hasattr(user32, "SetForegroundWindow"):
+                                    user32.SetForegroundWindow(hwnd)
+                                if hasattr(user32, "SetActiveWindow"):
+                                    user32.SetActiveWindow(hwnd)
+                            finally:
+                                if attached and hasattr(user32, "AttachThreadInput"):
+                                    try:
+                                        user32.AttachThreadInput(cur_thread, fg_thread, False)
+                                    except Exception:
+                                        pass
+                except Exception as e:
+                    log(f"[Window] Win32 force foreground failed: {e}")
+        except Exception as e:
+            log(f"[Window] activate_window_to_foreground failed: {e}")
     def _on_window_destroyed(self, window):
         """Slot called when CorrectionWindow's C++ object is destroyed.
 
@@ -2010,16 +2512,26 @@ class StetApp(QObject):
 
     def _paste_text(self, text: str):
         if self._window is not None:
-            strength = (
-                getattr(self._window, "_correction_stream_strength", "") or
-                self.cfg.get("streaming_strength", "full_correction")
-            )
-            self._history.add(
-                mode="panel",
-                strength=strength,
-                original=getattr(self._window, "original", "") or "",
-                corrected=text,
-            )
+            orig_win = getattr(self._window, "original", "") or ""
+            # Already recorded at correction-ready/close (save-once helper) —
+            # only add here if the pasted text differs (e.g. manual edits).
+            recorded = getattr(self._window, "_panel_history_recorded_key", None)
+            if recorded != (orig_win, text):
+                strength = (
+                    getattr(self._window, "_correction_stream_strength", "") or
+                    self.cfg.get("streaming_strength", "full_correction")
+                )
+                eid = self._history.add(
+                    mode="panel",
+                    strength=strength,
+                    original=orig_win,
+                    corrected=text,
+                )
+                if eid is not None:
+                    try:
+                        self._window._panel_history_recorded_key = (orig_win, text)
+                    except Exception:
+                        pass
             orig = getattr(self._window, "original", "") or ""
             if orig:
                 from stet.core.history import UndoToken
@@ -2051,10 +2563,15 @@ class StetApp(QObject):
                 res = self._ipc_client.paste_text(text=text, verify_target=True)
                 if res and res.get("status") == "pasted":
                     log(f"[Paste] Native daemon paste succeeded for {len(text)} chars")
+                    self._bump_path("paste", "daemon")
                     return
+                elif res and "error" in res:
+                    err_val = res["error"]
+                    err_code = err_val.get("code", str(err_val)) if isinstance(err_val, dict) else str(err_val)
+                    log(f"[Paste] Native daemon returned error ({err_code}), falling back to Win32 in-process")
             except Exception as e:
                 log(f"[Paste] Native daemon error ({e}), falling back to Win32 in-process")
-
+        self._bump_path("paste", "win32")
         seq_before = _clipboard_sequence_number()
         # 0b tiered matching (hard signals): abort the paste if the foreground
         # target no longer matches the compound identity captured at hotkey

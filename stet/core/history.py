@@ -52,10 +52,8 @@ class CorrectionHistory:
         self._path = Path(path) if path else APP_DATA_DIR / "history.jsonl"
         self._limit = max(1, int(limit))
         self._enabled = enabled
-        # 0d: history is consent-gated. Default to NOT granted (privacy-first)
-        # unless the caller explicitly opts the user in. enabled=True alone is
-        # not enough to record; consent_granted must also be True.
-        self._consent_granted = bool(consent_granted) if consent_granted is not None else False
+        # History is enabled and consent granted by default.
+        self._consent_granted = bool(consent_granted) if consent_granted is not None else True
         self._lock = threading.Lock()
 
     @property
@@ -148,6 +146,15 @@ class CorrectionHistory:
             with open(tmp, "w", encoding="utf-8") as f:
                 for e in entries:
                     f.write(json.dumps(e, ensure_ascii=False) + "\n")
-            tmp.replace(self._path)
+            # On Windows, replace can transiently fail if an indexer/AV holds a handle
+            for attempt in range(5):
+                try:
+                    tmp.replace(self._path)
+                    break
+                except OSError as err:
+                    if attempt == 4:
+                        log(f"[History] replace failed after 5 attempts: {err}")
+                        raise
+                    time.sleep(0.025)
         except OSError as e:
             log(f"[History] save failed: {e}")

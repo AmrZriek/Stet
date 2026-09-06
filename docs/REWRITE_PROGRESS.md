@@ -12,7 +12,7 @@
 | :--- | :--- | :--- | :--- |
 | **Python Main Checkout** | `D:/Projects/Software/Stet` (`main`) | **1428 passed, 0 failed, 4 skipped** (232s) | `venv/Scripts/pytest -q` |
 | **Python Worktree Sandbox** | `D:/Projects/Software/Stet-wt-phase0` (`phase-0-safety`) | **1403 passed, 0 failed, 9 skipped** (176s) | `uv run --with-requirements requirements.txt --with-requirements requirements-dev.txt pytest -q` |
-| **Rust Native Workspace** | `crates/` (12 suites) | **221 passed, 0 failed** | `$env:CARGO_INCREMENTAL='0'; cargo test -j 1` |
+| **Rust Native Workspace** | `crates/` (12 suites) | **232 passed, 0 failed** | `$env:CARGO_INCREMENTAL='0'; cargo test -j 1` |
 | **Win32 Interactive Probes** | `crates/stet-win32` | **8 passed, 0 failed** | `cargo test --features lab -j 1 -- --ignored --test-threads=1 lab_` |
 | **Phase 1 Contracts** | `tests/test_phase1_contracts.py` | **12 passed, 0 failed** (both repos) | `pytest tests/test_phase1_contracts.py` |
 | **Phase 3 Engine** | `tests/test_phase3_engine.py` | **15 passed, 0 failed** (both repos) | `pytest tests/test_phase3_engine.py` |
@@ -148,3 +148,18 @@ Second-agent stress/robustness changes were independently reviewed (previously u
 | R-5 (reverted) | MTP draft-on-CPU removal looked like a regression — Decision 36.3 proves it is a deliberate `0xc0000409` crash fix | Kept documented GPU-only gate; no code change |
 
 Noted: `IpcClient.capture_selection/paste_text` now use the non-blocking `_read_reply` framing loop with deadline (resolved in Decision 38). `_dynamic_context_size` grows sticky per session (never shrinks) — accepted to avoid reload thrash. Tracked docs under `docs/` stay tracked.
+
+## 6. Rust Daemon Seam Audit & Hardening (2026-09-06, Decision 39)
+
+Comprehensive 4-boundary audit of the Rust daemon integration and IPC wiring across Protocol, Lifecycle, Rust Core Internals, and Build/Packaging.
+
+| # | Finding | Fix |
+| :--- | :--- | :--- |
+| S-1 | Cloud-clipboard suppression flags unapplied in Rust `write_clipboard` (privacy regression vs Phase 0f) | Added `set_privacy_suppression()` via `LazyLock` in `crates/stet-win32/src/clipboard.rs` applying `ExcludeClipboardContentFromClipboardHistory`, `CanIncludeInClipboardHistory=0`, and `CanUploadToCloudClipboard=0` on every clipboard write |
+| S-2 | `handshake.rs` semver comparison was lexicographical (`"1.10.0" < "1.5.0"` was false) | Implemented numeric `parse_semver` in `crates/stet-core/src/handshake.rs:authenticate` with unit tests for multi-digit components and malformed strings |
+| S-3 | Daemon process orphaned on hard Python crash (no Job Object) | Added `_attach_job_object(proc)` with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` in `stet/core/native_daemon.py` |
+| S-4 | Cargo compile failure warned-not-failed, allowing release installer to ship without `stet-core.exe` | Added hard assertion in `build.py:package()` raising `RuntimeError` if daemon binary missing; added daemon checks in `scripts/smoke_test_build.py` |
+| S-5 | Daemon error replies swallowed to `None` in Python client | Preserved `{"error": ...}` payloads in `stet/core/ipc_client.py` and logged typed error codes in `stet/core/app.py` |
+| S-6 | Wire error enum naming mismatch (`selection_changed` vs `aborted_selection_changed`) | Aligned `stet/core/input.py` wire taxonomy with Rust wire names |
+| S-7 | CorrectionWindow displayed generic "Processing…" while model was still loading/warming up | Updated `set_captured_text`, `_start_correction_flow`, and `_on_status_loading` in `stet/ui/main_window.py` to show explicit `⏳ Loading model (initializing)…` |
+| S-8 | Correction history disabled by default and failed on Windows transient lock | Enabled `history_enabled` and `history_consent_granted` by default in `DEFAULT_CONFIG` and `RELEASE_CONFIG`; added 5-attempt retry loop for `tmp.replace()` in `stet/core/history.py` |

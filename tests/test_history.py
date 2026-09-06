@@ -114,8 +114,9 @@ class TestCorrectionHistory:
     def test_config_defaults_present(self):
         assert "history_enabled" in DEFAULT_CONFIG
         assert "history_limit" in DEFAULT_CONFIG
-        # 0d: history is DISABLED by default for new installs (consent-gated).
-        assert DEFAULT_CONFIG["history_enabled"] is False
+        # History is enabled by default for undo and review.
+        assert DEFAULT_CONFIG["history_enabled"] is True
+        assert DEFAULT_CONFIG["history_consent_granted"] is True
         assert DEFAULT_CONFIG["history_limit"] == 200
 
 
@@ -192,9 +193,8 @@ class TestHistoryConsentGate:
         assert eid is None
 
     def test_add_requires_consent(self, tmp_path):
-        """Default (no consent) must not write history for a fresh CorrectionHistory."""
-        h = CorrectionHistory(path=tmp_path / "h.jsonl", enabled=True)
-        # Default consent_granted should be False (privacy-first).
-        assert getattr(h, "_consent_granted", False) is False
+        """When consent is explicitly False, add() must not write history."""
+        h = CorrectionHistory(path=tmp_path / "h.jsonl", enabled=True, consent_granted=False)
+        assert getattr(h, "_consent_granted", True) is False
         eid = h.add(mode="panel", strength="full_correction", original="a", corrected="b")
         assert eid is None

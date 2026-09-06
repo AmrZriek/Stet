@@ -31,6 +31,7 @@ import stet.core.app as _app_module
 # ``suppress_first_run_and_update`` swaps in a no-op.  Tests that exercise
 # the real throttling/checker logic restore it in-test via monkeypatch.
 _REAL_CHECK_APP_UPDATE = _app_module.StetApp._check_app_update
+_REAL_PREWARM_UI = _app_module.StetApp._prewarm_ui
 
 
 # ── Helpers & fixtures ────────────────────────────────────────────────────
@@ -704,6 +705,7 @@ class TestStetAppPasteText:
         self, mock_timer, mock_chord, mock_tray_cls, qtbot, monkeypatch
     ):
         app = StetApp()
+        app._ipc_client = None
         app._old_clip = ""
         app._safe_copy = MagicMock()
         app._paste_text("new text")
@@ -717,6 +719,7 @@ class TestStetAppPasteText:
         self, mock_timer, mock_chord, mock_tray_cls, qtbot, monkeypatch
     ):
         app = StetApp()
+        app._ipc_client = None
         app._old_clip = "original"
         app._safe_copy = MagicMock()
         app._paste_text("corrected")
@@ -1545,6 +1548,130 @@ class TestStetAppHandleHotkeyFired:
         app._hotkey_busy.release()
 
     @patch("stet.core.app.QSystemTrayIcon")
+    def test_second_fire_focuses_open_window_while_busy(self, mock_tray_cls, qtbot, monkeypatch):
+        """Late repeat-press focuses the open shell, never dies at the busy lock."""
+        app = StetApp()
+        mock_win = MagicMock()
+        mock_win.isVisible.return_value = True
+        app._window = mock_win
+        # Simulate a worker mid-capture holding the lock.
+        app._hotkey_busy.acquire(blocking=False)
+        try:
+            app._handle_hotkey_fired({"mode": "panel", "strength": "full_correction"})
+            mock_win.raise_.assert_called()
+            # Handler must not release a lock it never acquired.
+            assert app._hotkey_busy.acquire(blocking=False) is False
+        finally:
+            app._hotkey_busy.release()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_fire_snapshots_target_before_shell(self, mock_tray_cls, qtbot, monkeypatch):
+        """Fire-time snapshot records the target before our shell steals focus."""
+        import ctypes as _ctypes
+        app = StetApp()
+        monkeypatch.setattr(_ctypes.windll.user32, "GetForegroundWindow", lambda: 0x12345)
+        monkeypatch.setattr(app, "_foreground_is_self", lambda: False)
+        monkeypatch.setattr(
+            "stet.core.app._window_class_name", lambda hwnd: "Notepad"
+        )
+        monkeypatch.setattr(
+            "stet.core.app._window_process_name", lambda hwnd: "notepad.exe"
+        )
+        # Hold the lock so the fire drops AFTER the snapshot (no shell shown).
+        app._hotkey_busy.acquire(blocking=False)
+        try:
+            app._handle_hotkey_fired({"mode": "panel", "strength": "full_correction"})
+        finally:
+            app._hotkey_busy.release()
+        assert app._last_active_app_hwnd == 0x12345
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_snapshot_skips_own_window(self, mock_tray_cls, qtbot, monkeypatch):
+        """Never record ourselves as the capture target."""
+        import ctypes as _ctypes
+        app = StetApp()
+        assert getattr(app, "_last_active_app_hwnd", None) is None
+        monkeypatch.setattr(_ctypes.windll.user32, "GetForegroundWindow", lambda: 0x12345)
+        monkeypatch.setattr(app, "_foreground_is_self", lambda: True)
+        app._snapshot_active_app_hwnd()
+        assert getattr(app, "_last_active_app_hwnd", None) is None
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_restore_capture_focus_hands_back_foreground(self, mock_tray_cls, qtbot, monkeypatch):
+        """Restore re-foregrounds the snapshot target before capture reads it."""
+        import ctypes as _ctypes
+        app = StetApp()
+        app._last_active_app_hwnd = 0x12345
+        restored = []
+        monkeypatch.setattr(
+            _ctypes.windll.user32, "SetForegroundWindow", lambda hwnd: restored.append(hwnd) or 1
+        )
+        monkeypatch.setattr(app, "_foreground_is_self", lambda: False)
+        monkeypatch.setattr("stet.core.app.time.sleep", lambda s: None)
+        assert app._restore_capture_focus() is True
+        assert restored == [0x12345]
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_capture_selection_restores_focus_first(self, mock_tray_cls, qtbot, monkeypatch):
+        """_capture_selection must restore focus before snapshotting the target."""
+        app = StetApp()
+        order = []
+        monkeypatch.setattr(
+            app, "_restore_capture_focus", lambda: order.append("restore") or True
+        )
+
+        def _boom():
+            order.append("identity")
+            raise RuntimeError("sentinel")
+
+        monkeypatch.setattr("stet.core.app.capture_compound_identity", _boom)
+        import pytest as _pytest
+        with _pytest.raises(RuntimeError, match="sentinel"):
+            app._capture_selection()
+        assert order == ["restore", "identity"]
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_snapshot_keeps_last_good_when_self(self, mock_tray_cls, qtbot, monkeypatch):
+        """Self/taskbar sightings must never overwrite the tracked target."""
+        import ctypes as _ctypes
+        app = StetApp()
+        app._last_active_app_hwnd = 0x111
+        monkeypatch.setattr(_ctypes.windll.user32, "GetForegroundWindow", lambda: 0x222)
+        monkeypatch.setattr(app, "_foreground_is_self", lambda: True)
+        app._snapshot_active_app_hwnd()
+        assert app._last_active_app_hwnd == 0x111
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_capture_aborts_early_when_target_lost(self, mock_tray_cls, qtbot, monkeypatch):
+        """Lost target aborts before any backend touches the clipboard."""
+        app = StetApp()
+        app._ipc_client = None
+        restore_calls = []
+        monkeypatch.setattr(
+            app, "_restore_capture_focus", lambda: restore_calls.append(1) or False
+        )
+        monkeypatch.setattr(app, "_foreground_is_self", lambda: True)
+        assert app._capture_selection() == ""
+        assert restore_calls == [1]
+        assert app._target_lost is True
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_empty_hint_names_target_loss(self, mock_tray_cls, qtbot, monkeypatch):
+        """Target-loss OSD must not blame the user's selection."""
+        app = StetApp()
+        app._target_lost = True
+        assert "reach" in app._empty_selection_hint("F9")
+        app._target_lost = False
+        assert "Highlight some text" in app._empty_selection_hint("F9")
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_foreground_tracker_timer_runs(self, mock_tray_cls, qtbot, monkeypatch):
+        """A 2 Hz poll keeps the last foreign app hwnd fresh for tray flows."""
+        app = StetApp()
+        assert app._active_app_timer.interval() == 500
+        assert app._last_active_app_hwnd is None
+
+    @patch("stet.core.app.QSystemTrayIcon")
     def test_silent_mode_starts_thread(self, mock_tray_cls, qtbot, monkeypatch):
         app = StetApp()
         # The production macOS path constructs a native OSD window; this test
@@ -1646,6 +1773,86 @@ class TestStetAppRegisterHotkey:
         app._register_hotkey(force=False)
         mock_register.assert_not_called()
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Win32 hotkey registration")
+class TestHotkeyOwnerRustFirst:
+    """Rust hosts RegisterHotKey by default; ctypes is fallback only."""
+
+    def _fake_daemon(self, app, hosted=True):
+        daemon = MagicMock()
+        daemon.is_connected.return_value = True
+        daemon.register_hotkeys.return_value = {
+            "status": "registered", "count": 3,
+            "hosted": hosted, "hosted_count": 3 if hosted else 0, "failed": [],
+        }
+        daemon.unregister_hotkeys.return_value = {"status": "unregistered"}
+        app._ipc_client = daemon
+        return daemon
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_rust_is_default_host(self, mock_tray_cls):
+        from stet.constants import DEFAULT_CONFIG
+        assert DEFAULT_CONFIG.get("hotkey_host") == "rust"
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_daemon_hosted_skips_ctypes(self, mock_tray_cls, qtbot, monkeypatch):
+        import ctypes
+        mock_register = MagicMock(return_value=1)
+        monkeypatch.setattr(ctypes.windll.user32, "RegisterHotKey", mock_register)
+        app = StetApp()
+        daemon = self._fake_daemon(app, hosted=True)
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
+        mock_register.reset_mock()
+        app._register_hotkey(force=True)
+        daemon.register_hotkeys.assert_called_once()
+        sent = daemon.register_hotkeys.call_args[0][0]
+        assert {s["shortcut"] for s in sent} >= {"f9", "shift+f9"}
+        assert all(s["mode"] and s["strength"] for s in sent)
+        mock_register.assert_not_called()
+        assert app._path_stats["hotkey_owner"] == "daemon"
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_daemon_decline_falls_back_to_ctypes(self, mock_tray_cls, qtbot, monkeypatch):
+        import ctypes
+        mock_register = MagicMock(return_value=1)
+        monkeypatch.setattr(ctypes.windll.user32, "RegisterHotKey", mock_register)
+        app = StetApp()
+        self._fake_daemon(app, hosted=False)
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
+        mock_register.reset_mock()
+        app._register_hotkey(force=True)
+        mock_register.assert_called()
+        assert app._path_stats["hotkey_owner"] == "ctypes"
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_python_host_forces_ctypes_and_releases_daemon(self, mock_tray_cls, qtbot, monkeypatch):
+        import ctypes
+        mock_register = MagicMock(return_value=1)
+        monkeypatch.setattr(ctypes.windll.user32, "RegisterHotKey", mock_register)
+        app = StetApp()
+        app.cfg.set("hotkey_host", "python")
+        daemon = self._fake_daemon(app, hosted=True)
+        app._hotkey_registered = {}
+        app._hotkey_handles = []
+        mock_register.reset_mock()
+        app._register_hotkey(force=True)
+        mock_register.assert_called()
+        daemon.register_hotkeys.assert_not_called()
+        daemon.unregister_hotkeys.assert_called()
+        assert app._path_stats["hotkey_owner"] == "ctypes"
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_watchdog_hands_back_to_daemon(self, mock_tray_cls, qtbot, monkeypatch):
+        import ctypes
+        monkeypatch.setattr(ctypes.windll.user32, "RegisterHotKey", MagicMock(return_value=1))
+        app = StetApp()
+        daemon = self._fake_daemon(app, hosted=True)
+        app._path_stats["hotkey_owner"] = "ctypes"
+        app._reconcile_hotkey_owner()
+        daemon.register_hotkeys.assert_called()
+        assert app._path_stats["hotkey_owner"] == "daemon"
+
 
 # ── Update-available UX (tray menu entry, dot, popup, throttle, toast) ─────
 
@@ -1654,9 +1861,24 @@ class TestStetAppTrayUpdateAction:
     @patch("stet.core.app.QSystemTrayIcon")
     def test_update_action_added_to_tray_menu(self, mock_tray_cls, qtbot, monkeypatch):
         app = StetApp()
-        assert app._update_action in app._tray_menu.actions()
+        assert app._update_action in app._help_menu.actions()
         assert "Check for Updates" in app._update_action.text()
         assert not app._update_action.icon().isNull()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_tray_menu_grouped_with_separators(self, mock_tray_cls, qtbot, monkeypatch):
+        app = StetApp()
+        actions = app._tray_menu.actions()
+        assert sum(1 for a in actions if a.isSeparator()) >= 3
+        texts = [a.text() for a in actions]
+        assert texts.index("Correct Text") < texts.index("Copy last correction")
+        assert texts.index("Copy last correction") < texts.index("Undo last replacement")
+        assert texts.index("Open Stet") < texts.index("Correction History...")
+        assert any(t.startswith("Model") for t in texts)
+        help_texts = [a.text() for a in app._help_menu.actions()]
+        assert any("Update" in t for t in help_texts)
+        assert "Open Log Folder" in help_texts
+        assert "Copy Debug Info" in help_texts
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_update_action_triggered_installs_when_available(
@@ -1878,3 +2100,97 @@ class TestStetAppToastClick:
         with patch("stet.core.app.SettingsDialog") as mock_dlg:
             slot()  # clicking the toast opens Settings
             mock_dlg.assert_called_once()
+
+
+class TestStetAppPrewarmAndDaemonWiring:
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_prewarm_ui_creates_and_adopts_window(self, mock_tray_cls, qtbot, monkeypatch):
+        app = StetApp()
+        # Test _prewarm_ui directly (it is mocked out in autouse fixture)
+        assert app._prewarmed_window is None
+        _REAL_PREWARM_UI(app)
+        assert app._prewarmed_window is not None
+        prewarmed = app._prewarmed_window
+
+        # Now calling _show_window should adopt prewarmed
+        app._show_window("captured text", "full_correction")
+        assert app._window is prewarmed
+        assert app._prewarmed_window is None
+        assert app._window.original == "captured text"
+        app._window.close()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_daemon_capture_empty_selection_returns_immediately(self, mock_tray_cls, qtbot, monkeypatch):
+        app = StetApp()
+        mock_client = MagicMock()
+        mock_client.is_connected.return_value = True
+        mock_client.capture_selection.return_value = {"text": ""}
+        app._ipc_client = mock_client
+        app._foreground_is_self = MagicMock(return_value=False)
+
+        with patch("stet.core.clipboard._read_selection_uia_struct") as mock_uia, \
+             patch("stet.core.app._send_ctrl_chord") as mock_chord:
+            res = app._capture_selection()
+            assert res == ""
+            mock_client.capture_selection.assert_called_once()
+            # Must NOT fall through to Python UIA or clipboard chords
+            mock_uia.assert_not_called()
+            mock_chord.assert_not_called()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_silent_hotkey_worker_uses_paste_text(self, mock_tray_cls, qtbot, monkeypatch):
+        app = StetApp()
+        app._capture_selection = MagicMock(return_value="hello word")
+        app._is_model_ready = MagicMock(return_value=True)
+        cr_mock = MagicMock()
+        cr_mock.text_or_none = "hello world"
+        app.ac_model.correct_text_patch = MagicMock(return_value=cr_mock)
+        app._paste_text = MagicMock()
+        app._hotkey_busy.acquire()
+        app._silent_hotkey_worker("full_correction")
+        app._paste_text.assert_called_once_with("hello world")
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_activate_window_to_foreground_raises_and_activates(self, mock_tray_cls, qtbot, monkeypatch):
+        app = StetApp()
+        mock_win = MagicMock()
+        mock_win.winId.return_value = 0x9999
+        app._window = mock_win
+
+        app._activate_window_to_foreground(mock_win)
+        mock_win.show.assert_called_once()
+        mock_win.raise_.assert_called_once()
+        mock_win.activateWindow.assert_called_once()
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_on_capture_ready_activates_window_to_foreground(self, mock_tray_cls, qtbot, monkeypatch):
+        app = StetApp()
+        mock_win = MagicMock()
+        mock_win.original = ""
+        app._window = mock_win
+        app._is_window_alive = MagicMock(return_value=True)
+        app._activate_window_to_foreground = MagicMock()
+
+        app._on_capture_ready("captured text", "full_correction")
+        mock_win.set_captured_text.assert_called_once_with("captured text", "full_correction")
+        app._activate_window_to_foreground.assert_called_once_with(mock_win)
+
+    @patch("stet.core.app.QSystemTrayIcon")
+    def test_restore_capture_focus_calls_allow_set_foreground_window(self, mock_tray_cls, qtbot, monkeypatch):
+        import ctypes as _ctypes, os as _os
+        app = StetApp()
+        app._last_active_app_hwnd = 0x5555
+        allowed_pids = []
+        restored = []
+        monkeypatch.setattr(
+            _ctypes.windll.user32, "AllowSetForegroundWindow", lambda pid: allowed_pids.append(pid) or 1
+        )
+        monkeypatch.setattr(
+            _ctypes.windll.user32, "SetForegroundWindow", lambda hwnd: restored.append(hwnd) or 1
+        )
+        monkeypatch.setattr(app, "_foreground_is_self", lambda: False)
+        monkeypatch.setattr("stet.core.app.time.sleep", lambda s: None)
+
+        assert app._restore_capture_focus() is True
+        assert allowed_pids == [_os.getpid()]
+        assert restored == [0x5555]

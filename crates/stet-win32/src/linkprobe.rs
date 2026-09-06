@@ -91,7 +91,7 @@ pub fn link_point_count() -> usize {
     let _ = clipboard::empty_clipboard as *const () as usize; n += 1;
     let _ = clipboard::set_clipboard_unicode as *const () as usize; n += 1;
     let _ = clipboard::count_clipboard_formats as *const () as usize; n += 1;
-    let _ = clipboard::suppression_flag_can_upload_cloud as *const () as usize; n += 1;
+    let _ = clipboard::set_privacy_suppression as *const () as usize; n += 1;
 
     n
 }
@@ -117,5 +117,5 @@ pub const LINK_POINTS: &[&str] = &[
     "clipboard: ole_initialize", "clipboard: ole_uninitialize", "clipboard: ole_get_clipboard",
     "clipboard: ole_flush_clipboard", "clipboard: clipboard_sequence", "clipboard: open_clipboard",
     "clipboard: close_clipboard", "clipboard: empty_clipboard", "clipboard: set_clipboard_unicode",
-    "clipboard: count_clipboard_formats", "clipboard: suppression_flag_can_upload_cloud",
+    "clipboard: count_clipboard_formats", "clipboard: set_privacy_suppression",
 ];

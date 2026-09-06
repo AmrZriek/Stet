@@ -936,6 +936,29 @@ class TestModelManagerPrefixAndPayload:
         assert payload.get("top_k") == 5
         assert payload.get("repeat_penalty") == 1.2
 
+    def test_rewrite_sentence_chunk_enables_thinking_for_reasoning_models(self, cfg, monkeypatch):
+        """Reasoning-capable models must pass think=True, reasoning_budget=256, and enable_thinking=True."""
+        import requests
+        ac_manager = ModelManager(cfg, model_path_key="model_path")
+        monkeypatch.setattr(ac_manager, "_is_model_reasoning_capable", lambda: True)
+        captured_payload = {}
+
+        def fake_post(self, url, json, *args, **kwargs):
+            captured_payload["payload"] = json
+            return MockResponse(
+                {"choices": [{"message": {"content": "ok"}}]}
+            )
+
+        monkeypatch.setattr(requests.Session, "post", fake_post)
+        ac_manager._rewrite_sentence_chunk("hello world", None, 1, 1, "full_correction")
+
+        payload = captured_payload.get("payload", {})
+        assert payload.get("think") is True
+        assert payload.get("reasoning_budget") == 256
+        assert payload.get("chat_template_kwargs") == {"enable_thinking": True}
+        assert payload.get("extra_body", {}).get("reasoning_budget") == 256
+        assert payload.get("extra_body", {}).get("chat_template_kwargs") == {"enable_thinking": True}
+
 
 class TestGpuOomFallback:
     """Regression tests for GPU OOM process exit and CPU-only retry routing."""

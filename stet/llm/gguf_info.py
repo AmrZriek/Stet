@@ -42,6 +42,7 @@ class GgufModelInfo:
     chat_template: str | None = None
     n_ctx_train: int | None = None
     parameter_count: int | None = None
+    n_layers: int | None = None
     supports_mtp: bool = False
     reasoning_capable: bool = False
     file_size: int = 0
@@ -207,6 +208,17 @@ def read_gguf_info(path) -> GgufModelInfo:
             n_ctx_train = int(kv["llama.context_length"])
         except (ValueError, TypeError):
             pass
+    # Layer count drives VRAM-adaptive GPU offload ({arch}.block_count).
+    n_layers = None
+    for _key in ((f"{architecture}.block_count" if architecture else None), "llama.block_count"):
+        if _key and kv.get(_key) is not None:
+            try:
+                _nl = int(kv[_key])  # type: ignore[arg-type]
+                if _nl > 0:
+                    n_layers = _nl
+                    break
+            except (ValueError, TypeError):
+                continue
 
     # MTP detection from GGUF metadata, tensor table, and companion drafts
     supports_mtp = False
@@ -240,6 +252,7 @@ def read_gguf_info(path) -> GgufModelInfo:
         chat_template=chat_template,
         n_ctx_train=n_ctx_train,
         parameter_count=param_count,
+        n_layers=n_layers,
         supports_mtp=supports_mtp,
         reasoning_capable=_is_reasoning_capable(chat_template),
         file_size=stat.st_size,
@@ -247,7 +260,7 @@ def read_gguf_info(path) -> GgufModelInfo:
     )
     log(
         f"[GGUF] Read metadata from {path_str}: arch={architecture!r} "
-        f"name={name!r} n_ctx={n_ctx_train} params={param_count} mtp={supports_mtp} reasoning={info.reasoning_capable}"
+        f"name={name!r} n_ctx={n_ctx_train} params={param_count} layers={n_layers} mtp={supports_mtp} reasoning={info.reasoning_capable}"
     )
     return info
 

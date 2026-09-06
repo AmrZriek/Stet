@@ -159,6 +159,7 @@ class CorrectionWindow(QWidget):
         self.chat_model = chat_model
         self.cfg = cfg
         self._history = history
+        self._panel_history_recorded_key = None
         self._mode_prompt_override = mode_prompt_override
         self._current_strength = self._normalize_strength(
             current_strength
@@ -212,6 +213,66 @@ class CorrectionWindow(QWidget):
 
         if self.original:
             threading.Thread(target=self._do_correction, daemon=True).start()
+        self._first_paint_logged = False
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self.accept_btn.isEnabled():
+            if not self.chat_input.hasFocus() and not getattr(self, "_edit_text_mode", False):
+                self.accept_btn.setFocus()
+        else:
+            self.setFocus()
+        if not getattr(self, "_first_paint_logged", False):
+            self._first_paint_logged = True
+            try:
+                rx = float(getattr(self, "_hotkey_rx_ts", 0.0) or 0.0)
+                if rx:
+                    import time as _t
+                    log(f"[Window] first_paint in {int((_t.monotonic() - rx) * 1000)}ms")
+            except Exception:
+                pass
+
+    def set_captured_text(self, text: str, strength: str | None = None):
+        """Fill the instant capturing shell once the worker returns text."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if (getattr(self, "original", "") or "") not in ("", text) and getattr(self, "_correction_in_flight", False):
+            return
+        self.original = text
+        self.corrected = text
+        if strength:
+            try:
+                norm = self._normalize_strength(strength)
+                self._current_strength = norm
+                self._initial_strength = norm
+                label_map = {"spelling_only": "Spelling Only", "full_correction": "Full Correction", "rewrite_polish": "Rewrite & Polish"}
+                lbl = label_map.get(norm, norm)
+                idx = self.strength_combo.findText(lbl)
+                if idx >= 0:
+                    self.strength_combo.setCurrentIndex(idx)
+            except Exception:
+                pass
+        try:
+            self._correction_cancelled = False
+            self._cancel_event.clear()
+            self._correction_in_flight = False
+        except Exception:
+            pass
+        is_loading = getattr(self.ac_model, "loading", False) or not self.ac_model.is_loaded()
+        init_text = "Loading model (initializing)…" if is_loading else "Processing…"
+        init_status = "⏳  Loading model (initializing)…" if is_loading else "⏳  Processing…"
+        init_state = "initializing" if is_loading else "processing"
+        try:
+            self.corr_edit.setPlainText(init_text)
+        except Exception:
+            pass
+        try:
+            self._update_status(init_status, init_state)
+        except Exception:
+            pass
+        log(f"[CW] captured fill, chars={len(text)}")
+        threading.Thread(target=self._do_correction, daemon=True).start()
 
     @staticmethod
     def _normalize_strength(value: str | None) -> str:
@@ -567,9 +628,11 @@ class CorrectionWindow(QWidget):
             glay.setSpacing(12)
 
             shortcuts = [
-                ("Esc", "Cancel / Close Overlay"),
+                ("Esc", "Cancel / Discard & Close"),
                 ("Enter", "Accept & Paste (or Send if typing)"),
-                ("Ctrl+Tab", "Cycle Strength"),
+                ("Tab", "Next Change (in diff view)"),
+                ("Ctrl+Tab", "Cycle Correction Mode"),
+                ("E", "Edit Text"),
                 ("?", "Toggle Shortcuts"),
             ]
 
@@ -635,11 +698,11 @@ class CorrectionWindow(QWidget):
                 return
         except (AttributeError, RuntimeError):
             pass
+        self._update_status("⏳  Loading model (initializing)…", "initializing")
         try:
-            self._status_label.setProperty("state", "loading")
-            self._status_label.setText("Model loading...")
-            self._status_label.style().polish(self._status_label)
-        except (AttributeError, RuntimeError):
+            if not getattr(self, "corrected", None) and not getattr(self, "_chat_mode", False):
+                self.corr_edit.setPlainText("Loading model (initializing)…")
+        except Exception:
             pass
 
     def _on_status_streaming(self):
@@ -1016,6 +1079,7 @@ class CorrectionWindow(QWidget):
         cancel_btn = QPushButton("Cancel")
         cancel_btn.setObjectName("cancelBtn")
         cancel_btn.setAccessibleName("Cancel correction")
+        cancel_btn.setAutoDefault(False)
         cancel_btn.clicked.connect(self.close)
         btn_row.addWidget(cancel_btn)
 
@@ -1023,6 +1087,7 @@ class CorrectionWindow(QWidget):
         self.copy_btn.setObjectName("copyBtn")
         self.copy_btn.setAccessibleName("Copy corrected text")
         self.copy_btn.setEnabled(False)
+        self.copy_btn.setAutoDefault(False)
         self.copy_btn.clicked.connect(self._copy)
         btn_row.addWidget(self.copy_btn)
 
@@ -1030,37 +1095,24 @@ class CorrectionWindow(QWidget):
         self.accept_btn.setObjectName("acceptBtn")
         self.accept_btn.setAccessibleName("Accept and paste corrected text")
         self.accept_btn.setEnabled(False)
+        self.accept_btn.setDefault(True)
+        self.accept_btn.setAutoDefault(True)
         self.accept_btn.clicked.connect(self._accept)
         btn_row.addWidget(self.accept_btn)
 
         lay.addWidget(footer)
 
-        # Monospace keyboard navigation helper footer bar
-        shortcut_footer = QWidget()
-        shortcut_footer.setObjectName("shortcutNavFooter")
-        sf_lay = QHBoxLayout(shortcut_footer)
-        sf_lay.setContentsMargins(16, 6, 16, 6)
-        sf_lay.setSpacing(0)
+        # Accessible and logical tab focus order:
+        # corr_edit -> chat_input -> accept_btn -> copy_btn -> cancel_btn -> edit_text_btn -> strength_combo
+        QWidget.setTabOrder(self.corr_edit, self.chat_input)
+        QWidget.setTabOrder(self.chat_input, self.accept_btn)
+        QWidget.setTabOrder(self.accept_btn, self.copy_btn)
+        QWidget.setTabOrder(self.copy_btn, cancel_btn)
+        QWidget.setTabOrder(cancel_btn, self.edit_text_btn)
+        QWidget.setTabOrder(self.edit_text_btn, self.strength_combo)
+        QWidget.setTabOrder(self.strength_combo, help_btn)
+        QWidget.setTabOrder(help_btn, settings_btn)
 
-        self._shortcut_nav_label = QLabel(
-            '<span style="color:#d4a373; font-weight:bold;">[Enter]</span> '
-            '<span style="color:#88898c;">Accept &amp; Replace</span>'
-            '&nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp;'
-            '<span style="color:#d4a373; font-weight:bold;">[Esc]</span> '
-            '<span style="color:#88898c;">Discard &amp; Close</span>'
-            '&nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp;'
-            '<span style="color:#d4a373; font-weight:bold;">[Tab]</span> '
-            '<span style="color:#88898c;">Next Change</span>'
-            '&nbsp;&nbsp;&nbsp;&bull;&nbsp;&nbsp;&nbsp;'
-            '<span style="color:#d4a373; font-weight:bold;">[E]</span> '
-            '<span style="color:#88898c;">Edit Text</span>'
-        )
-        self._shortcut_nav_label.setObjectName("shortcutNavLabel")
-        self._shortcut_nav_label.setTextFormat(Qt.TextFormat.RichText)
-        self._shortcut_nav_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sf_lay.addWidget(self._shortcut_nav_label)
-
-        lay.addWidget(shortcut_footer)
 
     def _chat_transcript_html(self, final_result: str | None = None) -> str:
         parts = [
@@ -1215,10 +1267,12 @@ class CorrectionWindow(QWidget):
         self.copy_btn.setEnabled(False)
         self.send_btn.setEnabled(False)
 
-        # Show processing state
-        self.corr_edit.setPlainText("Processing…")
-        self._update_status("⏳  Processing…", "processing")
-
+        is_loading = getattr(self.ac_model, "loading", False) or not self.ac_model.is_loaded()
+        init_text = "Loading model (initializing)…" if is_loading else "Processing…"
+        init_status = "⏳  Loading model (initializing)…" if is_loading else "⏳  Processing…"
+        init_state = "initializing" if is_loading else "processing"
+        self.corr_edit.setPlainText(init_text)
+        self._update_status(init_status, init_state)
         threading.Thread(target=self._do_correction, daemon=True).start()
 
     # ── templates ─────────────────────────────────────────────────────────
@@ -1356,6 +1410,10 @@ class CorrectionWindow(QWidget):
             wait_start = None
             if getattr(self.ac_model, "loading", False):
                 log("[CW] AC model is currently loading — waiting for readiness")
+                try:
+                    self._status_loading_signal.emit()
+                except (AttributeError, RuntimeError):
+                    pass
                 self._start_load_start_monitor()
                 wait_start = time.monotonic()
                 while getattr(self.ac_model, "loading", False) and (time.monotonic() - wait_start < 120.0):
@@ -1364,6 +1422,10 @@ class CorrectionWindow(QWidget):
                     time.sleep(0.2)
             elif not self.ac_model.is_loaded():
                 log("[CW] AC model not loaded — starting load")
+                try:
+                    self._status_loading_signal.emit()
+                except (AttributeError, RuntimeError):
+                    pass
                 self._start_load_start_monitor()
                 self.ac_model.load_model()
                 wait_start = time.monotonic()
@@ -1604,6 +1666,43 @@ class CorrectionWindow(QWidget):
         self.send_btn.setEnabled(True)
         if hasattr(self, "edit_text_btn") and not getattr(self, "_is_chat_mode", False):
             self.edit_text_btn.setEnabled(True)
+        if not self.chat_input.hasFocus() and not getattr(self, "_edit_text_mode", False):
+            self.accept_btn.setFocus()
+        # Save once here so Cancel/dismiss still leaves a history entry.
+        self._record_panel_history(mode="panel")
+
+    def _record_panel_history(self, mode: str = "panel") -> bool:
+        """Append one history entry for the current original/corrected pair.
+
+        Idempotent per (original, corrected) pair: accept/copy/close all call
+        this, but only the first call per distinct text records. Identical
+        (no-change) pairs are skipped by the store itself.
+        """
+        hist = getattr(self, "_history", None)
+        if hist is None:
+            return False
+        try:
+            if getattr(self, "_edit_text_mode", False) and hasattr(self, "corr_edit"):
+                try:
+                    self.corrected = self.corr_edit.toPlainText()
+                except RuntimeError:
+                    pass
+            original = getattr(self, "original", "") or ""
+            corrected = getattr(self, "corrected", "") or ""
+            if not original or original == corrected:
+                return False
+            key = (original, corrected)
+            if key == getattr(self, "_panel_history_recorded_key", None):
+                return False
+            strength = getattr(self, "_correction_stream_strength", "") or self.cfg.get("streaming_strength", "full_correction")
+            eid = hist.add(mode=mode, strength=strength, original=original, corrected=corrected)
+            if eid is not None:
+                self._panel_history_recorded_key = key
+                return True
+            return False
+        except Exception as e:
+            log(f"[CW] history record error: {e}")
+            return False
 
     def _on_correction_failed(self):
         if getattr(self, "_is_closed", False):
@@ -2468,7 +2567,8 @@ class CorrectionWindow(QWidget):
         self.send_btn.setEnabled(True)
         self.accept_btn.setEnabled(True)
         self.copy_btn.setEnabled(True)
-
+        if not self.chat_input.hasFocus() and not getattr(self, "_edit_text_mode", False):
+            self.accept_btn.setFocus()
     def _replace_chat_stream_region(self, text: str):
         if self._active_ai_bubble is None:
             return
@@ -2490,7 +2590,8 @@ class CorrectionWindow(QWidget):
         self._update_status("⚠  Error", "error")
         self.send_btn.setEnabled(True)
         self.accept_btn.setEnabled(True)
-
+        if not self.chat_input.hasFocus() and not getattr(self, "_edit_text_mode", False):
+            self.accept_btn.setFocus()
     # ── actions ──────────────────────────────────────────────────────────
     def _accept(self):
         is_editing = getattr(self, "_edit_text_mode", False) or (
@@ -2651,16 +2752,8 @@ class CorrectionWindow(QWidget):
         _clipboard_write_text(self.corrected)
         self.copy_btn.setText("Copied")
         if hasattr(self, "_history") and self._history:
-            try:
-                strength = getattr(self, "_correction_stream_strength", "") or self.cfg.get("streaming_strength", "full_correction")
-                self._history.add(
-                    mode="panel_copy",
-                    strength=strength,
-                    original=getattr(self, "original", "") or "",
-                    corrected=self.corrected,
-                )
-            except Exception as e:
-                log(f"[CW] history copy record error: {e}")
+            # Already saved at correction-ready; this only records manual edits.
+            self._record_panel_history(mode="panel_copy")
         QTimer.singleShot(1500, self._restore_copy_label)
 
     def _restore_copy_label(self):
@@ -2748,6 +2841,11 @@ class CorrectionWindow(QWidget):
         self.show()
 
     def closeEvent(self, e):
+        # Dismiss (Cancel/X) still leaves a history entry — record before teardown.
+        try:
+            self._record_panel_history(mode="panel")
+        except Exception:
+            pass
         # Remove the app-level event filter before the C++ object is destroyed
         # to prevent the filter from firing on a deleted widget.
         app = QApplication.instance()

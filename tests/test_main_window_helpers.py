@@ -289,15 +289,9 @@ def test_window_lifecycle_stress(qtbot, monkeypatch):
         assert win._is_closed is True
 
 
-def test_keyboard_navigation_footer_and_jump(qtbot, monkeypatch):
-    """Footer bar displays keyboard cues and _jump_to_next_change cycles diff changes."""
+def test_jump_to_next_change_cycles(qtbot, monkeypatch):
+    """_jump_to_next_change cycles diff changes (footer bar removed; ? overlay is the shortcut source)."""
     win = _make_test_window(qtbot, monkeypatch, "Initial text")
-    assert hasattr(win, "_shortcut_nav_label")
-    text = win._shortcut_nav_label.text()
-    assert "[Enter]" in text
-    assert "[Esc]" in text
-    assert "[Tab]" in text
-    assert "[E]" in text
 
     # Test jump with no diff changes
     assert win._jump_to_next_change() is False

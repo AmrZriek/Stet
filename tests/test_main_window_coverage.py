@@ -1104,3 +1104,33 @@ class TestFontStack:
         html = cw.corr_edit.toHtml()
         # Qt's HTML renderer normalizes font-family quotes/spacing; check for IBM Plex Mono or Consolas
         assert "IBM Plex Mono" in html or "Consolas" in html or "monospace" in html
+
+
+class TestButtonPriorityAndFocus:
+    def test_accept_btn_is_default_and_focused_on_ready(self, qtbot, cfg):
+        from PyQt6.QtWidgets import QPushButton
+        cw = _make_cw(cfg, qtbot)
+        cw.show()
+        qtbot.waitExposed(cw)
+        assert cw.accept_btn.isDefault() is True
+        assert cw.accept_btn.autoDefault() is True
+        cancel_btn = cw.findChild(QPushButton, "cancelBtn")
+        assert cw.copy_btn.autoDefault() is False
+
+        # Before ready, accept_btn is disabled
+        assert not cw.accept_btn.isEnabled()
+
+        # When correction is ready, accept_btn should be enabled and focused
+        cw._on_correction_ready("Corrected text", "Patch")
+        assert cw.accept_btn.isEnabled() is True
+        assert cw.accept_btn.hasFocus() is True
+
+    def test_tab_order_prioritizes_accept_button(self, qtbot, cfg):
+        from PyQt6.QtWidgets import QPushButton
+        cw = _make_cw(cfg, qtbot)
+        cw.show()
+        qtbot.waitExposed(cw)
+        assert cw.nextInFocusChain() is not None
+        cancel_btn = cw.findChild(QPushButton, "cancelBtn")
+        assert cw.accept_btn.nextInFocusChain() is cw.copy_btn
+        assert cw.copy_btn.nextInFocusChain() is cancel_btn

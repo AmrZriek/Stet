@@ -54,9 +54,11 @@ from stet.llm.utils import (
     _find_mtp_draft_model,
     _find_shipped_llama_server,
     _model_size_billions,
+    VRAM_RESERVE_MB,
     estimate_model_vram_mb,
     has_nvidia,
     query_free_vram_mb,
+    suggest_gpu_layers,
 )
 from stet.llm.worker import StreamWorker
 
@@ -470,6 +472,20 @@ class ModelManager(QObject):
 
     def _chat_url(self) -> str:
         return self._base_url() + "/v1/chat/completions"
+    def _is_model_reasoning_capable(self) -> bool:
+        """Check if the active model has reasoning/thinking capabilities.
+
+        Uses cached GGUF metadata from offline file inspection.
+        """
+        model_path = self.cfg.get(self.model_path_key, "")
+        if not model_path:
+            return False
+        try:
+            info = get_gguf_info_cached(model_path)
+            return bool(info is not None and getattr(info, "reasoning_capable", False))
+        except Exception:
+            return False
+
 
     def _correction_system_prompt(
         self,
@@ -760,12 +776,14 @@ class ModelManager(QObject):
 
         if getattr(self, "_dynamic_context_size", None) is not None:
             ctx = max(ctx, self._dynamic_context_size)
-            log(f"[{self.label}] Using dynamic expanded context_size: {ctx}")
-
         # Proactive VRAM pre-check: estimate memory requirements and warn if tight
+        _fit_free_vram: int | None = None
+        _fit_est_vram: int | None = None
+        _fit_cpu_fallback = False
         if gpu_detected and gpu_layers > 0:
             free_vram = query_free_vram_mb()
             est_vram = estimate_model_vram_mb(model_path, ctx)
+            _fit_free_vram, _fit_est_vram = free_vram, est_vram
             if free_vram is not None and est_vram is not None:
                 log(
                     f"[{self.label}] VRAM pre-check: free={free_vram} MB, "
@@ -777,6 +795,34 @@ class ModelManager(QObject):
                         f"({free_vram} MB). GPU offload may be partial or spill to CPU."
                     )
                     log(f"[{self.label}] WARNING: {warn}")
+            # Adaptive offload: clamp layers so weights fit in free VRAM.
+            try:
+                _info_layers = getattr(info, "n_layers", None)
+                _file_bytes: int | None = None
+                try:
+                    _file_bytes = os.path.getsize(model_path)
+                except OSError:
+                    _file_bytes = None
+                _fit_layers, _fit_reason = suggest_gpu_layers(
+                    gpu_layers,
+                    file_size_bytes=_file_bytes,
+                    n_layers=_info_layers,
+                    free_vram_mb=free_vram,
+                    est_vram_mb=est_vram,
+                    reserve_mb=VRAM_RESERVE_MB,
+                )
+                if _fit_reason not in ("full-fit", "vram-unknown", "cpu-requested") or _fit_layers != gpu_layers:
+                    log(
+                        f"[{self.label}] clamped gpu_layers {gpu_layers}->{_fit_layers} "
+                        f"(free={free_vram} MB, est={est_vram} MB, layers_total={_info_layers}, "
+                        f"reserve={VRAM_RESERVE_MB} MB, reason={_fit_reason})"
+                    )
+                    gpu_layers = _fit_layers
+                    if gpu_layers == 0:
+                        _fit_cpu_fallback = True
+                        log(f"[{self.label}] no layers fit in free VRAM — CPU fallback (very slow)")
+            except Exception as _fit_err:
+                log(f"[{self.label}] VRAM fit skipped ({_fit_err}) — using gpu_layers={gpu_layers}")
 
         host = self.cfg.get("server_host", "127.0.0.1")
         port = self.cfg.get("server_port", 8080) + self.port_offset
@@ -901,7 +947,9 @@ class ModelManager(QObject):
         if cache_v:
             cmd.extend(["--cache-type-v", cache_v])
         
-        if mtp_enabled and not disable_mtp and not force_cpu:
+        if mtp_enabled and not disable_mtp and not force_cpu and _fit_cpu_fallback:
+            log(f"[{self.label}] MTP draft disabled (CPU fallback, gpu_layers=0)")
+        if mtp_enabled and not disable_mtp and not force_cpu and not _fit_cpu_fallback:
             draft_model_path = _find_mtp_draft_model(model_path)
             if draft_model_path and Path(draft_model_path).exists():
                 draft_ngl = str(gpu_layers)
@@ -1494,17 +1542,15 @@ class ModelManager(QObject):
         def _inference_call(messages: list[dict], max_tokens: int):
             session = self._get_session()
             req_timeout = 120 if getattr(self, "actual_backend_type", "cpu") in ("cpu", "unknown") else 60
+            is_reasoning = self._is_model_reasoning_capable()
+            eff_max_tokens = max_tokens + (384 if is_reasoning else 0)
             payload = {
                 "messages": messages,
-                "max_tokens": max_tokens,
+                "max_tokens": eff_max_tokens,
                 "temperature": self._get_param("correction_temperature", 0.0),
                 "top_k": self._get_param("correction_top_k", 1),
                 "top_p": self._get_param("correction_top_p", 0.95),
                 "min_p": self._get_param("correction_min_p", 0.0),
-                # Parity with correct_text_patch payload: previously this
-                # test/engine path sent only 4 sampling fields, so seed /
-                # penalties / typical / mirostat silently differed from
-                # production behavior.
                 "seed": self._get_param("seed", -1),
                 "typical_p": self._get_param("typical_p", 1.0),
                 "mirostat": self._get_param("mirostat", 0),
@@ -1514,9 +1560,13 @@ class ModelManager(QObject):
                 "frequency_penalty": self._get_param("frequency_penalty", 0.0),
                 "presence_penalty": self._get_param("presence_penalty", 0.0),
                 "stream": False,
-                "think": False,
-                "reasoning_budget": 0,
-                "chat_template_kwargs": {"enable_thinking": False},
+                "think": is_reasoning,
+                "reasoning_budget": 256 if is_reasoning else 0,
+                "chat_template_kwargs": {"enable_thinking": is_reasoning},
+                "extra_body": {
+                    "chat_template_kwargs": {"enable_thinking": is_reasoning},
+                    "reasoning_budget": 256 if is_reasoning else 0,
+                },
                 "cache_prompt": self._get_param("cache_prompt", True),
             }
             r = session.post(self._chat_url(), json=payload, timeout=req_timeout)
@@ -2340,7 +2390,9 @@ class ModelManager(QObject):
             if self.actual_ctx_size is not None
             else self._get_param("context_size", 12800) // max(1, self._get_param("parallel", 1))
         )
-        max_tokens = min(max(int(est_input_tokens * 3.0) + 128, 512), 2048)
+        is_reasoning = self._is_model_reasoning_capable()
+        headroom = 384 if is_reasoning else 128
+        max_tokens = min(max(int(est_input_tokens * 3.0) + headroom, 512), 2048)
         # Prevent slot overflow by capping max_tokens to the remaining slot budget
         if est_input_tokens + max_tokens > slot_limit:
             max_tokens = max(128, slot_limit - est_input_tokens - 64)
@@ -2383,12 +2435,12 @@ class ModelManager(QObject):
             "frequency_penalty": self._get_param("frequency_penalty", 0.0),
             "presence_penalty": self._get_param("presence_penalty", 0.0),
             "stream": False,
-            "think": False,
-            "reasoning_budget": 0,
-            "chat_template_kwargs": {"enable_thinking": False},
+            "think": is_reasoning,
+            "reasoning_budget": 256 if is_reasoning else 0,
+            "chat_template_kwargs": {"enable_thinking": is_reasoning},
             "extra_body": {
-                "chat_template_kwargs": {"enable_thinking": False},
-                "reasoning_budget": 0,
+                "chat_template_kwargs": {"enable_thinking": is_reasoning},
+                "reasoning_budget": 256 if is_reasoning else 0,
             },
             "cache_prompt": self._get_param("cache_prompt", True),
             "stop": [],

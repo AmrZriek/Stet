@@ -74,12 +74,22 @@ pub fn dispatch_with(hs: &Handshake, req: &Request, agent: &impl CaptureAgent) -
             Ok(json!({"id": req.id, "result": {"status": "pasted", "chars": count}}))
         }
         "command.register_hotkeys" => {
-            let hotkeys = req.params.get("hotkeys").and_then(Value::as_array);
-            let count = hotkeys.map(|h| h.len()).unwrap_or(0);
-            Ok(json!({"id": req.id, "result": {"status": "registered", "count": count}}))
+            let empty = Vec::new();
+            let arr = req.params.get("hotkeys").and_then(Value::as_array).unwrap_or(&empty);
+            // Host-owned registration (Rust default); Python falls back when hosted=false.
+            let (hosted_count, failed, hosted) =
+                crate::hotkey_host::register_from_json(&Value::Array(arr.clone()));
+            Ok(json!({"id": req.id, "result": {
+                "status": "registered",
+                "count": arr.len(),
+                "hosted": hosted,
+                "hosted_count": hosted_count,
+                "failed": failed,
+            }}))
         }
         "command.unregister_hotkeys" => {
-            Ok(json!({"id": req.id, "result": {"status": "unregistered"}}))
+            crate::hotkey_host::clear_host();
+            Ok(json!({"id": req.id, "result": {"status": "unregistered", "hosted": true}}))
         }
         "command.undo_text" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),
         "handshake.hello" => Ok(json!({"id": req.id, "result": {"code": "ok"}})),

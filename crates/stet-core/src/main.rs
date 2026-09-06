@@ -8,7 +8,8 @@
 
 #[cfg(windows)]
 use ffi_skel::pipe::{
-    accept_client, create_pipe_server, disconnect, pipe_name, read_bytes, write_bytes,
+    accept_client, create_pipe_server, disconnect, peek_available, pipe_name, read_bytes,
+    write_bytes,
 };
 #[cfg(windows)]
 use ffi_skel::security::{
@@ -131,6 +132,7 @@ fn build_pipe_security(
 /// Run one client session to Closed/Failed.
 #[cfg(windows)]
 fn serve_one(server: HANDLE, secret: [u8; LAUNCH_SECRET_LEN]) {
+    stet_core::hotkey_host::set_session_handle(Some(server as isize));
     let mut session = Session::new(PipeTransport { handle: server }, secret);
     loop {
         match session.step() {
@@ -146,6 +148,7 @@ fn serve_one(server: HANDLE, secret: [u8; LAUNCH_SECRET_LEN]) {
             }
         }
     }
+    stet_core::hotkey_host::set_session_handle(None);
 }
 
 /// Byte transport over a connected named-pipe server handle.
@@ -180,6 +183,7 @@ impl Transport for PipeTransport {
         if payload.len() > MAX_FRAME_BYTES {
             return Err(IpcError::FrameTooLarge);
         }
+        let _guard = stet_core::hotkey_host::write_lock().lock().unwrap();
         pipe_write_all(self.handle, &(payload.len() as u64).to_be_bytes())?;
         pipe_write_all(self.handle, payload)?;
         Ok(())
@@ -193,27 +197,44 @@ fn pipe_read_exact(handle: HANDLE, buf: &mut [u8]) -> IpcResult<Option<()>> {
     let mut done: usize = 0;
     while done < buf.len() {
         let remain = buf.len() - done;
-        // done < len, so the offset stays in bounds.
-        let chunk = match unsafe { read_bytes(handle, buf.as_mut_ptr().add(done), remain) } {
-            Ok(0) => {
-                if done == 0 {
-                    return Ok(None);
+        // Non-blocking peek: never enter ReadFile when 0 bytes are available.
+        // Calling ReadFile on a synchronous pipe handle when idle locks the
+        // kernel file object and wedges concurrent writes (e.g. event frames
+        // from the hotkey pump thread).
+        match peek_available(handle) {
+            Ok((avail, _)) => {
+                if avail == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
                 }
-                return Err(IpcError::MalformedFrame);
+                let to_read = remain.min(avail as usize);
+                let chunk = match unsafe { read_bytes(handle, buf.as_mut_ptr().add(done), to_read) } {
+                    Ok(0) => {
+                        if done == 0 {
+                            return Ok(None);
+                        }
+                        return Err(IpcError::MalformedFrame);
+                    }
+                    Ok(n) => n.min(to_read),
+                    Err(code) => {
+                        if done == 0 && is_clean_disconnect(code) {
+                            return Ok(None);
+                        }
+                        return Err(IpcError::MalformedFrame);
+                    }
+                };
+                done = done.saturating_add(chunk);
             }
-            Ok(n) => n.min(remain),
             Err(code) => {
                 if done == 0 && is_clean_disconnect(code) {
                     return Ok(None);
                 }
                 return Err(IpcError::MalformedFrame);
             }
-        };
-        done = done.saturating_add(chunk);
+        }
     }
     Ok(Some(()))
 }
-
 /// True for disconnect codes that mean clean EOF at a frame boundary.
 #[cfg(windows)]
 fn is_clean_disconnect(code: DWORD) -> bool {

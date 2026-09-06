@@ -158,6 +158,18 @@ class IpcClient:
         self._event_handlers: Dict[str, List[Callable[[Dict[str, Any]], None]]] = {}
         self._rx_buffer = bytearray()
         self._transport = None
+        # Background reader (server-push events): owns transport reads once
+        # connected. Replies demux by id to waiter Events; id-less method
+        # frames dispatch to event handlers in the reader thread.
+        import threading as _threading
+        self._write_lock = _threading.Lock()
+        self._rx_lock = _threading.Lock()
+        self._reply_lock = _threading.Lock()
+        self._waiters: Dict[int, dict] = {}
+        self._early_replies: Dict[int, Dict[str, Any]] = {}
+        self._reader_thread = None
+        self._reader_stop = _threading.Event()
+        self._reader_dead = False
 
     def connect(self, timeout_ms: int = 500) -> bool:
         """Attempt connection and handshake with the native core daemon."""
@@ -193,15 +205,151 @@ class IpcClient:
                     self.close()
                     return False
                 self.state = ConnectionState.AUTHENTICATED
+                self._start_reader()
                 return True
             except Exception as exc:
                 self.close()
                 return False
         return False
-
     def is_connected(self) -> bool:
         """True if the client has an active authenticated connection."""
-        return self.state in (ConnectionState.READY, ConnectionState.AUTHENTICATED) and self._transport is not None
+        if self._transport is None:
+            return False
+        if self.state not in (ConnectionState.READY, ConnectionState.AUTHENTICATED):
+            return False
+        if getattr(self, "_reader_dead", False):
+            return False
+        return True
+
+    def _start_reader(self) -> None:
+        """Spawn the background read loop (idempotent)."""
+        try:
+            import threading as _threading
+            existing = getattr(self, "_reader_thread", None)
+            if existing is not None and existing.is_alive():
+                return
+            self._reader_stop.clear()
+            t = _threading.Thread(target=self._reader_loop, name="StetIPCReader", daemon=True)
+            self._reader_thread = t
+            t.start()
+        except Exception:
+            pass
+
+    def _reader_loop(self) -> None:
+        """Own all transport reads: replies demux by id, events dispatch.
+
+        Polls (never blocks in read): a thread parked in a blocking pipe
+        read wedges concurrent writes on the same handle, hanging commands.
+        """
+        import time as _time
+        transport = self._transport
+        if transport is None:
+            return
+        use_select = self._fd_is_socket(transport)
+        while not self._reader_stop.is_set():
+            if use_select:
+                # Sockets return partial reads; blocking is safe (tests only —
+                # the daemon transport is always a named pipe in production).
+                try:
+                    chunk = transport.read(4096)
+                except TimeoutError:
+                    continue
+                except Exception:
+                    break
+                if not chunk:
+                    _time.sleep(0.005)
+                    continue
+            else:
+                try:
+                    available = self._peek_available(transport)
+                except Exception:
+                    break
+                if available is None:
+                    # Unknown transport: single blocking read (legacy behavior).
+                    try:
+                        chunk = transport.read(4096)
+                    except TimeoutError:
+                        continue
+                    except Exception:
+                        break
+                    if not chunk:
+                        _time.sleep(0.005)
+                        continue
+                elif available <= 0:
+                    _time.sleep(0.005)
+                    continue
+                else:
+                    try:
+                        chunk = transport.read(min(65536, available))
+                    except TimeoutError:
+                        continue
+                    except Exception:
+                        break
+                    if not chunk:
+                        _time.sleep(0.005)
+                        continue
+            try:
+                with self._rx_lock:
+                    frames = self.handle_incoming_bytes(chunk)
+                self._deliver_replies(frames)
+            except Exception:
+                break
+        self._on_reader_exit()
+
+    @staticmethod
+    def _fd_is_socket(transport) -> bool:
+        try:
+            import select as _select
+            _select.select([transport.fileno()], [], [], 0)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _peek_available(transport):
+        """Pipe bytes ready to read. Raises OSError when disconnected."""
+        try:
+            import ctypes
+            import msvcrt
+            os_handle = msvcrt.get_osfhandle(transport.fileno())
+        except Exception:
+            return None
+        kernel32 = ctypes.windll.kernel32
+        avail_buf = ctypes.c_ulong(0)
+        ok = kernel32.PeekNamedPipe(os_handle, None, 0, None, ctypes.byref(avail_buf), None)
+        if ok == 0:
+            raise OSError("pipe disconnected")
+        return int(avail_buf.value)
+
+    def _deliver_replies(self, frames: List[Dict[str, Any]]) -> None:
+        """Route id-frames to waiters (or stash early arrivals)."""
+        if not frames:
+            return
+        with self._reply_lock:
+            for f in frames:
+                if not isinstance(f, dict) or "id" not in f:
+                    continue
+                waiter = self._waiters.pop(f["id"], None)
+                if waiter is not None:
+                    waiter["result"] = f
+                    waiter["event"].set()
+                else:
+                    self._early_replies[f["id"]] = f
+
+    def _on_reader_exit(self) -> None:
+        """Wake pending waiters; mark dead so callers fail over."""
+        try:
+            with self._reply_lock:
+                for waiter in self._waiters.values():
+                    try:
+                        waiter["result"] = None
+                        waiter["event"].set()
+                    except Exception:
+                        pass
+                self._waiters.clear()
+            self._reader_dead = True
+        except Exception:
+            pass
 
 
     def _match_reply_frame(self, frames: List[Dict[str, Any]], req_id: int | None) -> Dict[str, Any] | None:
@@ -216,6 +364,48 @@ class IpcClient:
                 return f
         return None
 
+    def _reader_alive(self) -> bool:
+        try:
+            t = getattr(self, "_reader_thread", None)
+            return bool(t is not None and t.is_alive())
+        except Exception:
+            return False
+
+    def _wait_for_reply(self, req_id: int, timeout_ms: int) -> Dict[str, Any] | None:
+        """Waiter path: reader owns the transport; demux by id."""
+        import threading as _threading
+        import time as _time
+        with self._reply_lock:
+            if req_id in self._early_replies:
+                return self._early_replies.pop(req_id)
+            if req_id in self._waiters:
+                return None
+            waiter = {"event": _threading.Event(), "result": None}
+            self._waiters[req_id] = waiter
+        deadline = _time.monotonic() + (timeout_ms / 1000.0)
+        while True:
+            remaining = deadline - _time.monotonic()
+            if remaining <= 0:
+                break
+            if waiter["event"].wait(min(0.025, remaining)):
+                break
+        with self._reply_lock:
+            self._waiters.pop(req_id, None)
+            return waiter["result"]
+
+    def _command(self, method: str, params: Dict[str, Any], timeout_ms: int) -> Dict[str, Any] | None:
+        """Send one command (write-atomic) and wait for its full reply."""
+        if not self.is_connected():
+            return None
+        try:
+            with self._write_lock:
+                req_id, frame = self.build_command_frame(method, params)
+                self._transport.write(frame)
+                self._transport.flush()
+            return self._read_reply(req_id, timeout_ms)
+        except Exception:
+            return None
+
     def _read_reply(self, req_id: int | None, timeout_ms: int) -> Dict[str, Any] | None:
         """Wait up to timeout_ms for the reply frame matching req_id."""
         transport = self._transport
@@ -223,6 +413,8 @@ class IpcClient:
             return None
         import time
 
+        if req_id is not None and self._reader_alive():
+            return self._wait_for_reply(req_id, timeout_ms)
         deadline = time.monotonic() + (timeout_ms / 1000.0)
         try:
             frames = self.handle_incoming_bytes(b"")
@@ -289,66 +481,43 @@ class IpcClient:
 
     def capture_selection(self, timeout_ms: int = 1500) -> Dict[str, Any] | None:
         """Request text capture from the active window via the native daemon."""
-        if not self.is_connected():
-            return None
-        try:
-            req_id, frame = self.build_command_frame("command.capture_selection", {"timeout_ms": timeout_ms})
-            self._transport.write(frame)
-            self._transport.flush()
-            reply = self._read_reply(req_id, timeout_ms)
-            if reply is not None and "result" in reply:
+        reply = self._command("command.capture_selection", {"timeout_ms": timeout_ms}, timeout_ms)
+        if reply is not None:
+            if "result" in reply:
                 return reply["result"]
-        except Exception:
-            pass
+            if "error" in reply:
+                return {"error": reply["error"]}
         return None
 
     def paste_text(self, text: str, verify_target: bool = True) -> Dict[str, Any] | None:
         """Request verified target paste via the native daemon."""
-        if not self.is_connected():
-            return None
-        try:
-            req_id, frame = self.build_command_frame("command.paste_text", {"text": text, "verify_target": verify_target})
-            self._transport.write(frame)
-            self._transport.flush()
-            reply = self._read_reply(req_id, 5000)
-            if reply is not None and "result" in reply:
+        reply = self._command("command.paste_text", {"text": text, "verify_target": verify_target}, 2000)
+        if reply is not None:
+            if "result" in reply:
                 return reply["result"]
-        except Exception:
-            pass
+            if "error" in reply:
+                return {"error": reply["error"]}
         return None
-
     def register_hotkeys(self, hotkeys: List[Dict[str, Any]]) -> Dict[str, Any] | None:
         """Register hotkey combinations with the native daemon."""
-        if not self.is_connected():
-            return None
-        try:
-            req_id, frame = self.build_command_frame("command.register_hotkeys", {"hotkeys": hotkeys})
-            self._transport.write(frame)
-            self._transport.flush()
-            reply = self._read_reply(req_id, 2000)
-            if reply is not None and "result" in reply:
-                return reply["result"]
-        except Exception:
-            pass
+        reply = self._command("command.register_hotkeys", {"hotkeys": hotkeys}, 2000)
+        if reply is not None and "result" in reply:
+            return reply["result"]
         return None
 
     def unregister_hotkeys(self) -> Dict[str, Any] | None:
         """Unregister all hotkeys from the native daemon."""
-        if not self.is_connected():
-            return None
-        try:
-            req_id, frame = self.build_command_frame("command.unregister_hotkeys", {})
-            self._transport.write(frame)
-            self._transport.flush()
-            reply = self._read_reply(req_id, 2000)
-            if reply is not None and "result" in reply:
-                return reply["result"]
-        except Exception:
-            pass
+        reply = self._command("command.unregister_hotkeys", {}, 2000)
+        if reply is not None and "result" in reply:
+            return reply["result"]
         return None
 
     def close(self) -> None:
         """Close the active connection and reset state."""
+        try:
+            self._reader_stop.set()
+        except Exception:
+            pass
         if self._transport is not None:
             try:
                 self._transport.close()
@@ -356,6 +525,15 @@ class IpcClient:
                 pass
             self._transport = None
         self.state = ConnectionState.UNCONNECTED
+        try:
+            import threading as _threading
+            t = getattr(self, "_reader_thread", None)
+            if t is not None and t.is_alive() and t is not _threading.current_thread():
+                t.join(timeout=1.0)
+        except Exception:
+            pass
+        finally:
+            self._reader_thread = None
     def build_hello_frame(self) -> bytes:
         """Create the authenticated handshake.hello frame."""
         client_pid = os.getpid()

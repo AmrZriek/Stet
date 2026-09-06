@@ -246,3 +246,45 @@ class TestAuditEnhancements:
 
             assert any("VRAM pre-check: free=2048 MB, estimated_required=8192 MB" in l for l in logs)
             assert any("WARNING: Model estimated memory (8192 MB) exceeds available free VRAM" in l for l in logs)
+
+    def test_gpu_layers_clamped_to_free_vram(self, mock_config, tmp_path):
+        """35B on 5GB free must clamp --n-gpu-layers instead of passing 99 through."""
+        from stet.llm.gguf_info import GgufModelInfo
+        from stet.llm.model_manager import ModelManager
+        cfg = ConfigManager()
+        model_file = tmp_path / "big35b.gguf"
+        model_file.write_bytes(b"GGUF" + b"\x00" * 2000)
+        cfg.set("model_path", str(model_file))
+        cfg.set("gpu_layers", 99)
+        manager = ModelManager(cfg)
+        fake_info = GgufModelInfo(path=str(model_file), architecture="llama", n_layers=60)
+        logs: list = []
+        with (
+            patch("stet.llm.model_manager.has_nvidia", return_value=True),
+            patch("stet.llm.model_manager.query_free_vram_mb", return_value=5003),
+            patch("stet.llm.model_manager.estimate_model_vram_mb", return_value=26789),
+            patch("stet.llm.model_manager.log", side_effect=lambda msg: logs.append(msg)),
+            patch("stet.llm.model_manager.get_gguf_info_cached", return_value=fake_info),
+            patch("os.path.getsize", return_value=20 * 1024**3),
+            patch("stet.llm.model_manager._find_shipped_llama_server", return_value="llama-server.exe"),
+            patch("stet.llm.model_manager.subprocess.Popen") as mock_popen,
+            patch("stet.llm.model_manager.requests.get") as mock_get,
+            patch("stet.llm.model_manager.requests.Session.get") as mock_sess_get,
+        ):
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+            mock_health = MagicMock()
+            mock_health.status_code = 200
+            mock_health.json.return_value = {"status": "ok"}
+            mock_get.return_value = mock_health
+            mock_sess_get.return_value = mock_health
+            with patch.object(manager, "_warmup_prompt_cache"):
+                manager.load_model()
+            assert any("clamped gpu_layers 99->" in l for l in logs), logs
+            server_calls = [c for c in mock_popen.call_args_list if "--n-gpu-layers" in (c[0][0] if c[0] else [])]
+            assert server_calls, [c[0][0][:4] for c in mock_popen.call_args_list]
+            cmd = server_calls[0][0][0]
+            idx = cmd.index("--n-gpu-layers")
+            clamped = int(cmd[idx + 1])
+            assert 0 < clamped < 99, cmd

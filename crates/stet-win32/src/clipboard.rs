@@ -26,6 +26,7 @@ extern "system" {
     fn GetClipboardSequenceNumber() -> DWORD;
     fn SetClipboardData(uFormat: u32, hMem: HANDLE) -> HANDLE;
     fn GetClipboardData(uFormat: u32) -> HANDLE;
+    fn RegisterClipboardFormatW(lpszFormat: *const u16) -> u32;
     fn CountClipboardFormats() -> u32;
 }
 
@@ -124,9 +125,58 @@ pub fn count_clipboard_formats() -> u32 {
     unsafe { CountClipboardFormats() }
 }
 
-/// The suppression flags set per §0f / §2d.
-pub fn suppression_flag_can_upload_cloud() -> u32 {
-    CLIPBRD_EJECT_ALLOW
+/// Registered clipboard formats used to suppress cloud/history sync (§0f/§2d).
+pub fn suppress_history_fmt() -> u32 {
+    static FMT: std::sync::LazyLock<u32> =
+        std::sync::LazyLock::new(|| registered_format("ExcludeClipboardContentFromClipboardHistory"));
+    *FMT
+}
+
+pub fn can_include_history_fmt() -> u32 {
+    static FMT: std::sync::LazyLock<u32> =
+        std::sync::LazyLock::new(|| registered_format("CanIncludeInClipboardHistory"));
+    *FMT
+}
+
+pub fn can_upload_cloud_fmt() -> u32 {
+    static FMT: std::sync::LazyLock<u32> =
+        std::sync::LazyLock::new(|| registered_format("CanUploadToCloudClipboard"));
+    *FMT
+}
+
+fn registered_format(name: &str) -> u32 {
+    // ASCII-only format names; encode as UTF-16 with NUL terminator.
+    let mut wide: Vec<u16> = name.encode_utf16().collect();
+    wide.push(0);
+    unsafe { RegisterClipboardFormatW(wide.as_ptr()) }
+}
+
+/// Set the privacy suppression formats on the currently-open clipboard:
+/// exclude from Win+V history, exclude from clipboard-history sync, and
+/// forbid cloud-clipboard upload (DWORD 0). Mirrors `_clipboard_write_text`
+/// in stet/core/clipboard.py (§0f / Decision 38).
+///
+/// SAFETY: caller must hold the clipboard open on this thread. Failures are
+/// best-effort — a missing suppression format never blocks the text write,
+/// matching the Python implementation.
+pub unsafe fn set_privacy_suppression() {
+    let history = suppress_history_fmt();
+    if history != 0 {
+        SetClipboardData(history, core::ptr::null_mut());
+    }
+    for fmt in [can_include_history_fmt(), can_upload_cloud_fmt()] {
+        if fmt == 0 {
+            continue;
+        }
+        let h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, 4);
+        if h.is_null() {
+            continue;
+        }
+        // GMEM_ZEROINIT already zeroed the DWORD; just hand it over.
+        if SetClipboardData(fmt, h).is_null() {
+            GlobalFree(h);
+        }
+    }
 }
 
 /// Upper bound (UTF-16 units) scanned for the CF_UNICODETEXT NUL terminator.

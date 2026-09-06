@@ -400,3 +400,7 @@ class HistoryWindow(QDialog):
     def _on_toggle_enabled(self, checked):
         self._cfg.set("history_enabled", checked)
         self._history._enabled = checked
+        if checked:
+            # Explicit opt-in is consent: persist it and unblock history.add().
+            self._cfg.set("history_consent_granted", True)
+            self._history.grant_consent()

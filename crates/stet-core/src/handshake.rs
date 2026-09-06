@@ -85,6 +85,19 @@ fn const_verify(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// Parse a standard semver string into numeric `(major, minor, patch)`.
+/// Returns `None` if the string does not have exactly three numeric segments.
+pub fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = s.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
 /// The authenticated connection handshake state machine.
 pub struct Handshake {
     state: ConnectionState,
@@ -132,7 +145,12 @@ impl Handshake {
         if p.protocol_version != SUPPORTED_PROTOCOL_VERSION {
             return Err(IpcError::UpgradeRequired);
         }
-        if CORE_VERSION < p.min_core_version.as_str() {
+        let core_v = parse_semver(CORE_VERSION).unwrap_or((0, 0, 0));
+        let min_v = match parse_semver(&p.min_core_version) {
+            Some(v) => v,
+            None => return Err(IpcError::UpgradeRequired),
+        };
+        if core_v < min_v {
             return Err(IpcError::UpgradeRequired);
         }
         if self.accepted_nonces.contains(&p.client_nonce) {
@@ -255,6 +273,34 @@ mod tests {
         p.auth_proof = compute_auth_proof(&secret(), &p);
         let res = hs.authenticate(&p, &secret());
         assert_eq!(res, Err(IpcError::UpgradeRequired));
+    }
+
+    #[test]
+    fn multi_digit_semver_compares_numerically() {
+        let mut hs = Handshake::new();
+        let mut p = hello();
+        // "1.10.0" would pass a lexicographical "1.5.0" < "1.10.0" check because '5' > '1'.
+        // Numeric comparison must correctly identify that 1.5.0 < 1.10.0 and reject it.
+        p.min_core_version = "1.10.0".to_string();
+        p.auth_proof = compute_auth_proof(&secret(), &p);
+        let res = hs.authenticate(&p, &secret());
+        assert_eq!(res, Err(IpcError::UpgradeRequired));
+
+        // Conversely, a lower minor version must succeed
+        let mut hs2 = Handshake::new();
+        let mut p2 = hello();
+        p2.min_core_version = "1.4.9".to_string();
+        p2.auth_proof = compute_auth_proof(&secret(), &p2);
+        assert!(hs2.authenticate(&p2, &secret()).is_ok());
+    }
+
+    #[test]
+    fn malformed_semver_fails_closed() {
+        let mut hs = Handshake::new();
+        let mut p = hello();
+        p.min_core_version = "not_a_version".to_string();
+        p.auth_proof = compute_auth_proof(&secret(), &p);
+        assert_eq!(hs.authenticate(&p, &secret()), Err(IpcError::UpgradeRequired));
     }
 
     #[test]

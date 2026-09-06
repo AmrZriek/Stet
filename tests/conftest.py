@@ -156,6 +156,13 @@ def block_model_load(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def block_native_daemon(monkeypatch, request):
+    """Prevent StetApp from spawning the background stet-core daemon in unit tests."""
+    if _live_opt_out(request) or "test_native_daemon" in request.node.nodeid:
+        return
+    monkeypatch.setattr("stet.core.native_daemon.launch_daemon", lambda: None)
+
+@pytest.fixture(autouse=True)
 def suppress_first_run_and_update(monkeypatch):
     """Block the 'Welcome to Stet' dialog, auto-update checker, and first-run downloads check.
 
@@ -167,6 +174,7 @@ def suppress_first_run_and_update(monkeypatch):
     monkeypatch.setattr("stet.core.app.StetApp._show_first_run", lambda self: None)
     monkeypatch.setattr("stet.core.app.StetApp._check_app_update", lambda self: None)
     monkeypatch.setattr("stet.core.app.StetApp._check_first_run_downloads", lambda self: None)
+    monkeypatch.setattr("stet.core.app.StetApp._prewarm_ui", lambda self: None)
 
 
 @pytest.fixture(autouse=True)

@@ -55,15 +55,6 @@ QWidget#welcomeHeroCard {
     border: 1px solid #28292c;
     border-radius: 4px;
 }
-QWidget#shortcutNavFooter {
-    background: #18191c;
-    border-top: 1px solid #28292c;
-}
-QLabel#shortcutNavLabel {
-    color: #88898c;
-    font-family: 'IBM Plex Mono', 'Consolas', monospace;
-    font-size: 11px;
-}
 
 /* ── SettingsDialog ─────────────────────────────────────────────────── */
 SettingsDialog {

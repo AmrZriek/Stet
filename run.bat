@@ -2,16 +2,13 @@
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-:: Auto-elevate to admin (required for global hotkeys on Windows)
-net session >nul 2>&1
-if %errorlevel% neq 0 (
-    if /i not "%~1"=="--no-admin" (
+:: Optional administrator elevation (only if --admin flag is passed; global hotkeys do NOT require admin)
+if /i "%~1"=="--admin" (
+    net session >nul 2>&1
+    if !errorlevel! neq 0 (
         echo Requesting administrator privileges...
-        if "%~1"=="" (
-            powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -Verb RunAs" 2>nul
-        ) else (
-            powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs" 2>nul
-        )
+        shift
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs" 2>nul
         if !errorlevel! equ 0 (
             exit /b 0
         )

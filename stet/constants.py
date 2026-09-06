@@ -324,8 +324,13 @@ DEFAULT_CONFIG: dict = {
     # stet-core and routes capture/paste through it, falling back to
     # in-process Win32 on any failure.
     "use_native_daemon": True,
-    # Correction history (local-only record for undo and review)
-    "history_enabled": False,
+    # Global-hotkey host. Rust owns RegisterHotKey by default (window.rs pump
+    # in stet-core); "python" forces the legacy ctypes path. Python is
+    # fallback only — used automatically when the daemon is unavailable.
+    "hotkey_host": "rust",
+    # Correction history (local-only record for undo and review; enabled by default)
+    "history_enabled": True,
+    "history_consent_granted": True,
     "history_limit": 200,
     # Word-count threshold above which selecting more text triggers a
     # large-document warning instead of an automatic correction.

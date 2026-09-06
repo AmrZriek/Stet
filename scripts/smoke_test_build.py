@@ -102,6 +102,10 @@ def run_smoke_test(exe: Path) -> int:
             failures += 1
     if not check((build_dir / "stet" / "ui" / "stet.qss").exists(), "stet/ui/stet.qss stylesheet exists"):
         failures += 1
+    if sys.platform == "win32":
+        for required_win in ["stet-core.exe", "stet-uia-broker.exe"]:
+            if not check((build_dir / required_win).exists(), f"{required_win} exists"):
+                failures += 1
 
     # 3. Verify config.json is valid JSON with blank model paths
     print("\n[3] Release config validation")

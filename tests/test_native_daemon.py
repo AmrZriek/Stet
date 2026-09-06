@@ -391,3 +391,153 @@ class TestConnectEndToEnd:
         client = IpcClient(secret=bytes(range(32)))
         assert client.connect(timeout_ms=500) is True
         assert client.capture_selection(timeout_ms=500) == {"text": "sel"}
+
+
+class _Duplex:
+    """Read/write file pair behind one transport surface."""
+
+    def __init__(self, reader, writer, sock=None):
+        self._r = reader
+        self._w = writer
+        self._sock = sock
+
+    def read(self, n):
+        # BufferedReader.read(n) blocks for exactly n; pipes return partial.
+        return self._r.read1(n)
+    def write(self, data):
+        return self._w.write(data)
+
+    def flush(self):
+        return self._w.flush()
+
+    def fileno(self):
+        return self._r.fileno()
+
+    def close(self):
+        # Shutdown first: unblocks a peer thread stuck in readinto
+        # (closing a buffered file under a pending read deadlocks).
+        try:
+            if self._sock is not None:
+                try:
+                    self._sock.shutdown(2)
+                except Exception:  # noqa: BLE001
+                    pass
+        finally:
+            try:
+                self._r.close()
+            finally:
+                self._w.close()
+
+
+def _loopback_pair():
+    """Return (server_reader, server_writer, client_transport)."""
+    import socket
+    srv, cli = socket.socketpair()
+    cli.settimeout(0.5)
+    return srv.makefile("rb"), srv.makefile("wb"), _Duplex(cli.makefile("rb"), cli.makefile("wb"), cli)
+
+
+def _read_frame(f):
+    prefix = f.read(8)
+    assert len(prefix) == 8
+    import struct as _struct
+    (length,) = _struct.unpack(">Q", prefix)
+    payload = b""
+    while len(payload) < length:
+        chunk = f.read(length - len(payload))
+        assert chunk, "EOF reading frame payload"
+        payload += chunk
+    import json as _json
+    return _json.loads(payload.decode("utf-8"))
+
+def _close3(*files):
+    for f in files:
+        try:
+            f.close()
+        except Exception:  # noqa: BLE001
+            pass
+class TestBackgroundReader:
+    def _serve_one_then_push(self, srv_r, srv_w, req_id, event_first=True):
+        """Fake daemon: read one command, optionally push an event first, reply."""
+        import threading
+
+        def _run():
+            req = _read_frame(srv_r)
+            assert req["id"] == req_id
+            if event_first:
+                srv_w.write(FrameCodec.encode({"method": "event.hotkey_fired", "params": {"mode": "panel"}}))
+                srv_w.flush()
+            srv_w.write(FrameCodec.encode({"id": req_id, "result": {"text": "sel"}}))
+            srv_w.flush()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def test_event_dispatched_while_reply_waiting(self):
+        import time
+        srv_r, srv_w, cli = _loopback_pair()
+        client = IpcClient(secret=bytes(range(32)))
+        _attach(client, cli)
+        got = []
+        client.on_event("event.hotkey_fired", got.append)
+        client._start_reader()
+        try:
+            self._serve_one_then_push(srv_r, srv_w, 1, event_first=True)
+            res = client.capture_selection(timeout_ms=3000)
+            assert res == {"text": "sel"}
+            deadline = time.monotonic() + 2.0
+            while not got and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert got and got[0].get("mode") == "panel"
+        finally:
+            client.close()
+            _close3(srv_r, srv_w)
+
+    def test_concurrent_commands_demux_by_id(self):
+        import threading
+        srv_r, srv_w, cli = _loopback_pair()
+        client = IpcClient(secret=bytes(range(32)))
+        _attach(client, cli)
+        client._start_reader()
+        try:
+            def _serve_two():
+                first = _read_frame(srv_r)
+                second = _read_frame(srv_r)
+                # Reply out of order: second first.
+                srv_w.write(FrameCodec.encode({"id": second["id"], "result": {"text": "two"}}))
+                srv_w.flush()
+                srv_w.write(FrameCodec.encode({"id": first["id"], "result": {"text": "one"}}))
+                srv_w.flush()
+
+            threading.Thread(target=_serve_two, daemon=True).start()
+            results = {}
+            errors = []
+
+            def _cap(key):
+                try:
+                    results[key] = client.capture_selection(timeout_ms=5000)
+                except Exception as e:  # noqa: BLE001
+                    errors.append(e)
+
+            t1 = threading.Thread(target=_cap, args=("a",), daemon=True)
+            t2 = threading.Thread(target=_cap, args=("b",), daemon=True)
+            t1.start()
+            t2.start()
+            t1.join(timeout=10)
+            t2.join(timeout=10)
+            assert not errors
+            assert sorted(r["text"] for r in results.values()) == ["one", "two"]
+        finally:
+            client.close()
+            _close3(srv_r, srv_w)
+
+    def test_early_reply_returned_without_wait(self):
+        srv_r, srv_w, cli = _loopback_pair()
+        client = IpcClient(secret=bytes(range(32)))
+        _attach(client, cli)
+        client._start_reader()
+        try:
+            client._deliver_replies([{"id": 41, "result": {"text": "early"}}])
+            assert client._wait_for_reply(41, 500) == {"id": 41, "result": {"text": "early"}}
+        finally:
+            client.close()
+            _close3(srv_r, srv_w)

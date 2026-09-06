@@ -22,6 +22,7 @@ pub mod dispatcher;
 pub mod focus_target;
 pub mod frame;
 pub mod hotkey;
+pub mod hotkey_host;
 pub mod handshake;
 pub mod launcher;
 pub mod input_class;

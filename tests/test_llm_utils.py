@@ -315,3 +315,43 @@ class TestVramHelpers:
         assert est is not None
         assert est > 100  # Should include weights + overhead
 
+
+class TestSuggestGpuLayers:
+    """VRAM-adaptive offload: clamp requested layers to what fits."""
+
+    def test_cpu_requested_stays_zero(self):
+        from stet.llm.utils import suggest_gpu_layers
+        assert suggest_gpu_layers(0, free_vram_mb=8000) == (0, "cpu-requested")
+
+    def test_unknown_vram_keeps_requested(self):
+        from stet.llm.utils import suggest_gpu_layers
+        layers, reason = suggest_gpu_layers(99, file_size_bytes=20 * 1024**3, n_layers=60, free_vram_mb=None)
+        assert (layers, reason) == (99, "vram-unknown")
+
+    def test_full_fit_when_room(self):
+        from stet.llm.utils import suggest_gpu_layers
+        # 8GB file over 80 layers ≈ 102MB/layer; 12GB free minus reserve fits all 80.
+        layers, reason = suggest_gpu_layers(80, file_size_bytes=8 * 1024**3, n_layers=80, free_vram_mb=12000)
+        assert (layers, reason) == (80, "full-fit")
+
+    def test_clamped_fit_on_tight_vram(self):
+        from stet.llm.utils import suggest_gpu_layers
+        # 20GB file over 60 layers ≈ 341MB/layer; 5003MB free − 768 reserve ≈ 12 layers.
+        layers, reason = suggest_gpu_layers(
+            99, file_size_bytes=20 * 1024**3, n_layers=60, free_vram_mb=5003,
+            est_vram_mb=26789,
+        )
+        assert reason == "clamped-fit"
+        assert 10 <= layers <= 14
+
+    def test_cpu_fallback_when_nothing_fits(self):
+        from stet.llm.utils import suggest_gpu_layers
+        layers, reason = suggest_gpu_layers(99, file_size_bytes=20 * 1024**3, n_layers=60, free_vram_mb=500)
+        assert (layers, reason) == (0, "cpu-fallback")
+
+    def test_est_ratio_fallback_without_layer_meta(self):
+        from stet.llm.utils import suggest_gpu_layers
+        layers, reason = suggest_gpu_layers(99, free_vram_mb=5003, est_vram_mb=26789)
+        assert reason == "est-ratio-fallback"
+        assert 0 < layers < 99
+

@@ -767,6 +767,10 @@ RELEASE_CONFIG = {
     "streaming_strength": "full_correction",
     "custom_templates": [],
     "chat_mode": "conversation",
+    # History (enabled by default)
+    "history_enabled": True,
+    "history_consent_granted": True,
+    "history_limit": 200,
     # correction_modes intentionally omitted — ConfigManager populates
     # the full correction_modes list from DEFAULT_CONFIG at runtime.
     # Including the multi-paragraph prompts here would bloat config.json
@@ -1515,6 +1519,13 @@ open "$SCRIPT_DIR/Stet.app"
         if PLATFORM == "macOS":
             self._package_macos()
             return
+        if PLATFORM == "Windows":
+            daemon_exe = self.portable_dir / "stet-core.exe"
+            if not daemon_exe.exists():
+                raise RuntimeError(
+                    f"Fatal: Required native daemon binary {daemon_exe} is missing from portable directory. "
+                    "Cargo build of crates/ must succeed before packaging."
+                )
         banner(f"{self._step('package')} — Package portable ZIP")
         zip_path = DIST / "stet_portable.zip"
         print("  Creating stet_portable.zip from portable directory...")

@@ -39,8 +39,10 @@ class InputCode(str, Enum):
     UPGRADE_REQUIRED = "upgrade_required"
     BUSY_DROPPED = "busy_dropped"
     ABORTED_INTEGRITY = "aborted_integrity"
-    SELECTION_CHANGED = "selection_changed"
-    SELECTION_UNVERIFIABLE = "selection_unverifiable"
+    ABORTED_SELECTION_CHANGED = "aborted_selection_changed"
+    ABORTED_SELECTION_UNVERIFIABLE = "aborted_selection_unverifiable"
+    SELECTION_CHANGED = "aborted_selection_changed"
+    SELECTION_UNVERIFIABLE = "aborted_selection_unverifiable"
     PASTE_UNVERIFIED = "paste_unverified"
 
 
