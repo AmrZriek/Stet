@@ -46,13 +46,13 @@ class TestBootLog:
 
 
 class TestLogFilePath:
-    """The boot log file lives in the project root."""
+    """The boot log file lives in the logs directory."""
 
-    def test_log_file_is_in_project_root(self):
-        # _LOG_FILE should be <project_root>/app_debug.log
+    def test_log_file_is_in_logs_dir(self):
+        # _LOG_FILE should be <project_root>/logs/app_debug.log
         assert _LOG_FILE.name == "app_debug.log"
-        assert _LOG_FILE.parent.name.startswith("Stet")
-        assert (_LOG_FILE.parent / "stet").is_dir()
+        assert _LOG_FILE.parent.name == "logs"
+        assert (_LOG_FILE.parent.parent / "stet").is_dir()
 
 
 # ── Single-instance lock ─────────────────────────────────────────────────
@@ -139,7 +139,6 @@ class TestMainFunction:
 
     @pytest.fixture(autouse=True)
     def preserve_excepthooks(self, monkeypatch):
-        from stet import main as main_module
         monkeypatch.setattr("stet.ui.utils.get_app_icon", lambda: MagicMock(isNull=lambda: True))
         orig_sys = sys.excepthook
         orig_thread = getattr(threading, "excepthook", None)

@@ -207,7 +207,7 @@ class IpcClient:
                 self.state = ConnectionState.AUTHENTICATED
                 self._start_reader()
                 return True
-            except Exception as exc:
+            except Exception:
                 self.close()
                 return False
         return False

@@ -5,10 +5,13 @@ strength-appropriate responses, allowing tests to verify strength routing
 without a real model.
 """
 
+import sys
+
+sys.dont_write_bytecode = True
+
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 

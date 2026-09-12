@@ -11,7 +11,6 @@ fn main() {
             if let Ok(serialized) = serde_json::to_string(&resp) {
                 let _ = writeln!(io::stdout(), "{}", serialized);
                 let _ = io::stdout().flush();
-                return;
             }
         }
     }

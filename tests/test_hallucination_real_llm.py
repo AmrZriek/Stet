@@ -27,20 +27,15 @@ class MockConfig:
         return default
 
 
-def wait_for_model(timeout=30):
-    """Wait for model to be ready."""
+def is_model_running():
+    """Check if model server is running."""
     import requests
 
-    start = time.time()
-    while time.time() - start < timeout:
-        try:
-            r = requests.get("http://localhost:8080/health", timeout=1)
-            if r.status_code == 200:
-                return True
-        except Exception:
-            pass
-        time.sleep(1)
-    return False
+    try:
+        r = requests.get("http://localhost:8080/health", timeout=0.1)
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 # Test cases designed to span the drift spectrum
@@ -165,7 +160,7 @@ REAL_TEST_CASES = [
 @pytest.fixture(scope="module")
 def model():
     """Ensure model is running."""
-    if not wait_for_model(timeout=5):
+    if not is_model_running():
         pytest.skip("Model not running - start llama-server first")
 
     mgr = ModelManager(MockConfig())

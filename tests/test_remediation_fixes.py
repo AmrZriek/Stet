@@ -172,17 +172,15 @@ def test_stream_worker_reasoning_content_fallback(qtbot):
     assert done_received == ["Corrected stream"]
 
 
-def test_stream_worker_reasoning_tokens_emission(qtbot):
-    worker = StreamWorker("http://fake-url", {"messages": [], "think": True})
+def test_stream_worker_reasoning_fallback(qtbot):
+    """When model puts output into reasoning_content, worker extracts it into done."""
+    worker = StreamWorker("http://fake-url", {"messages": []})
     fake_resp = _FakeChunkedResponse([
-        {"choices": [{"delta": {"reasoning_content": "Thought 1 "}}]},
-        {"choices": [{"delta": {"content": "Final content"}}]},
+        {"choices": [{"delta": {"reasoning_content": "<think>Thinking...</think>Final content"}}]},
     ])
 
-    received_reasoning = []
     received_content = []
     done_received = []
-    worker.reasoning_token.connect(received_reasoning.append)
     worker.token.connect(received_content.append)
     worker.done.connect(done_received.append)
 
@@ -191,8 +189,6 @@ def test_stream_worker_reasoning_tokens_emission(qtbot):
         worker.run()
 
     assert done_received == ["Final content"]
-    assert "".join(received_reasoning) == "Thought 1 "
-    assert "".join(received_content) == "Final content"
 
 
 # ── 4. ModelManager Lifecycle & Concurrency Tests ────────────────────────────

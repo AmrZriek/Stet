@@ -155,9 +155,6 @@ def _refresh_model_info_row(dialog):
     # Guard with getattr: an early setText caller may invoke this before the
     # info widgets exist — skip silently instead of crashing the dialog.
     model_info_lbl = getattr(dialog, "model_info_lbl", None)
-    ctx_spin = getattr(dialog, "ctx_spin", None)
-    ctx_auto_cb = getattr(dialog, "ctx_auto_cb", None)
-    ctx_effective_lbl = getattr(dialog, "ctx_effective_lbl", None)
     if model_info_lbl is None:
         return
 
@@ -176,7 +173,7 @@ def _refresh_model_info_row(dialog):
         arch = info.architecture or "unknown"
         trained_ctx = str(info.n_ctx_train) if info.n_ctx_train else "unknown"
         template = "yes" if info.chat_template else "no"
-        reasoning = "yes" if info.reasoning_capable else "no"
+        reasoning = "yes (thinking disabled)" if info.reasoning_capable else "no"
         model_info_lbl.setText(
             f"Model: {name} · arch: {arch} · trained ctx: {trained_ctx} · "
             f"template: {template} · reasoning: {reasoning}"
@@ -390,7 +387,7 @@ def _apply_tooltips(dialog, prefix: str = ""):
         "kv_cache_k_combo": "KV cache quantization for keys. Default: q8_0.",
         "kv_cache_v_combo": "KV cache quantization for values. Default: q8_0.",
         "parallel_spin": "Parallel request slots. Default: 1. Set to 1 for full model context.",
-        "flash_attn_cb": "Faster attention computation — requires GPU support. Default: on (when GPU available).",
+        "flash_attn_cb": "Faster attention computation — requires GPU support. Default: auto (when GPU available) / off.",
         "batch_spin": "How many tokens are processed together. Default: 512.",
         "rope_base_spin": "RoPE base frequency. Default: Auto (0.0). Only change for specific models.",
         "rope_scale_spin": "RoPE scale factor. Default: Auto (0.0). Only change for specific models.",

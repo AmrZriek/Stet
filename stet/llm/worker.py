@@ -7,15 +7,16 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 class StreamWorker(QThread):
     token = pyqtSignal(str)
-    reasoning_token = pyqtSignal(str)
     done = pyqtSignal(str)
     error = pyqtSignal(str)
 
-    def __init__(self, url: str, payload: dict, watchdog_timeout: float = 20.0):
+    def __init__(self, url: str, payload: dict, watchdog_timeout: float = 20.0,
+                 request_timeout: float = 120.0):
         super().__init__()
         self.url = url
         self.payload = {**payload, "stream": True}
         self.watchdog_timeout = watchdog_timeout
+        self.request_timeout = request_timeout
         self._stop = False
         self._timeout_aborted = False
         self._watchdog: threading.Timer | None = None
@@ -73,7 +74,7 @@ class StreamWorker(QThread):
             self._watchdog.start()
         try:
             with self._session.post(
-                self.url, json=self.payload, stream=True, timeout=120
+                self.url, json=self.payload, stream=True, timeout=self.request_timeout
             ) as r:
                 r.raise_for_status()
                 for raw in r.iter_lines():
@@ -97,8 +98,6 @@ class StreamWorker(QThread):
                             self._kick_watchdog(30.0)
                         if rt:
                             reasoning_full += rt
-                            if self.payload.get("think", False) and not self._stop and not self._timeout_aborted:
-                                self.reasoning_token.emit(rt)
                         if t:
                             full += t
                             if not self._stop and not self._timeout_aborted:

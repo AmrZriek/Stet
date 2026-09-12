@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import sys
 from unittest.mock import MagicMock
 import pytest
@@ -255,3 +256,16 @@ class TestResetDriftedThresholdsHelper:
         assert _reset_drifted_thresholds(None, []) is False
         assert _reset_drifted_thresholds([], None) is False
         assert _reset_drifted_thresholds([], []) is False
+
+    def test_config_backup_on_corruption(self, tmp_path: Path, monkeypatch):
+        from stet.core import config as cfg_module
+
+        corrupt_file = tmp_path / "config.json"
+        corrupt_file.write_text("{\"broken\": [1, 2,", encoding="utf-8")
+        monkeypatch.setattr(cfg_module, "CONFIG_FILE", corrupt_file)
+        cfg = cfg_module.ConfigManager()
+        assert cfg is not None
+        backup_file = tmp_path / "config.json.corrupt.bak"
+        assert backup_file.exists()
+        assert backup_file.read_text(encoding="utf-8") == "{\"broken\": [1, 2,"
+

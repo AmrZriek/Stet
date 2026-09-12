@@ -40,7 +40,6 @@ from stet.core.clipboard import (
     VK_C,
     VK_V,
     _clipboard_read_text,
-    _clipboard_sequence_number,
     _clipboard_write_text,
     _send_ctrl_chord,
     _send_ctrl_shift_chord,
@@ -1075,18 +1074,20 @@ class StetApp(QObject):
         try:
             hwnd = getattr(self, "_last_active_app_hwnd", None)
             if hwnd:
-                try:
-                    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
-                    allow_fn = getattr(user32, "AllowSetForegroundWindow", None)
-                    if allow_fn:
-                        allow_fn(os.getpid())
-                except Exception:
-                    pass
-                try:
-                    ctypes.windll.user32.SetForegroundWindow(hwnd)
-                    time.sleep(0.15)
-                except Exception:
-                    pass
+                user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+                fg = user32.GetForegroundWindow() if user32 and hasattr(user32, "GetForegroundWindow") else 0
+                if fg != hwnd:
+                    try:
+                        allow_fn = getattr(user32, "AllowSetForegroundWindow", None)
+                        if allow_fn:
+                            allow_fn(os.getpid())
+                    except Exception:
+                        pass
+                    try:
+                        user32.SetForegroundWindow(hwnd)
+                        time.sleep(0.15)
+                    except Exception:
+                        pass
             return not self._foreground_is_self()
         except Exception:
             return False
@@ -1465,7 +1466,6 @@ class StetApp(QObject):
         to_unregister, to_register, unchanged = compute_hotkey_diff(registered, set(desired.keys()))
 
         # Rollback bookkeeping for a failed registration cycle.
-        rolled_back: list[str] = []
         newly_registered: list[str] = []
 
         # ── Step 1: unregister ONLY combos no longer desired ──────────────
@@ -1753,9 +1753,9 @@ class StetApp(QObject):
     # so we can poll aggressively without paying meaningful CPU cost.
     # Worst-case wait: GRACE + MAX_POLLS * INTERVAL.
     _CLIPBOARD_POLL_INTERVAL = 0.015   # 15 ms between polls
-    _CLIPBOARD_MAX_POLLS = 12          # 12 attempts
+    _CLIPBOARD_MAX_POLLS = 40          # 40 attempts = 600 ms (total worst-case 650 ms)
     _CLIPBOARD_INITIAL_GRACE = 0.05    # 50 ms grace before first poll
-    # 50 ms + 12 * 15 ms = 230 ms worst case (was 680 ms; ~65% reduction)
+    # 50 ms + 40 * 15 ms = 650 ms worst case (was 230 ms, which timed out on modern web/Electron apps)
 
     def _bump_path(self, group: str, key: str) -> None:
         try:
@@ -1842,8 +1842,6 @@ class StetApp(QObject):
                 log(f"[Capture] Native daemon error ({e}), falling back to Win32 in-process")
 
         # Try UIA direct text capture first (bypassing the clipboard)
-        from stet.core.clipboard import _read_selection_uia
-
         # UIA calls are COM-based and can deadlock if the target app's UI
         # thread is frozen. Use a daemon worker and a bounded join; executor
         # shutdown waits for workers and would nullify the timeout.
@@ -2304,7 +2302,7 @@ class StetApp(QObject):
                 return
         except Exception:
             pass
-        self._show_window("", strength)
+        self._show_window("", strength, activate=False)
         try:
             win = self._window
             if win is not None:
@@ -2355,6 +2353,8 @@ class StetApp(QObject):
                 alive = False
             if alive and not (getattr(win, "original", "") or ""):
                 try:
+                    if WINDOWS and hasattr(win, "setAttribute"):
+                        win.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
                     win.set_captured_text(text, strength)
                     self._activate_window_to_foreground(win)
                     return
@@ -2396,7 +2396,7 @@ class StetApp(QObject):
         except Exception as e:
             log(f"[UI] Pre-warming failed (non-fatal): {e}")
 
-    def _show_window(self, text: str, initial_strength: str = "full_correction"):
+    def _show_window(self, text: str, initial_strength: str = "full_correction", activate: bool = True):
         self._window_opening = False
         log(f"[Window] _show_window called, text length={len(text)}")
         try:
@@ -2446,7 +2446,19 @@ class StetApp(QObject):
                 win._hotkey_rx_ts = getattr(self, "_hotkey_rx_ts", 0.0) or time.monotonic()
             except Exception:
                 pass
-            self._activate_window_to_foreground(self._window)
+            if activate:
+                if WINDOWS and hasattr(self._window, "setAttribute"):
+                    self._window.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+                self._activate_window_to_foreground(self._window)
+            else:
+                if WINDOWS and hasattr(win, "setAttribute"):
+                    win.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+                win.show()
+                if WINDOWS:
+                    hwnd = int(win.winId()) if hasattr(win, "winId") else 0
+                    user32 = getattr(getattr(ctypes, "windll", None), "user32", None)
+                    if hwnd and user32 and hasattr(user32, "ShowWindow"):
+                        user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
             log("[Window] Window shown successfully")
         except Exception as e:
             log(f"[Window] CRASH in _show_window: {e}\n{traceback.format_exc()}")
@@ -2458,6 +2470,8 @@ class StetApp(QObject):
         if target is None:
             return
         try:
+            if WINDOWS and hasattr(target, "setAttribute"):
+                target.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
             if hasattr(target, "show"):
                 target.show()
             if hasattr(target, "raise_"):
@@ -2572,7 +2586,6 @@ class StetApp(QObject):
             except Exception as e:
                 log(f"[Paste] Native daemon error ({e}), falling back to Win32 in-process")
         self._bump_path("paste", "win32")
-        seq_before = _clipboard_sequence_number()
         # 0b tiered matching (hard signals): abort the paste if the foreground
         # target no longer matches the compound identity captured at hotkey
         # trigger — this prevents pasting corrected text into the WRONG window

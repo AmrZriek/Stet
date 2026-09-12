@@ -170,7 +170,11 @@ class TestAuditEnhancements:
             assert call_args[ctx_idx + 1] == "4096"
 
     def test_load_model_flash_attn_fallback(self, mock_config, tmp_path):
-        """Verify flash-attention failure retries with disable_flash_attn=True."""
+        """Verify flash-attention failure retries with disable_flash_attn=True.
+
+        Default is "auto" (llama.cpp decides); a startup failure on auto falls
+        back to an explicit "off" retry.
+        """
         cfg = ConfigManager()
         model_file = tmp_path / "model.gguf"
         model_file.write_bytes(b"GGUF" + b"\x00" * 2000)
@@ -186,7 +190,7 @@ class TestAuditEnhancements:
         def mock_popen_impl(cmd, **kwargs):
             flash_val = cmd[cmd.index("--flash-attn") + 1]
             attempts.append(flash_val)
-            if flash_val == "on":
+            if flash_val == "auto":
                 raise RuntimeError("Flash attention kernel not supported")
             mock_proc = MagicMock()
             mock_proc.poll.return_value = None
@@ -208,7 +212,7 @@ class TestAuditEnhancements:
             with patch.object(manager, "_warmup_prompt_cache"):
                 success = manager.load_model()
                 assert success is True
-                assert attempts == ["on", "off"]
+                assert attempts == ["auto", "off"]
 
     def test_vram_precheck_warning_logging(self, mock_config, tmp_path):
         """Verify VRAM pre-check logs warning when estimated need exceeds free VRAM."""
@@ -244,8 +248,8 @@ class TestAuditEnhancements:
             with patch.object(manager, "_warmup_prompt_cache"):
                 manager.load_model()
 
-            assert any("VRAM pre-check: free=2048 MB, estimated_required=8192 MB" in l for l in logs)
-            assert any("WARNING: Model estimated memory (8192 MB) exceeds available free VRAM" in l for l in logs)
+            assert any("VRAM pre-check: free=2048 MB, estimated_required=8192 MB" in line for line in logs)
+            assert any("WARNING: Model estimated memory (8192 MB) exceeds available free VRAM" in line for line in logs)
 
     def test_gpu_layers_clamped_to_free_vram(self, mock_config, tmp_path):
         """35B on 5GB free must clamp --n-gpu-layers instead of passing 99 through."""
@@ -281,7 +285,7 @@ class TestAuditEnhancements:
             mock_sess_get.return_value = mock_health
             with patch.object(manager, "_warmup_prompt_cache"):
                 manager.load_model()
-            assert any("clamped gpu_layers 99->" in l for l in logs), logs
+            assert any("clamped gpu_layers 99->" in line for line in logs), logs
             server_calls = [c for c in mock_popen.call_args_list if "--n-gpu-layers" in (c[0][0] if c[0] else [])]
             assert server_calls, [c[0][0][:4] for c in mock_popen.call_args_list]
             cmd = server_calls[0][0][0]

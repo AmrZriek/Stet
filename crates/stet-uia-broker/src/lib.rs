@@ -9,6 +9,7 @@ mod win_uia {
     use super::*;
 
     #[repr(C)]
+    #[allow(clippy::upper_case_acronyms)]
     struct GUID {
         data1: u32,
         data2: u16,
@@ -16,6 +17,7 @@ mod win_uia {
         data4: [u8; 8],
     }
 
+    #[allow(non_upper_case_globals)]
     const CLSID_CUIAutomation: GUID = GUID {
         data1: 0xff48dba4,
         data2: 0xbf32,
@@ -23,6 +25,7 @@ mod win_uia {
         data4: [0xa6, 0x1e, 0xf3, 0xb2, 0xf1, 0x66, 0xa5, 0x37],
     };
 
+    #[allow(non_upper_case_globals)]
     const IID_IUIAutomation: GUID = GUID {
         data1: 0x30cbe57d,
         data2: 0xd9d0,
@@ -137,7 +140,17 @@ mod win_uia {
 
             // Step 3: Get current pattern (UIA_TextPatternId = 10014). Slot 16 in IUIAutomationElement
             let mut p_pattern: *mut core::ffi::c_void = core::ptr::null_mut();
-            let hr = call_v2_pattern(p_elem, 16, 10014, &mut p_pattern as *mut _ as *mut core::ffi::c_void);
+            let mut hr = call_v2_pattern(p_elem, 16, 10014, &mut p_pattern as *mut _ as *mut core::ffi::c_void);
+            if (hr < 0 || p_pattern.is_null()) && req.window_handle != 0 {
+                // Top-level window handle rarely implements TextPattern directly;
+                // fallback to the focused element within the active window.
+                release(p_elem);
+                p_elem = core::ptr::null_mut();
+                let fhr = call_v1(p_uia, 8, &mut p_elem as *mut _ as *mut core::ffi::c_void);
+                if fhr >= 0 && !p_elem.is_null() {
+                    hr = call_v2_pattern(p_elem, 16, 10014, &mut p_pattern as *mut _ as *mut core::ffi::c_void);
+                }
+            }
             if hr < 0 || p_pattern.is_null() {
                 release(p_elem);
                 release(p_uia);

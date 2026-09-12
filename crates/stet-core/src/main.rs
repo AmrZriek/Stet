@@ -161,20 +161,16 @@ struct PipeTransport {
 impl Transport for PipeTransport {
     fn read_frame(&mut self) -> IpcResult<Option<Frame>> {
         let mut prefix = [0u8; 8];
-        match pipe_read_exact(self.handle, &mut prefix)? {
-            None => return Ok(None),
-            Some(()) => {}
+        if pipe_read_exact(self.handle, &mut prefix)?.is_none() {
+            return Ok(None);
         }
         let len = u64::from_be_bytes(prefix) as usize;
         if len > MAX_FRAME_BYTES {
             return Err(IpcError::FrameTooLarge);
         }
         let mut payload = vec![0u8; len];
-        if !payload.is_empty() {
-            match pipe_read_exact(self.handle, &mut payload)? {
-                None => return Err(IpcError::MalformedFrame),
-                Some(()) => {}
-            }
+        if !payload.is_empty() && pipe_read_exact(self.handle, &mut payload)?.is_none() {
+            return Err(IpcError::MalformedFrame);
         }
         Ok(Some(Frame { payload }))
     }

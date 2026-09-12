@@ -51,10 +51,10 @@ fn vk_for_key(key: &str) -> Option<u16> {
     // a..z, 0..9
     if k.len() == 1 {
         let c = k.chars().next().unwrap();
-        if ('a'..='z').contains(&c) {
+        if c.is_ascii_lowercase() {
             return Some(0x41 + (c as u16 - 'a' as u16));
         }
-        if ('0'..='9').contains(&c) {
+        if c.is_ascii_digit() {
             return Some(0x30 + (c as u16 - '0' as u16));
         }
     }
@@ -100,9 +100,7 @@ pub fn parse_shortcut(shortcut: &str) -> Option<(u16, u16)> {
                     return None; // two keys: not a hotkey
                 }
                 vk = vk_for_key(&part);
-                if vk.is_none() {
-                    return None;
-                }
+                vk?;
             }
         }
     }
@@ -265,7 +263,9 @@ mod live {
             Err(_) => return false,
         };
         unsafe {
+            #[allow(clippy::upper_case_acronyms)]
             type HANDLE = *mut core::ffi::c_void;
+            #[allow(clippy::upper_case_acronyms)]
             type DWORD = u32;
             let mut written: DWORD = 0;
             let mut off = 0usize;
@@ -536,7 +536,7 @@ pub fn register_from_json(hotkeys: &Value) -> (usize, Vec<String>, bool) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let n = hosted_count();
-        return (n, failed, n > 0);
+        (n, failed, n > 0)
     }
 }
 

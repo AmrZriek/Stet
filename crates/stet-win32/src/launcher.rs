@@ -162,7 +162,7 @@ pub unsafe fn update_handle_list(
         0,
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         handles.as_ptr() as *mut core::ffi::c_void,
-        handles.len() * core::mem::size_of::<HANDLE>(),
+        core::mem::size_of_val(handles),
         core::ptr::null_mut(),
         core::ptr::null_mut(),
     );

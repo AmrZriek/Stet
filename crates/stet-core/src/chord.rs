@@ -29,6 +29,12 @@ pub struct ChordVerifier {
     alternate_used: bool,
 }
 
+impl Default for ChordVerifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ChordVerifier {
     pub fn new() -> Self {
         ChordVerifier { alternate_used: false }

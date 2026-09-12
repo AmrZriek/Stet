@@ -388,6 +388,10 @@ def test_carriage_return_preservation(manager):
 
         mock_post.side_effect = mock_post_side_effect
 
+        result, _ = manager.correct_text_patch(input_text)
+        assert "\r\n" in result
+        assert result == "Line 1.\r\nLine 2.\r\nLine 3."
+
 
 
 def test_gpu_detected_via_props_when_log_has_no_banners(monkeypatch, tmp_path):

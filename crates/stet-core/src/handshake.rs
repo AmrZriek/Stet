@@ -107,6 +107,12 @@ pub struct Handshake {
     client_pid: u32,
 }
 
+impl Default for Handshake {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Handshake {
     pub fn new() -> Self {
         Handshake {

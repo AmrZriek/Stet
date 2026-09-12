@@ -4,6 +4,11 @@ import subprocess
 
 from stet.constants import LLAMA_CPP_DIR, MACOS, SCRIPT_DIR, SERVER_EXE, WINDOWS
 
+try:
+    from stet.llm.gguf_info import get_gguf_info_cached
+except ImportError:  # gguf stack unavailable — sniff fallback below covers it
+    get_gguf_info_cached = None  # type: ignore[assignment]
+
 
 def _model_size_billions(model_path: str) -> float | None:
     """Parse the parameter count in billions from a GGUF filename.
@@ -88,6 +93,13 @@ def _supports_mtp(model_path: str) -> bool:
     try:
         if os.path.getsize(model_path) < 1024:
             return False
+        if get_gguf_info_cached is not None:
+            try:
+                cached = get_gguf_info_cached(model_path)
+                if cached is not None and cached.supports_mtp:
+                    return True
+            except Exception:
+                pass
         # Sibling draft model detection
         if _find_mtp_draft_model(model_path) is not None:
             return True

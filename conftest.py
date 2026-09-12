@@ -6,9 +6,13 @@ after every run. This hook removes them when the session ends, pruning
 non-source trees (venv, archives, build output) entirely.
 """
 
+import sys
+
+# Prevent writing .pyc bytecode anywhere during pytest execution
+sys.dont_write_bytecode = True
+
 import os
 import shutil
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent

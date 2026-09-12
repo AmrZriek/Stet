@@ -182,8 +182,10 @@ def launch_daemon() -> tuple[subprocess.Popen, bytes] | None:
             "stderr": subprocess.DEVNULL,
         }
         try:
-            from stet.constants import SCRIPT_DIR as _SCRIPT_DIR
-            _err_log = open(_SCRIPT_DIR / "daemon_stderr.log", "ab", buffering=0)
+            from stet.constants import LOG_FILE
+            log_dir = LOG_FILE.parent
+            log_dir.mkdir(parents=True, exist_ok=True)
+            _err_log = open(log_dir / "daemon_stderr.log", "ab", buffering=0)
             popen_kwargs["stderr"] = _err_log
         except Exception:
             _err_log = None

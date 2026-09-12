@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import QApplication, QHBoxLayout, QLabel, QWidget
@@ -16,7 +18,7 @@ class SilentCorrectionOSD(QWidget):
     """
 
     # Status dot colors — same palette as CorrectionWindow.status_lbl
-    _STATE_COLORS = {
+    _STATE_COLORS: ClassVar[dict[str, str]] = {
         "loading": "#fbbf24",
         "success": "#4ade80",
         "success_undo": "#4ade80",

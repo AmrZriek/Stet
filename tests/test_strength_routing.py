@@ -91,7 +91,7 @@ def test_rewrite_chunk_selects_aggressive_prompt(monkeypatch):
     system_prompt = captured_payload["messages"][0]["content"]
     assert "flow" in system_prompt
     assert "clarity" in system_prompt
-    assert captured_payload["think"] is False
+    assert "think" not in captured_payload
 
 
 def test_correct_text_patch_passes_strength_to_chunks(monkeypatch):

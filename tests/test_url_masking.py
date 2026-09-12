@@ -842,3 +842,28 @@ def test_inline_code_and_code_blocks_masked_and_restored(monkeypatch):
     assert "`crates`" in result
     assert "skeleton" in result
     assert "skeleten" not in result
+
+
+def test_reasoning_burned_with_atoms_triggers_streaming_fallback():
+    """When a model burns its reasoning budget (MiniCPM etc.) on text with protected atoms,
+    the outcome must be FAILED_ALL_UNITS so streaming fallback can correct it with thinking disabled.
+    """
+    from stet.core.text_utils import CorrectionOutcome
+
+    mgr = ModelManager(MockConfig())
+    mgr.is_loaded = lambda: True
+    mgr.label = "Mock"
+
+    def mock_rewrite(chunk, *args, **kwargs):
+        mgr.last_patch_error = "Unit 1 burned token budget in reasoning channel"
+        return None
+
+    mgr._rewrite_sentence_chunk = mock_rewrite
+
+    original = "Visit https://example.com for more info"
+    cr = mgr.correct_text_patch(original, strength="full_correction")
+
+    assert cr.outcome == CorrectionOutcome.FAILED_ALL_UNITS
+    assert cr.text_or_none is None
+    assert "reasoning" in cr.reason.lower()
+

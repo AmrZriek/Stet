@@ -1,4 +1,7 @@
-from stet.core.text_utils import contains_meta_commentary
+from __future__ import annotations
+
+import inspect
+from stet.core.text_utils import _apply_post_fixes, contains_meta_commentary
 
 
 def test_legitimate_questions_accepted():
@@ -236,4 +239,24 @@ def test_is_no_change_declaration_ignores_real_corrections():
     )
     assert not _is_no_change_declaration("")
 
-
+
+def test_post_fixes_conservative_mode():
+    assert _apply_post_fixes("dont", strength="spelling_only") == "dont"
+
+
+def test_post_fixes_smart_fix_mode():
+    assert _apply_post_fixes("i am happy", strength="full_correction") == "i am happy"
+    assert _apply_post_fixes("you and i", strength="full_correction") == "you and i"
+    assert _apply_post_fixes("dont", strength="full_correction") == "don't"
+    assert _apply_post_fixes("https://example.com is here", strength="full_correction") == "https://example.com is here"
+    assert _apply_post_fixes("john.doe@company.com sent it", strength="full_correction") == "john.doe@company.com sent it"
+
+
+def test_post_fixes_mode_awareness():
+    sig = inspect.signature(_apply_post_fixes)
+    params = list(sig.parameters.keys())
+    assert "strength" in params
+    assert params == ["text", "original", "strength"]
+
+
+

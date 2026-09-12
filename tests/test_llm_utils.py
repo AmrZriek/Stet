@@ -279,6 +279,23 @@ class TestSupportsMtp:
         model.write_bytes(b"GGUF" + b"\x00" * 2000)
         assert _supports_mtp(str(model)) is False
 
+    def test_cached_info_short_circuits(self, tmp_path, monkeypatch):
+        # Cache hit reporting MTP layers wins without sniffing file bytes.
+        from unittest.mock import MagicMock
+        import stet.llm.utils as utils_module
+        model = tmp_path / "plain_model.gguf"
+        model.write_bytes(b"GGUF" + b"\x00" * 2000)
+        monkeypatch.setattr(utils_module, "get_gguf_info_cached", lambda p: MagicMock(supports_mtp=True))
+        assert _supports_mtp(str(model)) is True
+
+    def test_cached_info_miss_falls_through(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import stet.llm.utils as utils_module
+        model = tmp_path / "plain_model.gguf"
+        model.write_bytes(b"GGUF" + b"\x00" * 2000)
+        monkeypatch.setattr(utils_module, "get_gguf_info_cached", lambda p: MagicMock(supports_mtp=False))
+        assert _supports_mtp(str(model)) is False
+
 
 class TestVramHelpers:
     """Test VRAM query and estimation functions."""

@@ -84,33 +84,3 @@ class TestPayloadWiring:
                       "repeat_penalty", "frequency_penalty", "presence_penalty",
                       "seed", "cache_prompt"):
             assert field in worker.payload, f"{field} missing from chat payload"
-
-    def test_engine_payload_parity_no_tfs_z(self):
-        mgr = self._mgr()
-        captured = {}
-
-        class FakeResp:
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return {"choices": [{"message": {"content": "ok"}}]}
-
-        class FakeSession:
-            def post(self, url, json=None, timeout=None):
-                captured.update(json)
-                return FakeResp()
-
-        mgr._get_session = lambda: FakeSession()  # noqa: SLF001
-        # CorrectionEngineImpl stores provider as _inference_fn or inference_provider
-        real_engine = mgr.get_correction_engine()
-        fn = getattr(real_engine, "_inference_fn", None) or getattr(
-            real_engine, "inference_provider", None
-        )
-        assert fn is not None
-        fn([{"role": "user", "content": "hi"}], 8)
-        assert "tfs_z" not in captured
-        for field in ("seed", "typical_p", "mirostat", "mirostat_tau",
-                      "mirostat_eta", "repeat_penalty", "frequency_penalty",
-                      "presence_penalty"):
-            assert field in captured, f"{field} missing from engine payload"

@@ -148,7 +148,7 @@ pub unsafe fn create_well_known_sid(wk: u32, sid_buf: *mut BYTE, cb_sid: *mut DW
 
 /// Get the current process' user SID from an OPEN process token into a caller-provided 8-byte aligned buffer.
 /// SAFETY: token_handle must be a valid OPEN process token; `buf` must remain alive as long as returned PSID is used.
-pub unsafe fn token_user_sid<'buf>(token_handle: HANDLE, buf: &'buf mut [u64; 128]) -> Result<PSID, DWORD> {
+pub unsafe fn token_user_sid(token_handle: HANDLE, buf: &mut [u64; 128]) -> Result<PSID, DWORD> {
     // GetTokenInformation writes a TOKEN_USER whose first field (SID_AND_ATTRIBUTES.Sid)
     // is a pointer -> needs 8-byte alignment. A [u64; N] is 8-aligned; a [u8; N] is not.
     let mut ret: DWORD = 0;

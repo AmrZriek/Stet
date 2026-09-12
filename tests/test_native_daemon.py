@@ -10,9 +10,9 @@ import msvcrt  # noqa: F401
 import os
 import struct
 import sys
-import time  # noqa: F401
+import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -473,7 +473,6 @@ class TestBackgroundReader:
         threading.Thread(target=_run, daemon=True).start()
 
     def test_event_dispatched_while_reply_waiting(self):
-        import time
         srv_r, srv_w, cli = _loopback_pair()
         client = IpcClient(secret=bytes(range(32)))
         _attach(client, cli)

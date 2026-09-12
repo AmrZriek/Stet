@@ -1108,13 +1108,12 @@ class TestFontStack:
 
 class TestButtonPriorityAndFocus:
     def test_accept_btn_is_default_and_focused_on_ready(self, qtbot, cfg):
-        from PyQt6.QtWidgets import QPushButton
         cw = _make_cw(cfg, qtbot)
         cw.show()
+        cw.activateWindow()
         qtbot.waitExposed(cw)
         assert cw.accept_btn.isDefault() is True
         assert cw.accept_btn.autoDefault() is True
-        cancel_btn = cw.findChild(QPushButton, "cancelBtn")
         assert cw.copy_btn.autoDefault() is False
 
         # Before ready, accept_btn is disabled
@@ -1123,7 +1122,7 @@ class TestButtonPriorityAndFocus:
         # When correction is ready, accept_btn should be enabled and focused
         cw._on_correction_ready("Corrected text", "Patch")
         assert cw.accept_btn.isEnabled() is True
-        assert cw.accept_btn.hasFocus() is True
+        assert cw.focusWidget() is cw.accept_btn
 
     def test_tab_order_prioritizes_accept_button(self, qtbot, cfg):
         from PyQt6.QtWidgets import QPushButton

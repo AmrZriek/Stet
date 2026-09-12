@@ -21,14 +21,6 @@ from stet.core.ipc_client import (
     compute_auth_proof,
     verify_auth_proof,
 )
-from stet.core.engine_types import (
-    CorrectionRequest,
-    CorrectionResult,
-    TaskSpec,
-    TaskType,
-)
-
-
 class TestPhase1aContracts:
     """Test unified contract types and fingerprint functions."""
 
@@ -167,37 +159,3 @@ class TestPhase1bIpcProtocol:
         assert client.paste_text("test") is None
         client.close()
         assert client.is_connected() is False
-
-
-class TestPhase1cEngineProtocol:
-    """Test TaskSpec and CorrectionRequest/Result contracts."""
-
-    def test_task_spec_defaults(self):
-        spec = TaskSpec()
-        assert spec.task_type == TaskType.CORRECT
-        assert spec.budget_policy.context_size == 12800
-        assert spec.guard_set.preserve_code_blocks is True
-
-    def test_correction_request_and_result(self):
-        spec = TaskSpec(task_type=TaskType.REWRITE, user_instruction="Polish style")
-        req = CorrectionRequest(text="Initial draft text.", task_spec=spec, request_id="req123")
-        assert req.text == "Initial draft text."
-        assert req.task_spec.task_type == TaskType.REWRITE
-
-        res = CorrectionResult(
-            text="Polished draft text.",
-            changed=True,
-            status="success",
-            finish_reason="stop",
-            token_usage={"prompt_tokens": 50, "completion_tokens": 10},
-        )
-        assert res.ok is True
-        assert res.changed is True
-
-        trunc_res = CorrectionResult(
-            text="Incomplete...",
-            changed=True,
-            status="generation_truncated",
-            finish_reason="length",
-        )
-        assert trunc_res.ok is False

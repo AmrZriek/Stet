@@ -513,9 +513,21 @@ def _check_msvc_available() -> bool:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def run(cmd: list, **kw):
-    """Run a subprocess command with echo."""
-    print(f"  $ {' '.join(str(c) for c in cmd)}")
+def run(cmd: list, mask_args: tuple = ("--password", "-p", "--token", "--secret"), **kw):
+    """Run a subprocess command with echo, masking sensitive arguments."""
+    display = []
+    mask_next = False
+    for c in cmd:
+        s = str(c)
+        if mask_next:
+            display.append("********")
+            mask_next = False
+        elif s in mask_args:
+            display.append(s)
+            mask_next = True
+        else:
+            display.append(s)
+    print(f"  $ {' '.join(display)}")
     subprocess.run(cmd, check=True, **kw)
 
 

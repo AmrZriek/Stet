@@ -37,7 +37,6 @@ from stet.core.text_utils import (
     _loses_meaningful_repetition,
     _normalize_chunk_newlines,
     _post_splice_sanity,
-    _wrap_correction_prompt,
     recover_sentinels,
 )
 from stet.core.utils import friendly_name, log
@@ -45,9 +44,10 @@ from stet.llm.backend_manager import (
     BackendManager,
 )
 from stet.llm.gguf_info import get_gguf_info_cached
-from stet.llm.template_sanitizer import (
-    sanitize_template,
-    write_sanitized_template,
+from stet.llm.messages import (  # noqa: F401  (re-exported for existing callers/tests)
+    _STRENGTH_TO_MODE_INDEX,
+    _resolve_mode_index,
+    build_correction_messages,
 )
 from stet.llm.utils import (
     _MIN_RELIABLE_MODEL_B,
@@ -60,32 +60,25 @@ from stet.llm.utils import (
     query_free_vram_mb,
     suggest_gpu_layers,
 )
+
+try:
+    from stet.llm.utils import _supports_mtp
+except ImportError:  # safest: unknown → no self-draft
+    def _supports_mtp(model_path: str) -> bool:
+        return False
+
 from stet.llm.worker import StreamWorker
 
-_STRENGTH_TO_MODE_INDEX = {
-    "spelling_only": 0,
-    "full_correction": 1,
-    "rewrite_polish": 2,
-}
 
-# (open-tag regex, close-tag regex) pairs for detecting an UNBALANCED think
-# open-tag (an open with no matching close) in a rendered prompt. <think is
-# matched with a negative lookahead so <thinking isn't counted twice.
-_UNBALANCED_TAG_PAIRS = [
-    (re.compile(r"<think(?!ing)"), re.compile(r"</think>")),
-    (re.compile(r"<thinking"), re.compile(r"</thinking>")),
-    (re.compile(r"<reasoning"), re.compile(r"</reasoning>")),
-]
-
-
-def _has_unbalanced_think_open(text: str) -> bool:
-    """True when *text* contains a think open-tag with no matching close."""
-    if not text:
+def _is_reasoning_burned(resp_json: dict, raw: str, finish_reason: str) -> bool:
+    """True when the token budget burned in the reasoning channel (empty content, finish=length)."""
+    if raw != "" or finish_reason != "length":
         return False
-    for open_re, close_re in _UNBALANCED_TAG_PAIRS:
-        if len(open_re.findall(text)) > len(close_re.findall(text)):
-            return True
-    return False
+    try:
+        msg = resp_json.get("choices", [{}])[0].get("message", {})
+        return bool((msg.get("reasoning_content") or "").strip())
+    except (AttributeError, IndexError, TypeError):
+        return False
 
 
 def _detect_loaded_backend(log_content: str, *, metal_verified: bool = False) -> str:
@@ -200,24 +193,6 @@ def _probe_gpu_devices(server_path, timeout=20.0):
         f"metal={result['metal']} devices={result['devices']}"
     )
     return result
-
-
-def _resolve_mode_index(strength: str, modes: list) -> int:
-    """Map a strength string to a correction_modes list index.
-
-    Built-in strengths resolve via the static map if valid. Custom mode names
-    or renamed built-ins are matched by scanning all modes by name or id.
-    Falls back to 1 (full_correction).
-    """
-    builtin = _STRENGTH_TO_MODE_INDEX.get(strength)
-    if builtin is not None and builtin < len(modes):
-        return builtin
-    for i, m in enumerate(modes or []):
-        if isinstance(m, dict) and (m.get("name") == strength or m.get("id") == strength):
-            return i
-    if builtin is not None:
-        return builtin
-    return 1
 
 
 def _normalize_newlines(text: str, use_windows_newlines: bool) -> str:
@@ -363,11 +338,6 @@ class ModelManager(QObject):
         # deferred until this probe, because llama.cpp b10375+ logs carry no
         # backend banners (see load_model GPU detection block).
         self._props_probed = False
-        # Set to True when a sanitized chat-template override was passed at
-        # launch (--chat-template-file). Cleared if post-load validation of
-        # the sanitized template fails, falling back to base suppression.
-        self._sanitized_template_used = False
-        self._sanitized_template_str: str | None = None
         # Thinking support and the server's resolved chat template, captured
         # from /props after load (None until the first successful load).
         self.thinking_supported: bool = False
@@ -413,8 +383,8 @@ class ModelManager(QObject):
     def _get_session(self) -> requests.Session:
         """Return a persistent requests.Session, creating it on first access.
 
-        The session is mounted with an HTTPAdapter sized for 4 parallel
-        server slots (pool_maxsize=8 leaves headroom). requests.Session is
+        The session is mounted with an HTTPAdapter sized from
+        _parallel_slots() (pool_maxsize=2x leaves headroom). requests.Session is
         thread-safe for sending concurrent requests, so this single session
         can be shared by the ThreadPoolExecutor in correct_text_patch and by
         any direct fallback callers without locking.
@@ -423,7 +393,7 @@ class ModelManager(QObject):
             from requests.adapters import HTTPAdapter
 
             session = requests.Session()
-            parallel_slots = self._get_param("parallel", 1)
+            parallel_slots = self._parallel_slots()
             pool_conn = max(4, parallel_slots)
             adapter = HTTPAdapter(
                 pool_connections=pool_conn,
@@ -446,6 +416,25 @@ class ModelManager(QObject):
                 self._session.close()
             finally:
                 self._session = None
+
+
+    def _parallel_slots(self) -> int:
+        """Single authority for llama-server slot fan-out (server flag, pools, workers)."""
+        try:
+            return max(1, int(self._get_param("parallel", 1)))
+        except (TypeError, ValueError):
+            return 1
+
+    def _slot_tokens(self) -> int:
+        """Effective per-slot context: live /props n_ctx, else configured total ÷ slots."""
+        if self.actual_ctx_size is not None:
+            return self.actual_ctx_size
+        return self._get_param("context_size", 12800) // self._parallel_slots()
+
+    def _request_timeout(self, max_tokens: int) -> float:
+        """HTTP timeout from token math: base + gen budget ÷ recent throughput."""
+        tps = 100.0 if getattr(self, "actual_backend_type", "") == "cuda" else 12.0
+        return max(60.0, min(300.0, 15.0 + max_tokens / tps))
 
     @property
     def port_offset(self) -> int:
@@ -472,45 +461,7 @@ class ModelManager(QObject):
 
     def _chat_url(self) -> str:
         return self._base_url() + "/v1/chat/completions"
-    def _is_model_reasoning_capable(self) -> bool:
-        """Check if the active model has reasoning/thinking capabilities.
 
-        Uses cached GGUF metadata from offline file inspection.
-        """
-        model_path = self.cfg.get(self.model_path_key, "")
-        if not model_path:
-            return False
-        try:
-            info = get_gguf_info_cached(model_path)
-            return bool(info is not None and getattr(info, "reasoning_capable", False))
-        except Exception:
-            return False
-
-
-    def _correction_system_prompt(
-        self,
-        custom_sys: str | None,
-        strength: str,
-        mode_prompt_override: str | None = None,
-    ) -> str:
-        modes = self.cfg.get("correction_modes", [])
-        mode_index = _resolve_mode_index(strength, modes)
-        if mode_prompt_override:
-            # Template prompts are self-contained — skip the structural wrapper.
-            system = _wrap_correction_prompt(
-                mode_prompt_override, mode_index, prompt_is_complete=True,
-            )
-        elif modes and mode_index < len(modes):
-            system = _wrap_correction_prompt(modes[mode_index]["prompt"], mode_index)
-        else:
-            system = _wrap_correction_prompt(
-                DEFAULT_CONFIG["correction_modes"][min(mode_index, 3)]["prompt"],
-                min(mode_index, 3),
-            )
-
-        if custom_sys:
-            system += f"\n\nAdditional instructions:\n{custom_sys}"
-        return system
 
     def _build_correction_messages(
         self,
@@ -519,45 +470,22 @@ class ModelManager(QObject):
         strength: str,
         mode_prompt_override: str | None = None,
     ) -> list[dict[str, str]]:
-        """Build the exact chat message shape used for patch correction.
+        """Build the exact chat messages for a correction request.
 
-        Warmup and real correction must share this path so llama-server prompt
-        cache checkpoints match the first real request, including Gemma's
-        user-folded system prompt.
-
-        Uses input-only delimiters (CONTENT_BEGIN / CONTENT_END).  The model's
-        response IS the corrected text — no output markers or assistant prefill
-        required.
+        Thin wrapper around :func:`stet.llm.messages.build_correction_messages`
+        so the patch path, the warmup pre-fill, and the streaming fallback all
+        share one prompt shape.  When a model's template has no system role,
+        llama.cpp folds the system turn into the user turn itself — Stet does
+        not do any model-specific folding.
         """
-        system = self._correction_system_prompt(
-            custom_sys,
-            strength,
-            mode_prompt_override,
+        return build_correction_messages(
+            chunk_text,
+            strength=strength,
+            cfg_get=self.cfg.get,
+            custom_sys=custom_sys,
+            mode_prompt_override=mode_prompt_override,
         )
-        wrapped = f"CONTENT_BEGIN\n{chunk_text}\nCONTENT_END"
-        model_path = self.cfg.get(self.model_path_key, "") or ""
-        model_name = Path(model_path).name.lower()
-        # Gemma folds the system prompt into the user turn. Detect via GGUF
-        # architecture metadata first (name-agnostic), falling back to the
-        # filename check when metadata is unavailable. The gguf_info cache
-        # makes this cheap even when called repeatedly (warmup + corrections).
-        is_gemma = "gemma" in model_name
-        try:
-            info = get_gguf_info_cached(model_path)
-            if info is not None and (info.architecture or "").lower().startswith(
-                "gemma"
-            ):
-                is_gemma = True
-        except Exception:
-            pass  # metadata unavailable — keep the filename-based guess
-        if is_gemma:
-            return [
-                {"role": "user", "content": f"{system}\n\n{wrapped}"},
-            ]
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": wrapped},
-        ]
+
 
     def _warmup_prompt_cache(self) -> None:
         """Pre-fill llama-server's KV cache so the first real correction doesn't
@@ -573,7 +501,7 @@ class ModelManager(QObject):
         can't prevent model load from completing.
         """
         try:
-            parallel_slots = self._get_param("parallel", 1)
+            parallel_slots = self._parallel_slots()
             strengths = []
             for hotkey in self.cfg.get("hotkeys", []):
                 if isinstance(hotkey, dict) and hotkey.get("strength"):
@@ -856,21 +784,24 @@ class ModelManager(QObject):
             str(batch_size),
             "--ubatch-size",
             str(ubatch_size),
+            # "auto" lets llama.cpp enable flash attention only where the
+            # backend supports it; forcing "on" broke unsupported GPUs.
             "--flash-attn",
-            "on" if flash_attn else "off",
+            "auto" if flash_attn else "off",
             "--host",
             host,
             "--port",
             str(port),
             "--parallel",
-            str(self._get_param("parallel", 1)),
+            str(self._parallel_slots()),
+            # Thinking is disabled here, once, for every model. Requests must
+            # NOT re-enable it (see stet/llm/messages.py + make_stream_worker).
             "--reasoning",
             "off",
             "--reasoning-budget",
             "0",
-            "--no-warmup",
-            "--cache-reuse",
-            "64",
+            # llama.cpp's own warmup and prompt cache are used as-is; Stet no
+            # longer disables warmup or forces --cache-reuse.
             "--temp",
             str(self._get_param("temperature", 0.1)),
             "--top-k",
@@ -886,47 +817,6 @@ class ModelManager(QObject):
             "--presence-penalty",
             str(self._get_param("presence_penalty", 0.0)),
         ]
-
-        # Generic hard-prime sanitization (replaces the old LFM-2.5 path
-        # special case): some chat templates ALWAYS prime <think> at the
-        # generation prompt and ignore --reasoning off / payload think flags,
-        # so every request burns its budget on reasoning with empty content.
-        # When the embedded template hard-primes thinking, ship a sanitized
-        # byte-exact copy (prime stripped) via --chat-template-file. Gated /
-        # conditional thinking is left untouched — the base suppression
-        # (--reasoning off + --reasoning-budget + strip regexes) handles it.
-        # Any failure here degrades to "no override" + base suppression.
-        # Single scan: sanitize_template both detects the hard prime
-        # (sanitized != original) and produces the stripped copy.
-        sanitized = None
-        template_str = None
-        if info is not None and info.chat_template and info.reasoning_capable:
-            template_str = info.chat_template
-            sanitized = sanitize_template(template_str)
-        if sanitized is not None and sanitized != template_str:
-            try:
-                sanitized_path = write_sanitized_template(
-                    sanitized, model_path
-                )
-                cmd.extend(["--chat-template-file", str(sanitized_path)])
-                self._sanitized_template_used = True
-                self._sanitized_template_str = sanitized
-                log(
-                    f"[{self.label}] Hard-primed thinking template "
-                    f"detected — using sanitized chat template: "
-                    f"{sanitized_path}"
-                )
-            except Exception as e:
-                log(
-                    f"[{self.label}] WARNING: failed to write sanitized "
-                    f"chat template ({e}) — continuing with base "
-                    f"suppression"
-                )
-        else:
-            log(
-                f"[{self.label}] No hard-primed thinking template — no "
-                f"--chat-template-file override"
-            )
 
         if self._get_param("seed", -1) != -1:
             cmd.extend(["--seed", str(self._get_param("seed", -1))])
@@ -969,16 +859,23 @@ class ModelManager(QObject):
                 ])
                 log(f"[{self.label}] Sibling MTP draft model active: {draft_model_path}")
             else:
-                cmd.extend([
-                    "--spec-type",
-                    "draft-mtp",
-                    "--spec-draft-n-max",
-                    str(mtp_max_draft),
-                    "--spec-draft-n-min",
-                    str(mtp_min_draft),
-                    "--spec-draft-p-min",
-                    str(mtp_p_min),
-                ])
+                try:
+                    _mtp_ok = _supports_mtp(model_path)
+                except Exception:
+                    _mtp_ok = False
+                if _mtp_ok:
+                    cmd.extend([
+                        "--spec-type",
+                        "draft-mtp",
+                        "--spec-draft-n-max",
+                        str(mtp_max_draft),
+                        "--spec-draft-n-min",
+                        str(mtp_min_draft),
+                        "--spec-draft-p-min",
+                        str(mtp_p_min),
+                    ])
+                else:
+                    log("[AC] MTP self-draft skipped (model has no MTP layers)")
 
         # NOTE: frequency-penalty and presence-penalty are sent both on CLI
         # (supported since well before b10639 — see --help) and in every
@@ -1334,41 +1231,6 @@ class ModelManager(QObject):
                     self.model_warning.emit(
                         "GPU requested but no GPU backend found. Your llama-server binary may lack GPU support."
                     )
-            # Post-load validation of a sanitized template override: ask the
-            # server to render a probe prompt and require no residual
-            # UNBALANCED think open-tag. On any failure fall back to base
-            # suppression (never relaunch) and clear the override flag.
-            if self._sanitized_template_used and self._sanitized_template_str:
-                try:
-                    vr = self._get_session().post(
-                        self._base_url() + "/apply-template",
-                        json={
-                            "messages": [{"role": "user", "content": "hello"}],
-                            "chat_template": self._sanitized_template_str,
-                            "add_generation_prompt": True,
-                        },
-                        timeout=10,
-                    )
-                    rendered_prompt = ""
-                    if vr.ok:
-                        rendered_prompt = vr.json().get("prompt", "") or ""
-                    if not vr.ok or _has_unbalanced_think_open(rendered_prompt):
-                        log(
-                            f"[{self.label}] WARNING: sanitized-template "
-                            f"validation inconclusive; flag cleared — model "
-                            f"keeps running the sanitized copy, base "
-                            f"suppression still active"
-                        )
-                        self._sanitized_template_used = False
-                except Exception as e:
-                    log(
-                        f"[{self.label}] WARNING: sanitized-template "
-                        f"validation inconclusive ({e}); flag cleared — "
-                        f"model keeps running the sanitized copy, base "
-                        f"suppression still active"
-                    )
-                    self._sanitized_template_used = False
-
             # Warn if the model is too small for reliable patch-mode output.
             # Tiny models (<1B) produce tokenizer garbage or echo few-shot
             # examples verbatim — the echo-guard will catch it at correction
@@ -1510,90 +1372,32 @@ class ModelManager(QObject):
     def ensure_context_for_tokens(self, token_count: int) -> bool:
         """Ensure the running server has enough context for the input text.
 
-        Invariant:
-        Default context window is 12,800.
-        Only if estimated input tokens exceed 0.4 of base context (e.g. > 5,120 for 12,800)
-        should it reload with an expanded context window.
+        Invariant (per-slot, not server-total):
+        Each --parallel slot holds ~total/parallel tokens (/props n_ctx).
+        Only if estimated input tokens exceed 0.4 of one slot should it
+        reload with an expanded window, scaled so every slot fits.
         """
         import math
-        current_ctx = self.actual_ctx_size or self._get_param("context_size", 12800)
-        threshold = int(max(12800, current_ctx) * 0.4)
+        slot = self._slot_tokens()
+        threshold = int(slot * 0.4)
         if token_count <= threshold:
             return True
 
         if not self.is_loaded():
             return True
 
-        target_ctx = math.ceil((token_count / 0.4) / 1024) * 1024
-        target_ctx = max(12800, min(131072, target_ctx))
-        if target_ctx <= current_ctx:
+        target_slot = math.ceil((token_count / 0.4) / 1024) * 1024
+        target_ctx = max(12800, min(131072, target_slot * self._parallel_slots()))
+        if target_ctx <= slot * self._parallel_slots():
             return True
 
         log(
-            f"[{self.label}] Input text (~{token_count} tokens) exceeds 0.4 of context "
-            f"({current_ctx}) — expanding context window to {target_ctx} and reloading"
+            f"[{self.label}] Input text (~{token_count} tokens) exceeds 0.4 of "
+            f"per-slot context ({slot}) — expanding window to {target_ctx} and reloading"
         )
         self._dynamic_context_size = target_ctx
         self.unload_model()
         return self.load_model()
-    def get_correction_engine(self):
-        """Return a Phase 3 CorrectionEngineImpl wired to this ModelManager's server."""
-        from stet.core.engine import CorrectionEngineImpl
-        def _inference_call(messages: list[dict], max_tokens: int):
-            session = self._get_session()
-            req_timeout = 120 if getattr(self, "actual_backend_type", "cpu") in ("cpu", "unknown") else 60
-            is_reasoning = self._is_model_reasoning_capable()
-            eff_max_tokens = max_tokens + (384 if is_reasoning else 0)
-            payload = {
-                "messages": messages,
-                "max_tokens": eff_max_tokens,
-                "temperature": self._get_param("correction_temperature", 0.0),
-                "top_k": self._get_param("correction_top_k", 1),
-                "top_p": self._get_param("correction_top_p", 0.95),
-                "min_p": self._get_param("correction_min_p", 0.0),
-                "seed": self._get_param("seed", -1),
-                "typical_p": self._get_param("typical_p", 1.0),
-                "mirostat": self._get_param("mirostat", 0),
-                "mirostat_tau": self._get_param("mirostat_tau", 5.0),
-                "mirostat_eta": self._get_param("mirostat_eta", 0.1),
-                "repeat_penalty": self._get_param("repeat_penalty", 1.0),
-                "frequency_penalty": self._get_param("frequency_penalty", 0.0),
-                "presence_penalty": self._get_param("presence_penalty", 0.0),
-                "stream": False,
-                "think": is_reasoning,
-                "reasoning_budget": 256 if is_reasoning else 0,
-                "chat_template_kwargs": {"enable_thinking": is_reasoning},
-                "extra_body": {
-                    "chat_template_kwargs": {"enable_thinking": is_reasoning},
-                    "reasoning_budget": 256 if is_reasoning else 0,
-                },
-                "cache_prompt": self._get_param("cache_prompt", True),
-            }
-            r = session.post(self._chat_url(), json=payload, timeout=req_timeout)
-            r.raise_for_status()
-            data = r.json()
-            raw, finish = _extract_content_from_response(data)
-            usage = data.get("usage", {})
-            return raw, finish, usage
-
-        return CorrectionEngineImpl(inference_provider=_inference_call)
-
-    def correct_text_engine(self, request):
-        """Execute request using the Phase 3 Unified Correction Engine."""
-        from stet.core.engine_types import CorrectionResult
-        if not self.is_loaded():
-            if not self.load_model():
-                return CorrectionResult(
-                    text=request.text,
-                    changed=False,
-                    status="error",
-                    message="Model failed to load",
-                )
-        self.mark_used()
-        est_tokens = len(request.text.split()) * 4 // 3 + 64
-        self.ensure_context_for_tokens(est_tokens)
-        engine = self.get_correction_engine()
-        return engine.run(request)
 
 
     # ── patch correction (dict pre-pass + parallel sentence rewrite) ──────
@@ -1692,19 +1496,15 @@ class ModelManager(QObject):
 
         # ── Phase 1: split into sentence units and rewrite in parallel ────
         # Profile-driven chunking: each mode/template gets its own chunk size.
-        # With --parallel 4 slots, up to 4 units run concurrently.  Separator
+        # Slot fan-out follows --parallel: units run concurrently up to the slot count. Separator
         # preserves inter-unit whitespace/newlines so reassembly is lossless.
         #
         # Adaptive cap: small-context models (e.g. 4k GGUFs at parallel=4)
         # can't fit a 250-word rewrite plus thinking budget plus answer in one
         # slot; sentence-boundary chunking already guarantees cohesion at
         # 120 words. Mirrors the per-unit slot_limit computation below.
-        parallel_slots = max(1, self._get_param("parallel", 1))
-        slot_tokens = (
-            self.actual_ctx_size
-            if self.actual_ctx_size is not None
-            else self._get_param("context_size", 12800) // parallel_slots
-        )
+        parallel_slots = self._parallel_slots()
+        slot_tokens = self._slot_tokens()
         chunk_word_cap = (
             min(profile.chunk_words, 120) if slot_tokens < 2048 else profile.chunk_words
         )
@@ -1811,10 +1611,10 @@ class ModelManager(QObject):
                         corrected = None
 
                     if corrected is None:
+                        if not self.last_patch_error:
+                            self.last_patch_error = f"Unit {idx + 1} returned no output"
                         # Unit failed — keep original text for this unit.
                         corrected_parts[idx] = (chunk_text, sep)
-                        if _INLINE_SENTINEL_RE.search(chunk_text):
-                            any_preserved = True
                         continue
 
                     corrected = _normalize_newlines(
@@ -2058,7 +1858,17 @@ class ModelManager(QObject):
         # total failure so the caller falls back to streaming. Otherwise we
         # accept partial success (kept-original units are not a failure).
         if not any_success and dict_fixes == 0 and reassembled == text:
-            if masked_entities:
+            _has_generation_failure = bool(self.last_patch_error and any(
+                term in self.last_patch_error.lower()
+                for term in (
+                    "reasoning",
+                    "timed out",
+                    "timeout",
+                    "connection",
+                    "model generation error",
+                )
+            ))
+            if (masked_entities or any_preserved) and not _has_generation_failure:
                 _reason = self.last_patch_error or "Protected unit(s) preserved original"
                 log(
                     f"[{self.label}] Patch: protected unit(s) "
@@ -2070,18 +1880,6 @@ class ModelManager(QObject):
                     units_processed=len(chunks), units_corrected=0,
                     protected_atom_count=len(masked_entities),
                     reason=_reason, elapsed_s=_elapsed,
-                )
-            elif any_preserved:
-                log(
-                    f"[{self.label}] Patch: protected atom unit(s) "
-                    f"preserved original — outcome=UNCHANGED_PROTECTED "
-                    f"elapsed={_elapsed:.2f}s"
-                )
-                return CorrectionResult(
-                    text=text, outcome=CorrectionOutcome.UNCHANGED_PROTECTED,
-                    units_processed=len(chunks), units_corrected=0,
-                    protected_atom_count=len(masked_entities),
-                    reason="Protected content preserved", elapsed_s=_elapsed,
                 )
             else:
                 if not self.last_patch_error:
@@ -2112,7 +1910,7 @@ class ModelManager(QObject):
         if not changed:
             if masked_entities:
                 outcome = CorrectionOutcome.UNCHANGED_PROTECTED
-            elif self.last_patch_error:
+            elif any_preserved:
                 outcome = CorrectionOutcome.UNCHANGED_PROTECTED
 
         log(
@@ -2349,8 +2147,8 @@ class ModelManager(QObject):
 
         Uses the same blocking `requests.post` pattern as the old patch path so
         the outer orchestrator can wait on ThreadPoolExecutor futures without
-        needing Qt event-loop integration. The server's --parallel 4 slots
-        allow up to 4 of these to run concurrently.
+        needing Qt event-loop integration. The server's --parallel slots
+        allow these to run concurrently up to the slot count.
         """
         if not chunk_text.strip():
             return chunk_text
@@ -2385,14 +2183,8 @@ class ModelManager(QObject):
         # budget leaves plenty of room.
         word_count = len(chunk_text.split())
         est_input_tokens = _estimate_tokens(chunk_text)
-        slot_limit = (
-            self.actual_ctx_size
-            if self.actual_ctx_size is not None
-            else self._get_param("context_size", 12800) // max(1, self._get_param("parallel", 1))
-        )
-        is_reasoning = self._is_model_reasoning_capable()
-        headroom = 384 if is_reasoning else 128
-        max_tokens = min(max(int(est_input_tokens * 3.0) + headroom, 512), 2048)
+        slot_limit = self._slot_tokens()
+        max_tokens = min(max(int(est_input_tokens * 3.0) + 128, 512), 2048)
         # Prevent slot overflow by capping max_tokens to the remaining slot budget
         if est_input_tokens + max_tokens > slot_limit:
             max_tokens = max(128, slot_limit - est_input_tokens - 64)
@@ -2435,13 +2227,6 @@ class ModelManager(QObject):
             "frequency_penalty": self._get_param("frequency_penalty", 0.0),
             "presence_penalty": self._get_param("presence_penalty", 0.0),
             "stream": False,
-            "think": is_reasoning,
-            "reasoning_budget": 256 if is_reasoning else 0,
-            "chat_template_kwargs": {"enable_thinking": is_reasoning},
-            "extra_body": {
-                "chat_template_kwargs": {"enable_thinking": is_reasoning},
-                "reasoning_budget": 256 if is_reasoning else 0,
-            },
             "cache_prompt": self._get_param("cache_prompt", True),
             "stop": [],
         }
@@ -2456,7 +2241,8 @@ class ModelManager(QObject):
         _BACKOFF_BASE = 1.0
         recycled_in_unit = False
 
-        req_timeout = 120 if getattr(self, "actual_backend_type", "cpu") in ("cpu", "unknown") else 60
+        req_timeout = self._request_timeout(max_tokens)
+        _t0 = time.monotonic()
 
         try:
             if cancel_event is not None and cancel_event.is_set():
@@ -2490,18 +2276,26 @@ class ModelManager(QObject):
             if not r.ok:
                 log(f"[{self.label}] HTTP {r.status_code}: {r.text[:200]}")
             r.raise_for_status()
-            raw, finish_reason = _extract_content_from_response(r.json())
+            resp_json = r.json()
+            raw, finish_reason = _extract_content_from_response(resp_json)
             log(
                 f"[{self.label}] rewrite unit {unit_idx} (finish={finish_reason}): "
-                f"{raw[:200]!r}"
+                f"{raw[:200]!r} elapsed={time.monotonic() - _t0:.2f}s"
             )
+            if _is_reasoning_burned(resp_json, raw, finish_reason):
+                self.last_patch_error = f"Unit {unit_idx} burned token budget in reasoning channel"
+                log(f"[AC] rewrite unit {unit_idx} reasoning-burned (content empty, budget spent in reasoning) — skipping length retry")
+                return None
         except requests.exceptions.ConnectionError:
+            self.last_patch_error = f"Unit {unit_idx} connection closed (likely cancelled)"
             log(f"[{self.label}] chunk {unit_idx} connection closed (likely cancelled)")
             return None
         except requests.exceptions.ReadTimeout as e:
+            self.last_patch_error = f"Unit {unit_idx} request timed out: {e}"
             log(f"[{self.label}] rewrite request timed out unit {unit_idx}: {e}")
             return None
         except Exception as e:
+            self.last_patch_error = f"Unit {unit_idx} request failed: {e}"
             log(f"[{self.label}] rewrite request failed unit {unit_idx}: {e}")
             return None
         # session is always caller-owned (persistent) — never closed here.
@@ -2532,24 +2326,35 @@ class ModelManager(QObject):
                     if not r.ok:
                         log(f"[{self.label}] HTTP {r.status_code} (retry): {r.text[:200]}")
                     r.raise_for_status()
-                    raw, finish_reason = _extract_content_from_response(r.json())
-                    log(f"[{self.label}] rewrite unit {unit_idx} retry (finish={finish_reason}): {raw[:200]!r}")
+                    resp_json = r.json()
+                    raw, finish_reason = _extract_content_from_response(resp_json)
+                    log(f"[{self.label}] rewrite unit {unit_idx} retry (finish={finish_reason}): {raw[:200]!r} elapsed={time.monotonic() - _t0:.2f}s")
+                    if _is_reasoning_burned(resp_json, raw, finish_reason):
+                        self.last_patch_error = f"Unit {unit_idx} burned token budget in reasoning channel"
+                        log(f"[AC] rewrite unit {unit_idx} reasoning-burned (content empty, budget spent in reasoning) — skipping length retry")
+                        return None
                 except requests.exceptions.ConnectionError:
+                    self.last_patch_error = f"Unit {unit_idx} connection closed (likely cancelled)"
                     return None
                 except requests.exceptions.ReadTimeout as e:
+                    self.last_patch_error = f"Unit {unit_idx} retry timed out: {e}"
                     log(f"[{self.label}] retry timed out unit {unit_idx}: {e}")
                     return None
                 except Exception as e:
+                    self.last_patch_error = f"Unit {unit_idx} retry failed: {e}"
                     log(f"[{self.label}] retry failed unit {unit_idx}: {e}")
                     return None
             if finish_reason == "length":
+                self.last_patch_error = f"Unit {unit_idx} output truncated"
                 log(f"[{self.label}] rewrite unit {unit_idx} still truncated after retry")
                 return None
 
         if _is_corrupt_output(raw):
+            self.last_patch_error = f"Unit {unit_idx} rejected: corrupt output"
             log(f"[{self.label}] corrupt rewrite output unit {unit_idx}: {raw[:80]!r}")
             return None
         if _is_fewshot_echo(raw, chunk_text):
+            self.last_patch_error = f"Unit {unit_idx} rejected: few-shot echo"
             log(
                 f"[{self.label}] few-shot echo in rewrite unit {unit_idx}: {raw[:80]!r}"
             )
@@ -2557,7 +2362,8 @@ class ModelManager(QObject):
 
         corrected = _extract_rewritten_sentence(raw, original_text=chunk_text)
         if corrected is None:
-            log(f"[{self.label}] no marker pair in rewrite unit {unit_idx}")
+            self.last_patch_error = f"Unit {unit_idx} rejected: preamble, conversational answer, or invalid edit in output"
+            log(f"[{self.label}] preamble, conversational answer, or no marker pair in rewrite unit {unit_idx}")
             return None
 
         # ── Restore sentinel aliases ──────────────────────────────────
@@ -2634,9 +2440,6 @@ class ModelManager(QObject):
         self, messages: list, max_tokens: int = 1024, grammar: str | None = None, json_schema: dict | None = None,
         **overrides,
     ) -> StreamWorker:
-        think_enabled = overrides.pop("think", bool(self.cfg.get("chat_thinking_enabled", False)))
-        reasoning_budget = overrides.pop("reasoning_budget", -1 if think_enabled else 0)
-        chat_tmpl_kwargs = overrides.pop("chat_template_kwargs", {"enable_thinking": think_enabled})
         payload = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -2657,13 +2460,6 @@ class ModelManager(QObject):
             "repeat_penalty": self._get_param("repeat_penalty", 1.0),
             "frequency_penalty": self._get_param("frequency_penalty", 0.0),
             "presence_penalty": self._get_param("presence_penalty", 0.0),
-            "think": think_enabled,
-            "reasoning_budget": reasoning_budget,
-            "chat_template_kwargs": chat_tmpl_kwargs,
-            "extra_body": {
-                "chat_template_kwargs": chat_tmpl_kwargs,
-                "reasoning_budget": reasoning_budget,
-            },
             "cache_prompt": self._get_param("cache_prompt", True),
         }
         payload.update(overrides)
@@ -2671,7 +2467,7 @@ class ModelManager(QObject):
             payload["grammar"] = grammar
         if json_schema:
             payload["json_schema"] = json_schema
-        return StreamWorker(self._chat_url(), payload)
+        return StreamWorker(self._chat_url(), payload, request_timeout=self._request_timeout(max_tokens))
 
     # ── idle check ─────────────────────────────────────────────────────────
     def check_idle(self):

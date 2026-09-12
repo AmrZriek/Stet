@@ -50,6 +50,12 @@ pub struct RegistrationState {
     pub registered: Vec<Hotkey>,
 }
 
+impl Default for RegistrationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RegistrationState {
     pub fn new() -> Self {
         RegistrationState { registered: Vec::new() }

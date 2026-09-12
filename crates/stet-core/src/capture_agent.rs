@@ -23,6 +23,7 @@
 //! ([`capture_with_env`], [`paste_with_env`]) with fakes — no Windows needed.
 //! There is no `unwrap`/`expect`/panic path outside tests.
 
+use crate::chord::ChordKind;
 use crate::clipboard::ClipboardRestoreGate;
 use crate::focus_target::{classify_foreground, TargetEligibility};
 use crate::frame::IpcError;
@@ -34,17 +35,33 @@ use crate::paste_observe::{ConsumptionVerdict, PasteObserver};
 pub const CLIPBOARD_INITIAL_GRACE_MS: u64 = 50;
 /// Interval between clipboard polls (15 ms).
 pub const CLIPBOARD_POLL_INTERVAL_MS: u64 = 15;
-/// Maximum clipboard polls per capture (12 attempts).
-pub const CLIPBOARD_MAX_POLLS: u32 = 12;
+/// Maximum clipboard polls per capture (40 attempts = 600 ms, total worst-case 650 ms).
+pub const CLIPBOARD_MAX_POLLS: u32 = 40;
 /// Settle after writing the clipboard before injecting the paste chord.
 pub const PASTE_WRITE_SETTLE_MS: u64 = 150;
 /// Settle after the paste chord before observing consumption.
 pub const PASTE_POST_CHORD_MS: u64 = 100;
-/// Settle after clearing the clipboard before verifying the clear.
+/// Additional settle before restoring the pre-paste clipboard. The consumption
+/// observation below can never actually observe consumption (the target reading
+/// the clipboard never bumps the sequence number), so this delay is the only
+/// protection against a slow target pasting the RESTORED old content instead of
+/// our text. Total restore latency ≈ chord+350 ms, mirroring the Python
+/// fallback (`_paste_text`'s 500 ms QTimer ≈ chord+350 ms). Restoring at
+/// chord+100 ms raced the first paste after app open — the target window was
+/// still consuming the focus transition from the closed correction panel and
+/// read the clipboard after the old content was already back.
+pub const PASTE_RESTORE_DELAY_MS: u64 = 250;
 pub const CAPTURE_CLEAR_SETTLE_MS: u64 = 50;
 /// Default capture timeout when the caller passes none (mirrors the 1500 ms
 /// the Python client sends).
 pub const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 1500;
+/// Cap waiting for a naturally-released conflicting modifier (500 ms,
+/// Decision 35 §2.1: 300–500 ms bounded wait). Shift+F9 always has Shift
+/// down at fire time — the orchestrator waits for the release and aborts
+/// only if it is still held after the cap, instead of injecting into it.
+pub const MOD_WAIT_TIMEOUT_MS: u64 = 500;
+/// Step for the modifier-release wait (10 ms).
+pub const MOD_WAIT_STEP_MS: u64 = 10;
 
 // ── terminal guard (pure; mirrors _is_terminal_or_ide) ─────────────────────
 
@@ -133,10 +150,7 @@ pub fn is_terminal_window(class: &str, proc_name: &str, pid: PidState) -> bool {
 /// Extract the image file name from a full process image path
 /// (`C:\Windows\System32\cmd.exe` → `cmd.exe`). Never fails.
 pub fn proc_file_name(image_path: &str) -> &str {
-    match image_path.rsplit(['\\', '/']).next() {
-        Some(name) => name,
-        None => "",
-    }
+    image_path.rsplit(['\\', '/']).next().unwrap_or_default()
 }
 
 // ── foreground-target verification (pure) ──────────────────────────────────
@@ -163,9 +177,19 @@ pub trait CaptureEnv {
     fn write_clipboard(&mut self, text: &str) -> bool;
     /// True when the foreground window needs the terminal-safe chord.
     fn is_terminal(&mut self) -> bool;
+    /// True when a conflicting modifier is physically held: Shift/Alt/Win,
+    /// or Alt/Win only when `terminal` (Shift is part of the terminal chord).
+    /// The caller aborts cleanly instead of injecting while this holds
+    /// (Decision 35 hard invariant).
+    fn mods_conflicting_held(&mut self, terminal: bool) -> bool;
     /// Inject the copy chord. `terminal == true` MUST send Ctrl+Shift+C;
-    /// `false` sends plain Ctrl+C (with held-modifier release).
-    fn send_copy_chord(&mut self, terminal: bool);
+    /// `false` sends plain Ctrl+C. Returns false (injecting NOTHING) when a
+    /// conflicting modifier is still held after the release wait.
+    fn send_copy_chord(&mut self, terminal: bool) -> bool;
+    /// Inject the alternate copy chord for the one retry (`CtrlInsert` off
+    /// terminals, `CtrlShiftC` repeat on terminals). Same wait+abort
+    /// semantics as [`CaptureEnv::send_copy_chord`].
+    fn send_copy_chord_alt(&mut self, kind: ChordKind) -> bool;
     /// Inject the paste chord (Ctrl+Shift+V on terminals, Ctrl+V elsewhere).
     fn send_paste_chord(&mut self, terminal: bool);
     /// True when a live, eligible external window owns the foreground now.
@@ -190,7 +214,9 @@ pub trait CaptureAgent {
 
 /// Capture orchestration over any [`CaptureEnv`]. Restores the original
 /// clipboard (gated on no external change since the last read) on every path
-/// and returns the captured text, or "" when no selection appeared.
+/// that touched it, and returns the captured text, or "" when no selection
+/// appeared. Sends the primary chord first and retries ONCE with the
+/// context-aware alternate chord when the first attempt misses.
 pub fn capture_with_env(env: &mut impl CaptureEnv, timeout_ms: u64) -> Result<String, IpcError> {
     if timeout_ms == 0 {
         return Ok(String::new());
@@ -202,13 +228,102 @@ pub fn capture_with_env(env: &mut impl CaptureEnv, timeout_ms: u64) -> Result<St
         }
     }
     let terminal = env.is_terminal();
+    // Decision 35 hard invariant: NEVER inject a copy chord while a
+    // conflicting modifier is held. Shift+F9 always has Shift down at fire
+    // time, so wait for the natural release (bounded cap) and abort cleanly
+    // BEFORE touching the clipboard only if it is still held after the cap.
+    if !wait_mods_clear(env, terminal) {
+        return Ok(String::new());
+    }
     let old = env.clipboard_text();
 
+    // First attempt: plain Ctrl+C (terminal: Ctrl+Shift+C — the terminal
+    // branch NEVER sends plain Ctrl+C, which would SIGINT the foreground job).
+    
+    let last_seq: u64 = match attempt_capture(env, terminal, &old, timeout_ms, None) {
+        AttemptOutcome::Aborted { last_seq: s } => {
+            restore_when_unchanged(env, &old, s);
+            return Ok(String::new());
+        }
+        AttemptOutcome::Found { text, last_seq: s } => {
+            restore_when_unchanged(env, &old, s);
+            return Ok(text);
+        }
+        AttemptOutcome::Missed { last_seq: s } => {
+            s
+        }
+    };
+
+    // Retry ONCE with the context-aware alternate (non-terminal: Ctrl+Insert;
+    // terminal: Ctrl+Shift+C again — plain Ctrl+C is never safe there).
+    // A held-modifier abort is final (no third attempt); a second miss fails.
+    let alternate = if terminal {
+        ChordKind::CtrlShiftC
+    } else {
+        ChordKind::CtrlInsert
+    };
+    if !wait_mods_clear(env, terminal) {
+        restore_when_unchanged(env, &old, last_seq);
+        return Ok(String::new());
+    }
+    match attempt_capture(env, terminal, &old, timeout_ms, Some(alternate)) {
+        AttemptOutcome::Found { text, last_seq: s } => {
+            restore_when_unchanged(env, &old, s);
+            Ok(text)
+        }
+        AttemptOutcome::Aborted { last_seq: s } | AttemptOutcome::Missed { last_seq: s } => {
+            restore_when_unchanged(env, &old, s);
+            Ok(String::new())
+        }
+    }
+}
+/// Bounded wait for a natural modifier release. True when clear (safe to
+/// inject); false when still held after the cap (caller aborts cleanly).
+fn wait_mods_clear(env: &mut impl CaptureEnv, terminal: bool) -> bool {
+    let mut waited: u64 = 0;
+    while env.mods_conflicting_held(terminal) {
+        if waited >= MOD_WAIT_TIMEOUT_MS {
+            return false;
+        }
+        env.sleep_ms(MOD_WAIT_STEP_MS);
+        waited = waited.saturating_add(MOD_WAIT_STEP_MS);
+    }
+    true
+}
+
+/// Outcome of one capture round. `Aborted` means the chord was never injected
+/// (conflicting modifier still held) — the caller must NOT retry, only abort.
+/// `Missed` means the chord went out but the clipboard never showed a
+/// selection — the caller may retry once with the alternate chord.
+enum AttemptOutcome {
+    Aborted { last_seq: u64 },
+    Found { text: String, last_seq: u64 },
+    Missed { last_seq: u64 },
+}
+
+/// One clear+chord+poll round. `alt == None` sends the primary chord (plain
+/// Ctrl+C, or Ctrl+Shift+C on terminals); `Some(kind)` sends the alternate
+/// via [`CaptureEnv::send_copy_chord_alt`]. Never retries internally.
+fn attempt_capture(
+    env: &mut impl CaptureEnv,
+    terminal: bool,
+    old: &str,
+    timeout_ms: u64,
+    alt: Option<ChordKind>,
+) -> AttemptOutcome {
     if terminal {
         // Terminal path — never clear the clipboard first: clearing deselects
         // text in terminal apps, so the copy chord would capture nothing.
         // The terminal branch MUST NEVER send plain Ctrl+C.
-        env.send_copy_chord(true);
+        let sent = match alt {
+            None => env.send_copy_chord(true),
+            Some(kind) => env.send_copy_chord_alt(kind),
+        };
+        if !sent {
+            return AttemptOutcome::Aborted {
+                last_seq: env.clipboard_seq(),
+            };
+        }
     } else {
         // Non-terminal path — clear and verify the clear (retry once), so a
         // stuck clipboard lock cannot surface stale content as "selection".
@@ -219,13 +334,20 @@ pub fn capture_with_env(env: &mut impl CaptureEnv, timeout_ms: u64) -> Result<St
             env.write_clipboard("");
             env.sleep_ms(CAPTURE_CLEAR_SETTLE_MS);
         }
-        env.send_copy_chord(false);
+        let sent = match alt {
+            None => env.send_copy_chord(false),
+            Some(kind) => env.send_copy_chord_alt(kind),
+        };
+        if !sent {
+            return AttemptOutcome::Aborted {
+                last_seq: env.clipboard_seq(),
+            };
+        }
     }
 
     env.sleep_ms(CLIPBOARD_INITIAL_GRACE_MS);
     let mut spent = CLIPBOARD_INITIAL_GRACE_MS;
     let mut polls: u32 = 0;
-    let mut found: Option<String> = None;
     let mut last_seq = env.clipboard_seq();
     while polls < CLIPBOARD_MAX_POLLS && spent < timeout_ms {
         env.sleep_ms(CLIPBOARD_POLL_INTERVAL_MS);
@@ -239,16 +361,13 @@ pub fn capture_with_env(env: &mut impl CaptureEnv, timeout_ms: u64) -> Result<St
             !current.is_empty()
         };
         if hit {
-            found = Some(current);
-            break;
+            return AttemptOutcome::Found {
+                text: current,
+                last_seq,
+            };
         }
     }
-
-    restore_when_unchanged(env, &old, last_seq);
-    match found {
-        Some(text) => Ok(text),
-        None => Ok(String::new()),
-    }
+    AttemptOutcome::Missed { last_seq }
 }
 
 /// Paste orchestration over any [`CaptureEnv`]. Returns the pasted char count.
@@ -284,7 +403,12 @@ pub fn paste_with_env(
         let mut gate = ClipboardRestoreGate::new();
         gate.record_post_write(post_write_seq);
         if gate.decide(current_seq) == crate::clipboard::RestoreDecision::Restore && old != text {
-            env.write_clipboard(&old);
+            // Delayed restore (see PASTE_RESTORE_DELAY_MS); `!old.is_empty()`
+            // mirrors the Python `_paste_text` guard.
+            if !old.is_empty() {
+                env.sleep_ms(PASTE_RESTORE_DELAY_MS);
+                env.write_clipboard(&old);
+            }
         }
     }
     // Unverified (clipboard changed externally): leave it untouched, exactly
@@ -350,20 +474,24 @@ struct WinEnv;
 
 #[cfg(windows)]
 mod win_impl {
-    use super::{proc_file_name, verify_foreground_target, PidState};
+    use super::{MOD_WAIT_STEP_MS, MOD_WAIT_TIMEOUT_MS, proc_file_name, verify_foreground_target, PidState};
     use super::{is_terminal_window, CaptureEnv};
+    use crate::chord::ChordKind;
 
     pub(super) const VK_LWIN: u32 = 0x5B;
     pub(super) const VK_RWIN: u32 = 0x5C;
-    const MOD_WAIT_TIMEOUT_MS: u64 = 200;
-    const MOD_WAIT_STEP_MS: u64 = 10;
 
-    pub(super) fn wait_mods_released(mods: &[u32]) {
+    /// Wait for conflicting modifiers to release. True when clear (safe to
+    /// inject); false on timeout with a modifier still held (caller aborts).
+    pub(super) fn wait_mods_released(mods: &[u32]) -> bool {
         let mut waited: u64 = 0;
-        while waited < MOD_WAIT_TIMEOUT_MS {
+        loop {
             let held = mods.iter().any(|m| ffi_skel::input::is_async_key_down(*m));
             if !held {
-                return;
+                return true;
+            }
+            if waited >= MOD_WAIT_TIMEOUT_MS {
+                return false;
             }
             std::thread::sleep(std::time::Duration::from_millis(MOD_WAIT_STEP_MS));
             waited = waited.saturating_add(MOD_WAIT_STEP_MS);
@@ -371,22 +499,33 @@ mod win_impl {
     }
 
     /// Build + inject one Ctrl(+Shift)+vk chord, all Stet-tagged, as a single
-    /// SendInput batch. `terminal` selects Ctrl+Shift+vk; otherwise any
-    /// physically-held Shift/Alt/Win is released first (mirror of
+    /// SendInput batch. `terminal` selects Ctrl+Shift+vk (mirror of
     /// `_send_ctrl_chord` / `_send_ctrl_shift_chord` in stet/core/clipboard.py).
-    pub(super) fn send_chord(terminal: bool, vk: u32) {
+    /// Returns false — injecting NOTHING, no SendInput call — when a
+    /// conflicting modifier is still held after the release wait (Decision 35
+    /// hard invariant: NEVER inject the copy chord while one is held; a
+    /// synthetic release KEYUP would deselect the selection and empty the
+    /// first capture, so abort cleanly instead).
+    pub(super) fn send_chord(terminal: bool, vk: u32) -> bool {
         use ffi_skel::input::{is_async_key_down, make_keyboard_input, send_events};
         use ffi_skel::types::{STET_DW_EXTRA_INFO, VK_CONTROL, VK_MENU, VK_SHIFT};
+        let conflicting: &[u32] = if terminal {
+            &[VK_MENU, VK_LWIN, VK_RWIN]
+        } else {
+            &[VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]
+        };
+        if !wait_mods_released(conflicting) {
+            return false;
+        }
+        // TOCTOU guard: a modifier pressed between the wait and the inject
+        // still aborts — NEVER inject while one is held.
+        if conflicting.iter().any(|m| is_async_key_down(*m)) {
+            return false;
+        }
         let tag = STET_DW_EXTRA_INFO;
         unsafe {
             let mut inputs = Vec::with_capacity(8);
             if terminal {
-                wait_mods_released(&[VK_MENU, VK_LWIN, VK_RWIN]);
-                for m in [VK_MENU, VK_LWIN, VK_RWIN] {
-                    if is_async_key_down(m) {
-                        inputs.push(make_keyboard_input(m, 0, true, false, tag));
-                    }
-                }
                 inputs.push(make_keyboard_input(VK_CONTROL, 0, false, false, tag));
                 inputs.push(make_keyboard_input(VK_SHIFT, 0, false, false, tag));
                 inputs.push(make_keyboard_input(vk, 0, false, false, tag));
@@ -394,12 +533,6 @@ mod win_impl {
                 inputs.push(make_keyboard_input(VK_SHIFT, 0, true, false, tag));
                 inputs.push(make_keyboard_input(VK_CONTROL, 0, true, false, tag));
             } else {
-                wait_mods_released(&[VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN]);
-                for m in [VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN] {
-                    if is_async_key_down(m) {
-                        inputs.push(make_keyboard_input(m, 0, true, false, tag));
-                    }
-                }
                 inputs.push(make_keyboard_input(VK_CONTROL, 0, false, false, tag));
                 inputs.push(make_keyboard_input(vk, 0, false, false, tag));
                 inputs.push(make_keyboard_input(vk, 0, true, false, tag));
@@ -407,6 +540,7 @@ mod win_impl {
             }
             send_events(&inputs);
         }
+        true
     }
 
     pub(super) fn live_is_terminal() -> bool {
@@ -487,18 +621,35 @@ mod win_impl {
             live_is_terminal()
         }
 
-        fn send_copy_chord(&mut self, terminal: bool) {
-            send_chord(
-                terminal,
-                ffi_skel::types::VK_C,
-            );
+        fn mods_conflicting_held(&mut self, terminal: bool) -> bool {
+            use ffi_skel::input::is_async_key_down;
+            use ffi_skel::types::{VK_MENU, VK_SHIFT};
+            if terminal {
+                is_async_key_down(VK_MENU) || is_async_key_down(VK_LWIN) || is_async_key_down(VK_RWIN)
+            } else {
+                is_async_key_down(VK_SHIFT)
+                    || is_async_key_down(VK_MENU)
+                    || is_async_key_down(VK_LWIN)
+                    || is_async_key_down(VK_RWIN)
+            }
+        }
+
+        fn send_copy_chord(&mut self, terminal: bool) -> bool {
+            send_chord(terminal, ffi_skel::types::VK_C)
+        }
+
+        fn send_copy_chord_alt(&mut self, kind: ChordKind) -> bool {
+            match kind {
+                ChordKind::CtrlC => send_chord(false, ffi_skel::types::VK_C),
+                ChordKind::CtrlInsert => send_chord(false, ffi_skel::types::VK_INSERT),
+                ChordKind::CtrlShiftC => send_chord(true, ffi_skel::types::VK_C),
+                ChordKind::CtrlV => send_chord(false, ffi_skel::types::VK_V),
+                ChordKind::CtrlShiftV => send_chord(true, ffi_skel::types::VK_V),
+            }
         }
 
         fn send_paste_chord(&mut self, terminal: bool) {
-            send_chord(
-                terminal,
-                ffi_skel::types::VK_V,
-            );
+            let _ = send_chord(terminal, ffi_skel::types::VK_V);
         }
 
         fn foreground_eligible(&mut self) -> bool {
@@ -651,7 +802,10 @@ mod tests {
         seq: Cell<u64>,
         terminal: bool,
         eligible: bool,
+        held: bool,
+        release_after: Cell<Option<u64>>,
         copy_chords: RefCell<Vec<bool>>,
+        copy_kinds: RefCell<Vec<ChordKind>>,
         paste_chords: RefCell<Vec<bool>>,
         writes: RefCell<Vec<String>>,
         sleeps: RefCell<Vec<u64>>,
@@ -665,12 +819,19 @@ mod tests {
                 seq: Cell::new(7),
                 terminal,
                 eligible: true,
+                held: false,
+                release_after: Cell::new(None),
                 copy_chords: RefCell::new(Vec::new()),
+                copy_kinds: RefCell::new(Vec::new()),
                 paste_chords: RefCell::new(Vec::new()),
                 writes: RefCell::new(Vec::new()),
                 sleeps: RefCell::new(Vec::new()),
                 uia_text: RefCell::new(None),
             }
+        }
+
+        fn set_held(&mut self, held: bool) {
+            self.held = held;
         }
 
         fn pop_text(&self) -> String {
@@ -699,8 +860,44 @@ mod tests {
         fn is_terminal(&mut self) -> bool {
             self.terminal
         }
-        fn send_copy_chord(&mut self, terminal: bool) {
+        fn mods_conflicting_held(&mut self, _terminal: bool) -> bool {
+            if !self.held {
+                return false;
+            }
+            match self.release_after.get() {
+                None => true,
+                Some(0) => {
+                    self.held = false;
+                    false
+                }
+                Some(n) => {
+                    self.release_after.set(Some(n - 1));
+                    true
+                }
+            }
+        }
+        fn send_copy_chord(&mut self, terminal: bool) -> bool {
+            if self.held {
+                return false;
+            }
             self.copy_chords.borrow_mut().push(terminal);
+            self.copy_kinds.borrow_mut().push(if terminal {
+                ChordKind::CtrlShiftC
+            } else {
+                ChordKind::CtrlC
+            });
+            true
+        }
+        fn send_copy_chord_alt(&mut self, kind: ChordKind) -> bool {
+            if self.held {
+                return false;
+            }
+            self.copy_chords.borrow_mut().push(matches!(
+                kind,
+                ChordKind::CtrlShiftC | ChordKind::CtrlShiftV
+            ));
+            self.copy_kinds.borrow_mut().push(kind);
+            true
         }
         fn send_paste_chord(&mut self, terminal: bool) {
             self.paste_chords.borrow_mut().push(terminal);
@@ -726,6 +923,10 @@ mod tests {
         fn new(texts: Vec<&str>, terminal: bool) -> Self {
             SteadyEnv { inner: FakeEnv::new(texts, terminal) }
         }
+
+        fn set_held(&mut self, held: bool) {
+            self.inner.set_held(held);
+        }
     }
 
     impl CaptureEnv for SteadyEnv {
@@ -741,8 +942,14 @@ mod tests {
         fn is_terminal(&mut self) -> bool {
             self.inner.terminal
         }
-        fn send_copy_chord(&mut self, terminal: bool) {
-            self.inner.send_copy_chord(terminal);
+        fn mods_conflicting_held(&mut self, terminal: bool) -> bool {
+            self.inner.mods_conflicting_held(terminal)
+        }
+        fn send_copy_chord(&mut self, terminal: bool) -> bool {
+            self.inner.send_copy_chord(terminal)
+        }
+        fn send_copy_chord_alt(&mut self, kind: ChordKind) -> bool {
+            self.inner.send_copy_chord_alt(kind)
         }
         fn send_paste_chord(&mut self, terminal: bool) {
             self.inner.send_paste_chord(terminal);
@@ -793,7 +1000,56 @@ mod tests {
         let mut env = SteadyEnv::new(vec!["same", "same", "same"], true);
         let out = capture_with_env(&mut env, 60).unwrap();
         assert_eq!(out, "");
-        assert_eq!(*env.inner.copy_chords.borrow(), vec![true]);
+        // Miss retries once with the terminal alternate (Ctrl+Shift+C again —
+        // plain Ctrl+C is never safe on terminals).
+        assert_eq!(*env.inner.copy_chords.borrow(), vec![true, true]);
+        assert_eq!(
+            *env.inner.copy_kinds.borrow(),
+            vec![ChordKind::CtrlShiftC, ChordKind::CtrlShiftC]
+        );
+    }
+
+    #[test]
+    fn retry_succeeds_on_alternate_chord() {
+        // Non-terminal: old="old", both clear-verify reads "", the first
+        // attempt polls "" (miss → TryAlternate with Ctrl+Insert) and the
+        // alternate attempt polls "sel". Timeout 60 ms pins one poll per
+        // attempt, so the script maps 1:1 to reads.
+        let mut env = SteadyEnv::new(vec!["old", "", "", "", "sel"], false);
+        env.set_held(false);
+        let out = capture_with_env(&mut env, 60).unwrap();
+        assert_eq!(out, "sel");
+        assert_eq!(
+            *env.inner.copy_kinds.borrow(),
+            vec![ChordKind::CtrlC, ChordKind::CtrlInsert]
+        );
+        assert_eq!(*env.inner.copy_chords.borrow(), vec![false, false]);
+    }
+
+    #[test]
+    fn abort_when_mods_held() {
+        // Decision 35: conflicting modifier held → clean abort BEFORE the
+        // clipboard is touched: no chord, no clear, no poll.
+        let mut env = SteadyEnv::new(vec!["old"], false);
+        env.set_held(true);
+        let out = capture_with_env(&mut env, 1500).unwrap();
+        assert_eq!(out, "");
+        assert!(env.inner.copy_chords.borrow().is_empty());
+        assert!(env.inner.copy_kinds.borrow().is_empty());
+        assert!(env.inner.writes.borrow().is_empty());
+    }
+    #[test]
+    fn waits_for_natural_release_before_injecting() {
+        // Shift+F9: Shift down at fire, released ~30 ms later. Entry must
+        // wait for the release, NOT abort — then capture normally with the
+        // primary chord alone. Fails on an instant-abort check.
+        let mut env = SteadyEnv::new(vec!["old", "", "", "sel"], false);
+        env.inner.held = true;
+        env.inner.release_after.set(Some(3));
+        let out = capture_with_env(&mut env, 1500).unwrap();
+        assert_eq!(out, "sel");
+        assert_eq!(env.inner.copy_chords.borrow().len(), 1);
+        assert_eq!(&env.inner.sleeps.borrow()[..3], &[10, 10, 10]);
     }
 
     #[test]

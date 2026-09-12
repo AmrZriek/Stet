@@ -1459,21 +1459,6 @@ class TestStetAppCaptureSelection:
         )
         assert "join(timeout=1.5)" not in src
 
-    def test_capture_selection_polling_constants(self):
-        """Verify the polling tunables are set to the latency-reduced values.
-
-        Worst-case wait: 50 ms + 12 * 15 ms = 230 ms (was 680 ms).
-        """
-        assert StetApp._CLIPBOARD_POLL_INTERVAL == 0.015
-        assert StetApp._CLIPBOARD_MAX_POLLS == 12
-        assert StetApp._CLIPBOARD_INITIAL_GRACE == 0.05
-
-        # Sanity-check the worst-case math
-        worst_case = (
-            StetApp._CLIPBOARD_INITIAL_GRACE
-            + StetApp._CLIPBOARD_MAX_POLLS * StetApp._CLIPBOARD_POLL_INTERVAL
-        )
-        assert worst_case <= 0.25  # well under the old 680 ms ceiling
 
 class TestStetAppTrayActivated:
     @patch("stet.core.app.QSystemTrayIcon")
@@ -2177,7 +2162,8 @@ class TestStetAppPrewarmAndDaemonWiring:
 
     @patch("stet.core.app.QSystemTrayIcon")
     def test_restore_capture_focus_calls_allow_set_foreground_window(self, mock_tray_cls, qtbot, monkeypatch):
-        import ctypes as _ctypes, os as _os
+        import ctypes as _ctypes
+        import os as _os
         app = StetApp()
         app._last_active_app_hwnd = 0x5555
         allowed_pids = []

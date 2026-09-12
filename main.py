@@ -15,12 +15,14 @@ from pathlib import Path
 from datetime import datetime
 
 _SCRIPT_DIR = Path(__file__).parent.resolve()
-_LOG_FILE = _SCRIPT_DIR / "app_debug.log"
+_LOG_DIR = _SCRIPT_DIR / "logs"
+_LOG_FILE = _LOG_DIR / "app_debug.log"
 
 
 def _boot_log(msg: str):
-    """Write directly to app_debug.log using only stdlib — no project imports."""
+    """Write directly to logs/app_debug.log using only stdlib — no project imports."""
     try:
+        _LOG_DIR.mkdir(parents=True, exist_ok=True)
         with open(_LOG_FILE, "a", encoding="utf-8") as f:
             f.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
     except Exception:
