@@ -6,7 +6,10 @@ validation, `_read_reply` matching/timeout, capture/paste routing).
 """
 
 import ctypes  # noqa: F401  (pre-import so patched-open tests never hit the FS)
-import msvcrt  # noqa: F401
+try:
+    import msvcrt  # noqa: F401  (Windows only; pre-import so patched-open tests never hit the FS)
+except ImportError:  # macOS/Linux CI has no msvcrt
+    msvcrt = None  # type: ignore[assignment]
 import os
 import struct
 import sys
