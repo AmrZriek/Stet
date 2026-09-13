@@ -104,6 +104,18 @@ def make_scrollable_page(title_str, page, add_to_stack=True):
     return form
 
 
+def _grid_cell(label: str, widget) -> QWidget:
+    cell = QWidget()
+    cell_lay = QVBoxLayout(cell)
+    cell_lay.setContentsMargins(0, 0, 0, 0)
+    cell_lay.setSpacing(4)
+    lbl = QLabel(label)
+    lbl.setObjectName("fieldGroupLabel")
+    cell_lay.addWidget(lbl)
+    cell_lay.addWidget(widget)
+    return cell
+
+
 def _effective_ctx_for(info) -> int | None:
     """Effective context when auto-derivation is selected.
 
@@ -440,18 +452,6 @@ class ParametersPage(QWidget):
         model_tab = QWidget()
         model_tab.setObjectName("modelParamsTab")
         form = make_scrollable_page(None, model_tab, add_to_stack=False)
-
-        # Helper for a labeled grid cell
-        def _grid_cell(label: str, widget) -> QWidget:
-            cell = QWidget()
-            cell_lay = QVBoxLayout(cell)
-            cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(4)
-            lbl = QLabel(label)
-            lbl.setObjectName("fieldGroupLabel")
-            cell_lay.addWidget(lbl)
-            cell_lay.addWidget(widget)
-            return cell
 
         # --- Architecture Section ---
         arch_title = QLabel("Architecture")
@@ -1367,18 +1367,6 @@ class ChatParametersPage(QWidget):
 
     def _build_ui(self):
         form = make_scrollable_page(None, self, add_to_stack=False)
-
-        # Helper for a labeled grid cell
-        def _grid_cell(label: str, widget) -> QWidget:
-            cell = QWidget()
-            cell_lay = QVBoxLayout(cell)
-            cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(4)
-            lbl = QLabel(label)
-            lbl.setObjectName("fieldGroupLabel")
-            cell_lay.addWidget(lbl)
-            cell_lay.addWidget(widget)
-            return cell
 
         # --- Architecture Section ---
         arch_title = QLabel("Architecture")

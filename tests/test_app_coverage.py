@@ -1695,7 +1695,7 @@ class TestStetAppHandleHotkeyFired:
 
         # This test is about the warning signal only.  Do not let the panel
         # trigger create a real correction window and its worker thread.
-        app._trigger.disconnect()
+        app._show_window = MagicMock()
 
         received = []
         app._large_doc_warning_signal.connect(lambda t: received.append(t))

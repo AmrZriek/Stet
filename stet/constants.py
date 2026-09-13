@@ -14,7 +14,7 @@ Cross-platform: Windows / macOS / Linux.
 Single-file deployment (plus llama_cpp/ binary folder and LLM model .gguf).
 """
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 
 # ── stdlib ─────────────────────────────────────────────────────────────────
 import os

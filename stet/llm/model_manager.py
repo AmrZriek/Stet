@@ -1547,9 +1547,6 @@ class ModelManager(QObject):
 
         shared_session = self._get_session()
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-        # Track which chunks have protected atoms so we can attempt span-only
-        # recovery on sentinel validation failure.
-        _chunks_with_sentinels: dict[int, str] = {}  # idx -> original chunk text
         try:
             futures = {}
             for idx, (chunk_text, sep) in enumerate(chunks):
@@ -1566,9 +1563,6 @@ class ModelManager(QObject):
                         except Exception:
                             pass
                     continue
-                # Record chunks that contain sentinels for recovery.
-                if _INLINE_SENTINEL_RE.search(chunk_text):
-                    _chunks_with_sentinels[idx] = chunk_text
 
                 futures[executor.submit(
                     self._rewrite_sentence_chunk,

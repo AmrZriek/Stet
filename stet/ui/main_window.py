@@ -16,7 +16,6 @@ from PyQt6.QtGui import QCursor, QIcon, QKeySequence, QPainter, QPixmap, QShortc
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
-    QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -761,12 +760,6 @@ class CorrectionWindow(QWidget):
             self._toggle_edit_text_mode()
             return
         super().keyPressEvent(e)
-
-    def _make_sep(self):
-        f = QFrame()
-        f.setObjectName("sep")
-        f.setFrameShape(QFrame.Shape.HLine)
-        return f
 
     def _build_ui(self):
         self.setWindowTitle("Stet")

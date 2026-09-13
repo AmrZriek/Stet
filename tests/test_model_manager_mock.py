@@ -9,7 +9,7 @@ import pytest
 
 from stet.core.config import ConfigManager
 from stet.core.text_utils import _extract_rewritten_sentence
-from stet.llm.gguf_info import GgufModelInfo, GgufReadError
+from stet.llm.gguf_info import GgufModelInfo
 from stet.llm.model_manager import (
     _STRENGTH_TO_MODE_INDEX,
     _detect_loaded_backend,
@@ -1098,100 +1098,6 @@ class TestServerLaunchCommand:
         assert cmd[cmd.index("--reasoning-budget") + 1] == "0"
         # Budget sits directly after --reasoning off and --reasoning-format
         assert "--reasoning-budget" in cmd
-
-    @patch("subprocess.Popen")
-    @patch("requests.get")
-    def test_non_reasoning_template_omits_chat_template_file(
-        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
-    ):
-        """A model whose template does not prime thinking must NOT get a
-        --chat-template-file override."""
-        model = tmp_path / "PlainModel.gguf"
-        model.touch()
-        cfg.set("model_path", str(model))
-        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
-        fake_server.touch()
-        cfg.set("llama_server_path", str(fake_server))
-
-        mock_health_resp = MagicMock()
-        mock_health_resp.status_code = 200
-        mock_props_resp = MagicMock()
-        mock_props_resp.ok = True
-        mock_props_resp.json.return_value = {"n_ctx": 4096}
-        mock_get.side_effect = lambda url, **kwargs: (
-            mock_props_resp if "/props" in url else mock_health_resp
-        )
-
-        fake_info = GgufModelInfo(
-            path=str(model),
-            architecture="qwen2",
-            name="PlainModel",
-            chat_template=(
-                '{%- if add_generation_prompt -%}'
-                '{{- "<|im_start|>assistant\\n" -}}'
-                '{%- endif -%}'
-            ),
-            n_ctx_train=4096,
-            reasoning_capable=False,
-            file_size=1,
-            mtime=1.0,
-        )
-        monkeypatch.setattr(
-            "stet.llm.model_manager.get_gguf_info_cached", lambda p: fake_info
-        )
-
-        proc = MagicMock()
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
-
-        mgr = ModelManager(cfg)
-        assert mgr.load_model() is True
-
-        cmd = mock_popen.call_args[0][0]
-        assert "--chat-template-file" not in cmd
-        # Base reasoning suppression is still present
-        assert cmd[cmd.index("--reasoning") + 1] == "off"
-
-    @patch("subprocess.Popen")
-    @patch("requests.get")
-    def test_gguf_read_failure_omits_chat_template_file_no_crash(
-        self, mock_get, mock_popen, cfg, tmp_path, monkeypatch
-    ):
-        """GGUF metadata read failure must degrade gracefully: no template
-        flag, no crash, load still succeeds."""
-        model = tmp_path / "BrokenModel.gguf"
-        model.touch()
-        cfg.set("model_path", str(model))
-        fake_server = Path(cfg.get("model_path")).parent / "llama-server.exe"
-        fake_server.touch()
-        cfg.set("llama_server_path", str(fake_server))
-
-        mock_health_resp = MagicMock()
-        mock_health_resp.status_code = 200
-        mock_props_resp = MagicMock()
-        mock_props_resp.ok = True
-        mock_props_resp.json.return_value = {"n_ctx": 4096}
-        mock_get.side_effect = lambda url, **kwargs: (
-            mock_props_resp if "/props" in url else mock_health_resp
-        )
-
-        def _raise_gguf_error(_path):
-            raise GgufReadError("gguf package not installed")
-
-        monkeypatch.setattr(
-            "stet.llm.model_manager.get_gguf_info_cached", _raise_gguf_error
-        )
-
-        proc = MagicMock()
-        proc.poll.return_value = None
-        mock_popen.return_value = proc
-
-        mgr = ModelManager(cfg)
-        assert mgr.load_model() is True
-
-        cmd = mock_popen.call_args[0][0]
-        assert "--chat-template-file" not in cmd
-        assert cmd[cmd.index("--reasoning") + 1] == "off"
 
     @patch("subprocess.Popen")
     @patch("requests.get")

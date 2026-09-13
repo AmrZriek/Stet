@@ -974,19 +974,17 @@ class TestDoCorrection:
         monkeypatch.setattr("time.sleep", lambda *a, **k: None)
         cw = _make_cw(cfg, qtbot)
         cw.ac_model.is_loaded.return_value = False
+        cw.ac_model.should_retry_load.return_value = False
         cw.ac_model.load_model = MagicMock(return_value=None)
-        mock_worker = MagicMock()
-        cw.ac_model.make_patch_worker.return_value = mock_worker
-        # Connect signal handler to capture
         results = []
-        cw._correction_ready.connect(
-            lambda text, method: results.append((text, method))
-        )
+        cw._correction_failed_with_msg.connect(results.append)
         cw._do_correction()
-        # Signal may deliver synchronously
-        # Just verify no crash
+        assert len(results) == 1
+        assert cw._retry_correction_when_model_ready is True
 
     def test_already_correct(self, qtbot, cfg, monkeypatch):
+        from stet.core.text_utils import CorrectionOutcome, CorrectionResult
+
         monkeypatch.setattr(
             "requests.get",
             lambda *a, **k: MagicMock(status_code=200),
@@ -994,14 +992,20 @@ class TestDoCorrection:
         monkeypatch.setattr("time.sleep", lambda *a, **k: None)
         cw = _make_cw(cfg, qtbot)
         cw.ac_model.is_loaded.return_value = True
-        mock_worker = MagicMock()
-        cw.ac_model.make_patch_worker.return_value = mock_worker
+        cw.ac_model.correct_text_patch.return_value = CorrectionResult(
+            text=cw.original,
+            outcome=CorrectionOutcome.UNCHANGED_NO_ERRORS,
+            units_processed=1,
+            units_corrected=0,
+        )
         results = []
         cw._correction_ready.connect(
             lambda text, method: results.append((text, method))
         )
         cw._do_correction()
-        # Just verify no crash
+        assert len(results) == 1
+        assert results[0][0] == cw.original
+        assert results[0][1] == "Already correct"
 
     def test_do_correction_clears_in_flight_flag_on_exit(self, qtbot, cfg, monkeypatch):
         """_correction_in_flight must be reset to False in finally block when _do_correction finishes."""
@@ -1012,8 +1016,7 @@ class TestDoCorrection:
         monkeypatch.setattr("time.sleep", lambda *a, **k: None)
         cw = _make_cw(cfg, qtbot)
         cw.ac_model.is_loaded.return_value = True
-        mock_worker = MagicMock()
-        cw.ac_model.make_patch_worker.return_value = mock_worker
+        cw.ac_model.correct_text_patch = MagicMock(return_value=("corrected", []))
 
         assert cw._correction_in_flight is False
         cw._do_correction()

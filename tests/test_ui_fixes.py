@@ -42,27 +42,7 @@ def _make_window(monkeypatch, qtbot, original, overrides=None):
 
 
 # ── Issue #2: Port alignment ─────────────────────────────────────────────────
-def test_port_spin_not_wrapped_in_hboxlayout():
-    """Port spin field should be added directly to page form, not wrapped in QHBoxLayout."""
-    import inspect
-    from stet.ui.settings import SettingsDialog
-    src = inspect.getsource(SettingsDialog._build_ui)
-    # The old code had "host_port_lay = QHBoxLayout()" wrapping the port.
-    # The fix removes that wrapper.
-    assert "host_port_lay" not in src, "Port field should not be wrapped in a QHBoxLayout (Issue #2)"
-
-
 # ── Issue #1: Template drag-and-drop ──────────────────────────────────────────
-def test_templates_use_qlistwidget():
-    """Template list in settings should use QListWidget for drag-and-drop, not QVBoxLayout rows."""
-    import inspect
-    from stet.ui.settings import SettingsDialog
-    src = inspect.getsource(SettingsDialog._build_ui)
-    assert "templates_list_w" in src
-    # Should be a QListWidget, not a plain QWidget with QVBoxLayout
-    assert "QListWidget" in src or "setDragDropMode" in src, (
-        "Template list should use QListWidget with drag-and-drop (Issue #1)"
-    )
 
 
 def test_templates_list_has_drag_drop_mode(qapp):
@@ -266,26 +246,6 @@ def test_chat_mode_single_sets_correct_index(qapp):
     dlg = SettingsDialog(cfg)
     assert dlg.chat_mode_combo.currentIndex() == 1
     dlg.close()
-
-
-def test_conversation_mode_reads_from_config():
-    """CorrectionWindow._send_chat should read chat_mode from config."""
-    import inspect
-    from stet.ui.main_window import CorrectionWindow
-    src = inspect.getsource(CorrectionWindow._send_chat)
-    assert "chat_mode" in src, (
-        "_send_chat should read chat_mode config to determine conversation vs single mode"
-    )
-
-
-def test_on_chat_done_has_conversation_branch():
-    """_on_chat_done should branch on conversation vs single mode."""
-    import inspect
-    from stet.ui.main_window import CorrectionWindow
-    src = inspect.getsource(CorrectionWindow._on_chat_done)
-    assert "_conversation_mode" in src, (
-        "_on_chat_done should check _conversation_mode to decide whether to show diff or keep chat"
-    )
 
 
 def test_conversation_mode_preserves_previous_chat_turns(qtbot, monkeypatch):

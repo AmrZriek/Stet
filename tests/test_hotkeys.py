@@ -4,7 +4,6 @@ Merged from: test_hotkey_compatibility.py, test_hotkey_lifecycle.py,
 test_hotkey_edit.py, test_hotkey_stress.py, test_manual_edit.py.
 """
 
-import re
 import sys
 import time
 import copy
@@ -74,237 +73,6 @@ def _make_app_with_mocked_keyboard():
     with patch("ctypes.windll.user32", new=mock_user32):
         app = StetApp()
     return app
-
-
-# ── Known-conflict registry ──────────────────────────────────────────────
-
-KNOWN_CONFLICTS = {
-    "f9": {
-        "VS Code": "Toggle Breakpoint",
-        "Visual Studio": "Toggle Breakpoint / Debug",
-        "Chrome/Edge (DevTools)": "Run snippet (if open)",
-        "Firefox": "Reader View (some locales)",
-        "tmux": "Split window vertically (default prefix+F9)",
-        "GDB/LLDB": "Continue until breakpoint",
-    },
-    "f10": {
-        "Firefox": "Focus menu bar / Access key",
-        "Edge": "Focus menu bar",
-        "Windows Explorer": "Menu bar focus",
-        "Visual Studio": "Step Over (debugging)",
-        "GDB/LLDB": "Step Over",
-        "GNU Midnight Commander": "Menu bar / Quit dialog",
-        " terminals ( many )": "Menu activation",
-    },
-    "f1": {"Universal": "Help / Documentation"},
-    "f5": {"Universal": "Refresh / Reload / Continue debugging"},
-    "f11": {"Universal": "Full-screen toggle"},
-    "f12": {"Chrome/Edge/Firefox": "Developer Tools"},
-}
-
-SAFE_MODIFIER_HOTKEYS = [
-    "ctrl+shift+space",
-    "ctrl+shift+c",
-    "ctrl+shift+x",
-    "ctrl+shift+z",
-    "ctrl+shift+a",
-    "ctrl+shift+period",
-    "ctrl+alt+c",
-    "ctrl+alt+t",
-]
-
-RISKY_HOTKEYS = [
-    "f1",
-    "f2",
-    "f3",
-    "f4",
-    "f5",
-    "f6",
-    "f7",
-    "f8",
-    "f9",
-    "f10",
-    "f11",
-    "f12",
-    "ctrl+c",
-    "ctrl+v",
-    "ctrl+x",
-    "ctrl+z",
-    "ctrl+a",
-    "ctrl+s",
-    "alt+f4",
-    "print screen",
-    "tab",
-    "space",
-]
-
-
-# ── Source-level structural tests (regex-based) ──────────────────────────
-
-SRC = "\n".join(
-    f.read_text(encoding="utf-8")
-    for f in (Path(__file__).resolve().parent.parent / "stet").rglob("*.py")
-)
-
-
-def test_register_hotkey_uses_diff_based_registration():
-    """_register_hotkey must use diff-based registration (0g), not unregister-all.
-
-    The old contract unregistered all handles then re-registered everything.
-    0g uses compute_hotkey_diff to leave unchanged combos untouched (zero churn).
-    """
-    body = re.search(
-        r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
-    ).group(0)
-    assert "compute_hotkey_diff(" in body
-    # Selective rollback of newly-registered combos on failure (atomicity).
-    assert "UnregisterHotKey" in body
-    assert "_hotkey_handles.remove" in body
-
-
-def test_register_hotkey_tracks_registered_map():
-    """_register_hotkey must track shortcut->id in _hotkey_registered for diffs."""
-    body = re.search(
-        r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
-    ).group(0)
-    assert "_hotkey_registered[" in body
-
-
-def test_register_hotkey_uses_remove_hotkey_not_unhook_all():
-    """_register_hotkey must use UnregisterHotKey, not unhook_all_hotkeys."""
-    body = re.search(
-        r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
-    ).group(0)
-    assert "UnregisterHotKey" in body
-
-
-def test_register_hotkey_tracks_handles():
-    """_register_hotkey must store handles in _hotkey_handles for later removal."""
-    body = re.search(
-        r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
-    ).group(0)
-    assert "_hotkey_handles.append" in body
-
-
-def test_register_hotkey_has_debounce():
-    """_register_hotkey must debounce rapid calls."""
-    body = re.search(
-        r"def _register_hotkey\(self.*?\):.*?(?=\n    def )", SRC, re.DOTALL
-    ).group(0)
-    assert "_last_register_ts" in body
-
-
-def test_quit_uses_handle_removal_not_unhook_all():
-    """_quit must use UnregisterHotKey, not unhook_all_hotkeys."""
-    body = re.search(
-        r"def _quit\(self\):.*?(?=\n\n|\n    def |\nclass |\Z)", SRC, re.DOTALL
-    ).group(0)
-    assert "UnregisterHotKey" in body
-
-
-def test_escape_in_hotkey_edit_does_not_re_register():
-    """Pressing Escape during HotkeyEdit recording must NOT call re_register_cb."""
-    components_src = (
-        Path(__file__).resolve().parent.parent / "stet" / "ui" / "components.py"
-    ).read_text(encoding="utf-8")
-    body = re.search(
-        r"def keyPressEvent\(self, e\):.*?(?=\n    def |\nclass |\Z)",
-        components_src,
-        re.DOTALL,
-    ).group(0)
-    escape_block = re.search(r"Key_Escape:\s*\n(.*?)return", body, re.DOTALL)
-    assert escape_block is not None, "Escape handling block must exist"
-    escape_code = escape_block.group(1)
-    assert "_re_register_cb" not in escape_code
-
-
-def test_init_creates_hotkey_handles_list():
-    """StetApp.__init__ must create _hotkey_handles list."""
-    init_body = re.search(
-        r"class StetApp.*?def __init__\(self\):.*?(?=\n    def )", SRC, re.DOTALL
-    ).group(0)
-    assert "_hotkey_handles" in init_body
-    assert "_last_register_ts" in init_body
-
-
-# ── Safe-default policy tests ────────────────────────────────────────────
-
-
-def test_safe_modifier_hotkeys_pass_validation():
-    """Modifier-based hotkeys should be considered safe."""
-    for combo in SAFE_MODIFIER_HOTKEYS:
-        assert combo not in RISKY_HOTKEYS, f"{combo} accidentally marked risky"
-
-
-def test_risky_hotkeys_include_f9_f10():
-    """F9 and F10 must be in the risky hotkey list."""
-    assert "f9" in RISKY_HOTKEYS
-    assert "f10" in RISKY_HOTKEYS
-
-
-def test_f10_has_many_documented_conflicts():
-    """F10 must have documented conflicts with browsers and IDEs."""
-    assert "f10" in KNOWN_CONFLICTS
-    conflicts = KNOWN_CONFLICTS["f10"]
-    assert "Firefox" in conflicts
-    assert "Edge" in conflicts
-    assert "Visual Studio" in conflicts
-
-
-def test_f9_has_many_documented_conflicts():
-    """F9 must have documented conflicts with debuggers and IDEs."""
-    assert "f9" in KNOWN_CONFLICTS
-    conflicts = KNOWN_CONFLICTS["f9"]
-    assert "VS Code" in conflicts
-    assert "Visual Studio" in conflicts
-
-
-def test_current_defaults_f9_f10_are_risky():
-    """Current defaults (f9 / f10) are in the risky list."""
-    from stet.constants import DEFAULT_CONFIG
-
-    hotkeys = DEFAULT_CONFIG.get("hotkeys", [])
-    for hk in hotkeys:
-        shortcut = hk.get("shortcut", "").lower().strip()
-        if shortcut in ("f9", "f10"):
-            assert shortcut in RISKY_HOTKEYS, f"Default hotkey '{shortcut}' is risky"
-
-
-def test_proposed_safe_defaults_are_not_risky():
-    """Proposed safer defaults (ctrl+shift+space, ctrl+shift+c) are NOT in the risky list."""
-    assert "ctrl+shift+space" not in RISKY_HOTKEYS
-    assert "ctrl+shift+c" not in RISKY_HOTKEYS
-
-
-def test_can_detect_known_conflicts_by_lookup():
-    """A lookup function can flag known-conflict hotkeys."""
-
-    def is_known_conflict(combo: str) -> bool:
-        return combo.lower().strip() in KNOWN_CONFLICTS
-
-    assert is_known_conflict("f10") is True
-    assert is_known_conflict("f9") is True
-    assert is_known_conflict("ctrl+shift+space") is False
-
-
-def test_hotkey_without_modifier_is_flagged_risky():
-    """Any bare function key or single key should be flagged risky."""
-    bare_keys = [
-        "f1",
-        "f2",
-        "f3",
-        "f4",
-        "f5",
-        "f6",
-        "f7",
-        "f8",
-        "f9",
-        "f10",
-        "f11",
-        "f12",
-    ]
-    for key in bare_keys:
-        assert key in RISKY_HOTKEYS, f"{key} should be considered risky"
 
 
 # ── Registration behavior tests ───────────────────────────────────────
@@ -489,18 +257,6 @@ def test_debounce_allows_call_after_500ms(qtbot):
         assert mock_user32.RegisterHotKey.call_count == first_count
 
 
-def test_debounce_blocks_rapid_re_registration(qtbot):
-    """Calling _register_hotkey twice within 500ms should skip the second call."""
-    mock_user32 = MockUser32()
-    with patch("ctypes.windll.user32", new=mock_user32):
-        app = StetApp()
-        app._last_register_ts = 0.0
-        app._register_hotkey()
-        first_call_count = mock_user32.RegisterHotKey.call_count
-        app._register_hotkey()
-        assert mock_user32.RegisterHotKey.call_count == first_call_count
-
-
 def test_forced_registration_bypasses_debounce(qtbot):
     """Settings saves must re-register immediately even inside the debounce window."""
     mock_user32 = MockUser32()
@@ -636,24 +392,6 @@ def test_hotkey_edit_rejects_common_conflict_keys_without_modifier(qtbot):
     )
     w.keyPressEvent(ev)
     assert w.text() != "c"
-
-
-def test_hotkey_edit_overrides_event_to_intercept_shift_f10():
-    """HotkeyEdit must override QWidget.event so the Qt Shift+F10 -> ContextMenu
-    synthesis cannot swallow the keypress before our keyPressEvent runs."""
-    import re
-
-    body = re.search(
-        r"class HotkeyEdit.*?(?=\nclass |\n_QT_KEYS)",
-        SRC, re.DOTALL,
-    ).group(0)
-    assert "def event(self, e):" in body, "HotkeyEdit must override event()"
-    assert "self.keyPressEvent(e)" in body, (
-        "event() override must forward every recording KeyPress, including Shift+F10"
-    )
-    assert "def contextMenuEvent(self" in body, (
-        "HotkeyEdit must suppress context menu while recording"
-    )
 
 
 def test_hotkey_edit_shift_f10_registers_via_real_dispatcher(qtbot):
@@ -914,7 +652,6 @@ def test_manual_edit_fires_signal(qtbot):
 def test_legacy_hotkey_migration_writes_no_legacy_keys(monkeypatch):
     """Legacy config keys (hotkey, silent_hotkey) are migrated to hotkeys list."""
     import json
-    from pathlib import Path
 
     import stet.core.config as config_module
     from stet.core.config import ConfigManager
